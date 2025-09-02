@@ -19,6 +19,8 @@ From Coq Require Import
   Arith
   Lia.
 
+From Coq Require Import Bool.Bool.
+
 Import ListNotations.
 Open Scope N_scope.
 
@@ -73,14 +75,11 @@ Record LongHeaderInvariant := {
 }.
 
 Definition validate_long_header_invariant (lh : LongHeaderInvariant) : bool :=
-  (* Check header form bit (bit 7) is 1 *)
   let header_form := N.testbit lh.(lhi_first_byte) 7 in
-  (* Check fixed bit (bit 6) is 1 *)
   let fixed_bit := N.testbit lh.(lhi_first_byte) 6 in
-  (* Check CID lengths *)
-  let dcid_valid := andb (N.eqb (length lh.(lhi_dcid)) (N.to_nat lh.(lhi_dcid_len)))
+  let dcid_valid := andb (N.eqb (N.of_nat (length lh.(lhi_dcid))) lh.(lhi_dcid_len))
                           (N.leb lh.(lhi_dcid_len) MAX_CID_LENGTH) in
-  let scid_valid := andb (N.eqb (length lh.(lhi_scid)) (N.to_nat lh.(lhi_scid_len)))
+  let scid_valid := andb (N.eqb (N.of_nat (length lh.(lhi_scid))) lh.(lhi_scid_len))
                           (N.leb lh.(lhi_scid_len) MAX_CID_LENGTH) in
   andb header_form (andb fixed_bit (andb dcid_valid scid_valid)).
 
@@ -94,12 +93,9 @@ Record ShortHeaderInvariant := {
 }.
 
 Definition validate_short_header_invariant (sh : ShortHeaderInvariant) : bool :=
-  (* Check header form bit (bit 7) is 0 *)
   let header_form := negb (N.testbit sh.(shi_first_byte) 7) in
-  (* Check fixed bit (bit 6) is 1 *)
   let fixed_bit := N.testbit sh.(shi_first_byte) 6 in
-  (* DCID length is implicit from connection context *)
-  let dcid_valid := N.leb (length sh.(shi_dcid)) (N.to_nat MAX_CID_LENGTH) in
+  let dcid_valid := N.leb (N.of_nat (length sh.(shi_dcid))) MAX_CID_LENGTH in
   andb header_form (andb fixed_bit dcid_valid).
 
 (* =============================================================================
@@ -117,14 +113,12 @@ Record VersionNegotiationInvariant := {
 }.
 
 Definition validate_version_negotiation (vn : VersionNegotiationInvariant) : bool :=
-  (* Version field must be 0 *)
   let version_zero := N.eqb vn.(vni_version) 0 in
-  (* Header form bit must be 1 *)
   let header_form := N.testbit vn.(vni_first_byte) 7 in
-  (* Fixed bit can be any value for VN *)
-  (* Supported versions must be non-empty and 4-byte aligned *)
-  let versions_valid := andb (negb (null vn.(vni_supported_versions)))
-                              (N.eqb (N.modulo (length vn.(vni_supported_versions)) 4) 0) in
+  let versions_valid := match vn.(vni_supported_versions) with
+                        | [] => false
+                        | _ => N.eqb (N.modulo (N.of_nat (length vn.(vni_supported_versions))) 4) 0
+                        end in
   andb version_zero (andb header_form versions_valid).
 
 (* =============================================================================
@@ -171,7 +165,7 @@ Record ConnectionIDInvariant := {
 }.
 
 Definition validate_cid_invariant (cid : ConnectionIDInvariant) : bool :=
-  andb (N.eqb (length cid.(cid_bytes)) (N.to_nat cid.(cid_length)))
+  andb (N.eqb (N.of_nat (length cid.(cid_bytes))) cid.(cid_length))
        (N.leb cid.(cid_length) MAX_CID_LENGTH).
 
 (* Extract connection IDs from packet *)
@@ -260,9 +254,9 @@ Theorem vn_version_zero : forall vn,
   vn.(vni_version) = 0.
 Proof.
   intros. unfold validate_version_negotiation in H.
-  apply andb_prop in H. destruct H.
-  apply andb_prop in H. destruct H.
-  apply N.eqb_eq in H. exact H.
+  simpl in H.
+  apply andb_prop in H. destruct H as [H0 H1].
+  apply N.eqb_eq. exact H0.
 Qed.
 
 (* Property 4: Grease versions are identifiable *)
@@ -270,7 +264,29 @@ Theorem grease_version_pattern : forall seed,
   is_grease_version (generate_grease_version seed) = true.
 Proof.
   intros. unfold is_grease_version, generate_grease_version.
-  admit.
+  apply N.eqb_eq.
+  rewrite N.land_lor_distr_l.
+  assert (N.land 0x0A0A0A0A 0x0F0F0F0F = 0x0A0A0A0A) by (compute; reflexivity).
+  rewrite H.
+  assert (N.land (N.shiftl (seed mod 15) 28) 0x0F0F0F0F = 0).
+  {
+    apply N.bits_inj. intro n.
+    rewrite N.land_spec, N.bits_0.
+    destruct (N.ltb n 28) eqn:E.
+    - apply N.ltb_lt in E.
+      rewrite N.shiftl_spec_low by exact E.
+      reflexivity.
+    - apply N.ltb_ge in E.
+      assert (N.testbit 0x0F0F0F0F n = false).
+      {
+        apply N.bits_above_log2.
+        assert (N.log2 0x0F0F0F0F < 28) by (compute; reflexivity).
+        lia.
+      }
+      rewrite H0. apply andb_false_r.
+  }
+  rewrite H0, N.lor_0_r.
+  reflexivity.
 Qed.
 
 (* Property 5: Long header is identifiable by first bit *)
@@ -282,8 +298,8 @@ Proof.
   intros. unfold classify_packet_invariant.
   rewrite H.
   destruct (N.eqb version 0) eqn:E.
-  - right. reflexivity.
-  - left. exists version. reflexivity.
+  - exists 0. right. reflexivity.
+  - exists version. left. reflexivity.
 Qed.
 
 (* Property 6: Initial packets meet minimum size *)
@@ -292,7 +308,8 @@ Theorem initial_minimum_size : forall len,
   len >= MIN_INITIAL_PACKET.
 Proof.
   intros. unfold meets_minimum_size in H.
-  apply N.leb_le in H. exact H.
+  apply N.leb_le in H. 
+  apply N.le_ge. exact H.
 Qed.
 
 (* =============================================================================
