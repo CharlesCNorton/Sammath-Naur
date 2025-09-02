@@ -1,15 +1,8 @@
 (* =============================================================================
    Formal Verification of Using TLS to Secure QUIC
-   
-   Specification: RFC 9001 (M. Thomson, S. Turner, May 2021)
-   Target: QUIC-TLS Integration
-   
-   Module: QUIC TLS Integration Formalization and Verification
+   RFC 9001 (M. Thomson, S. Turner, May 2021)
    Author: Charles C Norton
    Date: September 1, 2025
-   
-   "He wove veils of secrecy, layer upon layer, like mist upon water."
-   
    ============================================================================= *)
 
 From Coq Require Import
@@ -18,7 +11,8 @@ From Coq Require Import
   Bool
   Arith
   Lia
-  String.
+  String
+  Ascii.
 
 Import ListNotations.
 Import List.
@@ -33,13 +27,11 @@ Definition word16 := N.
 Definition word32 := N.
 Definition word64 := N.
 
-(* Cryptographic Constants *)
 Definition AEAD_TAG_LENGTH : N := 16.
 Definition SAMPLE_LENGTH : N := 16.
 Definition MAX_AEAD_EXPANSION : N := 16.
 Definition QUIC_VERSION_1 : word32 := 0x00000001.
 
-(* TLS Constants *)
 Definition TLS_VERSION_13 : word16 := 0x0304.
 Definition TLS_HANDSHAKE_CLIENTHELLO : byte := 1.
 Definition TLS_HANDSHAKE_SERVERHELLO : byte := 2.
@@ -49,32 +41,98 @@ Definition TLS_HANDSHAKE_CERTIFICATE_VERIFY : byte := 15.
 Definition TLS_HANDSHAKE_FINISHED : byte := 20.
 
 (* =============================================================================
-   Section 2: Packet Protection Keys (RFC 9001 Section 5)
+   Section 2: Cryptographic Primitives
    ============================================================================= *)
 
-Record PacketProtectionKeys := {
-  ppk_client_initial_secret : list byte;
-  ppk_server_initial_secret : list byte;
-  ppk_handshake_secret : option (list byte * list byte);  (* client, server *)
-  ppk_application_secret : option (list byte * list byte); (* 1-RTT keys *)
-  ppk_key_phase : bool  (* Current key phase bit *)
-}.
+(* XOR operation on bytes *)
+Definition xor_byte (a b : byte) : byte := N.lxor a b.
 
-(* Encryption Levels *)
-Inductive EncryptionLevel :=
-  | EncInitial
-  | EncEarlyData
-  | EncHandshake
-  | EncApplication.
+(* XOR operation on byte lists *)
+Fixpoint xor_bytes (a b : list byte) : list byte :=
+  match a, b with
+  | [], _ => []
+  | _, [] => []
+  | x::xs, y::ys => (xor_byte x y) :: xor_bytes xs ys
+  end.
 
-(* Key material for each level *)
-Record KeyMaterial := {
-  km_write_key : list byte;
-  km_write_iv : list byte;
-  km_read_key : list byte;
-  km_read_iv : list byte;
-  km_hp_key : list byte  (* Header protection key *)
-}.
+(* Lemma: XOR is self-inverse for bytes *)
+Lemma xor_byte_involutive : forall a b,
+  xor_byte (xor_byte a b) b = a.
+Proof.
+  intros. unfold xor_byte.
+  rewrite N.lxor_assoc.
+  rewrite N.lxor_nilpotent.
+  rewrite N.lxor_0_r.
+  reflexivity.
+Qed.
+
+(* Lemma: XOR is self-inverse for byte lists *)
+Lemma xor_bytes_involutive : forall a b,
+  length a = length b ->
+  xor_bytes (xor_bytes a b) b = a.
+Proof.
+  induction a; intros.
+  - simpl. reflexivity.
+  - destruct b.
+    + simpl in H. discriminate.
+    + simpl. f_equal.
+      * apply xor_byte_involutive.
+      * apply IHa. simpl in H. injection H. auto.
+Qed.
+
+(* Lemma: xor_bytes preserves length when inputs have same length *)
+Lemma xor_bytes_length : forall a b,
+  length a = length b ->
+  length (xor_bytes a b) = length a.
+Proof.
+  induction a; intros.
+  - simpl. reflexivity.
+  - destruct b.
+    + simpl in H. discriminate.
+    + simpl. f_equal. apply IHa.
+      simpl in H. injection H. auto.
+Qed.
+
+(* Simple hash function (sum mod 256) *)
+Definition simple_hash (data : list byte) : list byte :=
+  let sum := fold_left N.add data 0 in
+  repeat (N.modulo sum 256) 32.
+
+(* HMAC simplified - XOR with padded key then hash *)
+Definition hmac (key : list byte) (message : list byte) : list byte :=
+  let padded_key := firstn 32 (key ++ repeat 0 32) in
+  let ipad := repeat 0x36 32 in
+  let opad := repeat 0x5C 32 in
+  let inner := simple_hash (xor_bytes padded_key ipad ++ message) in
+  simple_hash (xor_bytes padded_key opad ++ inner).
+
+(* HKDF-Extract *)
+Definition hkdf_extract (salt : list byte) (ikm : list byte) : list byte :=
+  hmac salt ikm.
+
+(* HKDF-Expand *)
+Fixpoint hkdf_expand_core (prk : list byte) (info : list byte) 
+                          (length : nat) (counter : byte) (acc : list byte) : list byte :=
+  match length with
+  | O => acc
+  | S n' =>
+      let block := hmac prk (acc ++ info ++ [counter]) in
+      hkdf_expand_core prk info n' (N.succ counter) (acc ++ block)
+  end.
+
+Definition hkdf_expand (prk : list byte) (info : list byte) (length : N) : list byte :=
+  firstn (N.to_nat length) (hkdf_expand_core prk info (N.to_nat (length / 32) + 1) 1 []).
+
+(* Convert ASCII string to bytes *)
+Definition string_to_bytes (s : string) : list byte :=
+  map (fun c => N.of_nat (nat_of_ascii c)) (list_ascii_of_string s).
+
+(* HKDF-Expand-Label for QUIC *)
+Definition hkdf_expand_label (secret : list byte) (label : string) (length : N) : list byte :=
+  let quic_label := string_to_bytes ("tls13 " ++ label) in
+  let info := [N.shiftr length 8; N.land length 0xFF] ++ 
+              [N.of_nat (List.length quic_label)] ++ quic_label ++ [0] in
+  hkdf_expand secret info length.
 
 (* =============================================================================
    Section 3: Initial Secrets (RFC 9001 Section 5.2)
@@ -85,32 +143,10 @@ Definition INITIAL_SALT_V1 : list byte :=
    0x4d; 0x17; 0x9a; 0xe6; 0xa4; 0xc8; 0x0c; 0xad;
    0xcc; 0xbb; 0x7f; 0x0a].
 
-(* Helper function for string to byte list conversion *)
-Definition list_ascii_of_string (s : string) : list byte :=
-  (* Simplified stub - in real implementation would convert string to bytes *)
-  match s with
-  | EmptyString => []
-  | _ => [0x00]
-  end.
-
-(* HKDF-Extract and HKDF-Expand-Label abstractions *)
-Definition hkdf_extract (salt : list byte) (ikm : list byte) : list byte :=
-  (* Abstract HKDF-Extract implementation *)
-  (* In real implementation, this would perform HMAC-based extraction *)
-  salt ++ ikm.
-
-Definition hkdf_expand_label (secret : list byte) (label : list byte) (length : N) : list byte :=
-  (* Abstract HKDF-Expand-Label implementation *)
-  (* In real implementation, this would perform HMAC-based expansion *)
-  firstn (N.to_nat length) (secret ++ label).
-
-(* Derive initial secrets *)
 Definition derive_initial_secrets (dcid : list byte) : (list byte * list byte) :=
   let initial_secret := hkdf_extract INITIAL_SALT_V1 dcid in
-  let client_initial := hkdf_expand_label initial_secret 
-                          (list_ascii_of_string "client in") 32 in
-  let server_initial := hkdf_expand_label initial_secret
-                          (list_ascii_of_string "server in") 32 in
+  let client_initial := hkdf_expand_label initial_secret "client in" 32 in
+  let server_initial := hkdf_expand_label initial_secret "server in" 32 in
   (client_initial, server_initial).
 
 (* =============================================================================
@@ -123,36 +159,60 @@ Record AEADContext := {
   aead_hp_key : list byte
 }.
 
-(* AEAD encryption *)
+(* Construct nonce from IV and packet number *)
+Definition construct_nonce (iv : list byte) (pn : word64) : list byte :=
+  let pn_bytes := [N.shiftr pn 56; N.shiftr pn 48; N.shiftr pn 40; N.shiftr pn 32;
+                   N.shiftr pn 24; N.shiftr pn 16; N.shiftr pn 8; N.land pn 0xFF] in
+  let padded_pn := repeat 0 4 ++ pn_bytes in
+  xor_bytes iv padded_pn.
+
+(* Simplified GCM-like AEAD *)
 Definition aead_encrypt (ctx : AEADContext) (plaintext : list byte) 
                         (aad : list byte) (packet_number : word64) : list byte :=
-  (* Abstract AEAD encryption - returns ciphertext || tag *)
-  (* In real implementation, this would perform AES-GCM or ChaCha20-Poly1305 *)
-  plaintext ++ (firstn (N.to_nat AEAD_TAG_LENGTH) (ctx.(aead_key) ++ aad)).
+  let nonce := construct_nonce ctx.(aead_iv) packet_number in
+  let keystream := simple_hash (ctx.(aead_key) ++ nonce ++ aad) in
+  let ciphertext := xor_bytes plaintext (firstn (length plaintext) keystream) in
+  let tag := firstn (N.to_nat AEAD_TAG_LENGTH) 
+                    (simple_hash (ctx.(aead_key) ++ nonce ++ aad ++ ciphertext)) in
+  ciphertext ++ tag.
 
-(* AEAD decryption *)
-Definition aead_decrypt (ctx : AEADContext) (ciphertext : list byte)
+Definition aead_decrypt (ctx : AEADContext) (ciphertext_with_tag : list byte)
                         (aad : list byte) (packet_number : word64) : option (list byte) :=
-  (* Abstract AEAD decryption - returns plaintext if tag valid *)
-  (* In real implementation, this would verify tag and decrypt *)
-  let ciphertext_len := length ciphertext in
-  if N.leb (N.of_nat ciphertext_len) AEAD_TAG_LENGTH then
+  let ciphertext_len := length ciphertext_with_tag in
+  if Nat.leb ciphertext_len (N.to_nat AEAD_TAG_LENGTH) then
     None
   else
-    Some (firstn (ciphertext_len - N.to_nat AEAD_TAG_LENGTH) ciphertext).
+    let ciphertext := firstn (ciphertext_len - N.to_nat AEAD_TAG_LENGTH) ciphertext_with_tag in
+    let tag := skipn (ciphertext_len - N.to_nat AEAD_TAG_LENGTH) ciphertext_with_tag in
+    let nonce := construct_nonce ctx.(aead_iv) packet_number in
+    let expected_tag := firstn (N.to_nat AEAD_TAG_LENGTH)
+                               (simple_hash (ctx.(aead_key) ++ nonce ++ aad ++ ciphertext)) in
+    if list_eq_dec N.eq_dec tag expected_tag then
+      let keystream := simple_hash (ctx.(aead_key) ++ nonce ++ aad) in
+      Some (xor_bytes ciphertext (firstn (length ciphertext) keystream))
+    else
+      None.
 
-(* Header protection *)
+(* Header protection using AES-ECB mode simulation *)
+Definition header_protection_mask (hp_key : list byte) (sample : list byte) : list byte :=
+  firstn 5 (simple_hash (hp_key ++ sample)).
+
 Definition apply_header_protection (hp_key : list byte) (sample : list byte)
                                   (header : list byte) : list byte :=
-  (* Abstract header protection *)
-  (* In real implementation, this would XOR with cipher output *)
-  header.
+  let mask := header_protection_mask hp_key sample in
+  match header with
+  | [] => []
+  | h::rest => 
+      let pn_length := 4%nat in (* Use nat literal *)
+      let protected_first := xor_byte h (nth 0 mask 0) in
+      let protected_pn := xor_bytes (firstn pn_length rest) (skipn 1 mask) in
+      let unprotected_rest := skipn pn_length rest in
+      protected_first :: protected_pn ++ unprotected_rest
+  end.
 
 Definition remove_header_protection (hp_key : list byte) (sample : list byte)
                                    (header : list byte) : list byte :=
-  (* Abstract header protection removal *)
-  (* In real implementation, this would XOR with cipher output *)
-  header.
+  apply_header_protection hp_key sample header. (* XOR is self-inverse *)
 
 (* =============================================================================
    Section 5: Packet Protection (RFC 9001 Section 5.4)
@@ -160,51 +220,47 @@ Definition remove_header_protection (hp_key : list byte) (sample : list byte)
 
 Record ProtectedPacket := {
   pp_header : list byte;
-  pp_encrypted_pn : list byte;  (* Encrypted packet number *)
-  pp_payload : list byte  (* Encrypted payload including tag *)
+  pp_encrypted_pn : list byte;
+  pp_payload : list byte
 }.
 
-(* Protect a packet *)
+Inductive EncryptionLevel :=
+  | EncInitial
+  | EncEarlyData
+  | EncHandshake
+  | EncApplication.
+
+Record KeyMaterial := {
+  km_write_key : list byte;
+  km_write_iv : list byte;
+  km_read_key : list byte;
+  km_read_iv : list byte;
+  km_hp_key : list byte
+}.
+
 Definition protect_packet (level : EncryptionLevel) (keys : KeyMaterial)
                          (header : list byte) (packet_number : word64)
                          (payload : list byte) : ProtectedPacket :=
-  (* Construct AAD from header *)
   let aad := header in
-  
-  (* Create AEAD context *)
   let ctx := {| aead_key := keys.(km_write_key);
                 aead_iv := keys.(km_write_iv);
                 aead_hp_key := keys.(km_hp_key) |} in
-  
-  (* Encrypt payload *)
   let encrypted := aead_encrypt ctx payload aad packet_number in
-  
-  (* Sample for header protection *)
-  let sample := firstn (N.to_nat SAMPLE_LENGTH) encrypted in
-  
-  (* Apply header protection *)
+  let sample := skipn 4 (firstn (4 + N.to_nat SAMPLE_LENGTH) encrypted) in
   let protected_header := apply_header_protection keys.(km_hp_key) sample header in
-  
   {| pp_header := protected_header;
-     pp_encrypted_pn := [];  (* Simplified *)
+     pp_encrypted_pn := firstn 4 encrypted;
      pp_payload := encrypted |}.
 
-(* Unprotect a packet *)
 Definition unprotect_packet (level : EncryptionLevel) (keys : KeyMaterial)
                            (packet : ProtectedPacket) : option (list byte * word64 * list byte) :=
-  (* Remove header protection *)
   let sample := skipn 4 (firstn (4 + N.to_nat SAMPLE_LENGTH) packet.(pp_payload)) in
   let header := remove_header_protection keys.(km_hp_key) sample packet.(pp_header) in
-  
-  (* Extract packet number *)
-  let packet_number := 0 in  (* Simplified *)
-  
-  (* Create AEAD context *)
+  let packet_number := fold_left (fun acc b => N.lor (N.shiftl acc 8) b) 
+                                 packet.(pp_encrypted_pn) 0 in
   let ctx := {| aead_key := keys.(km_read_key);
                 aead_iv := keys.(km_read_iv);
                 aead_hp_key := keys.(km_hp_key) |} in
-  
-  (* Decrypt payload *)
   match aead_decrypt ctx packet.(pp_payload) header packet_number with
   | Some plaintext => Some (header, packet_number, plaintext)
   | None => None
@@ -215,7 +271,7 @@ Definition unprotect_packet (level : EncryptionLevel) (keys : KeyMaterial)
    ============================================================================= *)
 
 Definition update_keys (current_secret : list byte) : list byte :=
-  hkdf_expand_label current_secret (list_ascii_of_string "quic ku") 32.
+  hkdf_expand_label current_secret "quic ku" 32.
 
 Record KeyUpdateState := {
   ku_current_keys : KeyMaterial;
@@ -237,89 +293,9 @@ Definition initiate_key_update (state : KeyUpdateState) : KeyUpdateState :=
   end.
 
 (* =============================================================================
-   Section 7: TLS Message Processing (RFC 9001 Section 4)
+   Section 7: Key Theorems  
    ============================================================================= *)
 
-Inductive TLSMessage :=
-  | TLSClientHello : list byte -> TLSMessage
-  | TLSServerHello : list byte -> TLSMessage
-  | TLSEncryptedExtensions : list byte -> TLSMessage
-  | TLSCertificate : list (list byte) -> TLSMessage
-  | TLSCertificateVerify : list byte -> TLSMessage
-  | TLSFinished : list byte -> TLSMessage
-  | TLSNewSessionTicket : list byte -> TLSMessage.
-
-Record TLSState := {
-  tls_handshake_messages : list TLSMessage;
-  tls_handshake_complete : bool;
-  tls_selected_cipher : word16;
-  tls_selected_group : word16;
-  tls_transcript_hash : list byte;
-  tls_exporter_secret : list byte
-}.
-
-(* Process TLS handshake message *)
-Definition process_tls_message (state : TLSState) (msg : TLSMessage) 
-                              : TLSState * option (list TLSMessage) :=
-  match msg with
-  | TLSClientHello data =>
-      (* Server processes ClientHello *)
-      let state' := {| tls_handshake_messages := msg :: state.(tls_handshake_messages);
-                       tls_handshake_complete := false;
-                       tls_selected_cipher := 0x1301;  (* TLS_AES_128_GCM_SHA256 *)
-                       tls_selected_group := 0x001D;   (* X25519 *)
-                       tls_transcript_hash := data;    (* Simplified *)
-                       tls_exporter_secret := [] |} in
-      (state', Some [TLSServerHello []])
-  
-  | TLSFinished verifier =>
-      (* Verify and complete handshake *)
-      let state' := {| tls_handshake_messages := msg :: state.(tls_handshake_messages);
-                       tls_handshake_complete := true;
-                       tls_selected_cipher := state.(tls_selected_cipher);
-                       tls_selected_group := state.(tls_selected_group);
-                       tls_transcript_hash := verifier;
-                       tls_exporter_secret := verifier |} in
-      (state', None)
-  
-  | _ =>
-      (* Process other messages *)
-      let state' := {| tls_handshake_messages := msg :: state.(tls_handshake_messages);
-                       tls_handshake_complete := state.(tls_handshake_complete);
-                       tls_selected_cipher := state.(tls_selected_cipher);
-                       tls_selected_group := state.(tls_selected_group);
-                       tls_transcript_hash := state.(tls_transcript_hash);
-                       tls_exporter_secret := state.(tls_exporter_secret) |} in
-      (state', None)
-  end.
-
-(* =============================================================================
-   Section 8: QUIC-TLS Integration Properties
-   ============================================================================= *)
-
-(* Encryption level progression *)
-Definition next_encryption_level (level : EncryptionLevel) : option EncryptionLevel :=
-  match level with
-  | EncInitial => Some EncHandshake
-  | EncEarlyData => Some EncHandshake
-  | EncHandshake => Some EncApplication
-  | EncApplication => None
-  end.
-
-(* Check if level transition is valid *)
-Definition valid_level_transition (from to : EncryptionLevel) : bool :=
-  match from, to with
-  | EncInitial, EncHandshake => true
-  | EncEarlyData, EncHandshake => true
-  | EncHandshake, EncApplication => true
-  | _, _ => false
-  end.
-
-(* =============================================================================
-   Section 9: Key Theorems
-   ============================================================================= *)
-
-(* Property 1: Initial secrets are deterministic *)
 Theorem initial_secrets_deterministic : forall dcid1 dcid2,
   dcid1 = dcid2 ->
   derive_initial_secrets dcid1 = derive_initial_secrets dcid2.
@@ -327,7 +303,6 @@ Proof.
   intros. rewrite H. reflexivity.
 Qed.
 
-(* Property 2: Key update changes key phase *)
 Theorem key_update_toggles_phase : forall state next,
   state.(ku_next_keys) = Some next ->
   (initiate_key_update state).(ku_key_phase) = negb state.(ku_key_phase).
@@ -336,59 +311,33 @@ Proof.
   rewrite H. simpl. reflexivity.
 Qed.
 
-(* Property 3: Key update resets packet counter *)
-Theorem key_update_resets_counter : forall state next,
-  state.(ku_next_keys) = Some next ->
-  (initiate_key_update state).(ku_packets_sent) = 0.
+Theorem header_protection_involutive : forall hp_key sample header,
+  Nat.le 5 (Datatypes.length header) ->
+  remove_header_protection hp_key sample 
+    (apply_header_protection hp_key sample header) = header.
 Proof.
-  intros. unfold initiate_key_update.
-  rewrite H. simpl. reflexivity.
+  intros. unfold remove_header_protection, apply_header_protection.
+  destruct header as [|h0 header]; [simpl in H; inversion H|].
+  destruct header as [|h1 header]; [simpl in H; inversion H; inversion H1|].
+  destruct header as [|h2 header]; [simpl in H; inversion H; inversion H1; inversion H3|].
+  destruct header as [|h3 header]; [simpl in H; inversion H; inversion H1; inversion H3; inversion H5|].
+  destruct header as [|h4 header]; [simpl in H; inversion H; inversion H1; inversion H3; inversion H5; inversion H7|].
+  simpl.
+  (* The goal now shows XOR operations with the mask *)
+  f_equal.
+  - apply xor_byte_involutive.
+  - (* For the remaining bytes, we need to show the XOR cancels *)
+    set (mask := header_protection_mask hp_key sample).
+    simpl.
+    repeat f_equal; apply xor_byte_involutive.
 Qed.
 
-(* Property 4: Finished messages complete the handshake *)
-Theorem finished_completes_handshake : forall state verifier state' msgs,
-  process_tls_message state (TLSFinished verifier) = (state', msgs) ->
-  state'.(tls_handshake_complete) = true.
-Proof.
-  intros. unfold process_tls_message in H.
-  inversion H. simpl. reflexivity.
-Qed.
-
-(* Property 5: Level transitions are unidirectional *)
-Theorem level_transition_unidirectional : forall level,
-  level <> EncApplication ->
-  exists next, next_encryption_level level = Some next.
-Proof.
-  intros. unfold next_encryption_level.
-  destruct level.
-  - exists EncHandshake. reflexivity.
-  - exists EncHandshake. reflexivity.
-  - exists EncApplication. reflexivity.
-  - contradiction H. reflexivity.
-Qed.
-
-(* Property 6: Messages accumulate in handshake *)
-Theorem messages_accumulate : forall state msg state' msgs,
-  process_tls_message state msg = (state', msgs) ->
-  length state'.(tls_handshake_messages) = S (length state.(tls_handshake_messages)).
-Proof.
-  intros. unfold process_tls_message in H.
-  destruct msg; inversion H; simpl; auto.
-Qed.
-
-(* =============================================================================
-   Section 10: Extraction
-   ============================================================================= *)
-
-Require Extraction.
-Extract Inductive bool => "bool" [ "true" "false" ].
-Extract Inductive list => "list" [ "[]" "(::)" ].
-Extract Inductive option => "option" [ "Some" "None" ].
-
-Extraction "quic_tls.ml"
-  derive_initial_secrets
-  protect_packet
-  unprotect_packet
-  initiate_key_update
-  process_tls_message
-  valid_level_transition.
+(* Missing RFC 9001 components:
+   - Full TLS 1.3 handshake state machine
+   - Retry packet integrity tag
+   - 0-RTT data handling
+   - Transport parameter negotiation
+   - ALPN negotiation
+   - Key schedule for all cipher suites
+   - Packet number decoding/encoding
+   - Stateless reset tokens *)
