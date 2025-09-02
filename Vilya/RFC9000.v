@@ -77,7 +77,9 @@ Record ConnectionID := {
 
 Definition zero_cid : ConnectionID.
   refine {| cid_len := 0; cid_bytes := []; cid_valid := _ |}.
-  split; reflexivity.
+  split.
+  - reflexivity.
+  - apply N.le_0_l.
 Defined.
 
 (* =============================================================================
@@ -401,8 +403,8 @@ Theorem flow_control_respected : forall conn data_len,
   conn.(conn_data_sent) + data_len > conn.(conn_max_data).
 Proof.
   intros. unfold check_flow_control in H.
-  apply N.leb_gt. apply Bool.not_true_is_false. intro.
-  rewrite H0 in H. discriminate.
+  apply N.leb_gt in H. 
+  apply N.lt_gt. exact H.
 Qed.
 
 (* Property 4: Congestion window positive *)
@@ -410,7 +412,10 @@ Theorem cwnd_positive : forall conn acked,
   conn.(conn_cwnd) > 0 ->
   (update_congestion_window conn acked).(conn_cwnd) > 0.
 Proof.
-  admit.
+  intros. unfold update_congestion_window. simpl.
+  destruct (N.ltb (conn_bytes_in_flight conn) (conn_cwnd conn / 2)) eqn:E.
+  - apply N.lt_gt. apply N.add_pos_l. apply N.gt_lt. exact H.
+  - apply N.lt_gt. apply N.add_pos_l. apply N.gt_lt. exact H.
 Qed.
 
 (* Property 5: Connection ID length bounded *)
