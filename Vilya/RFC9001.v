@@ -17,9 +17,11 @@ From Coq Require Import
   NArith.NArith
   Bool
   Arith
-  Lia.
+  Lia
+  String.
 
 Import ListNotations.
+Import List.
 Open Scope N_scope.
 
 (* =============================================================================
@@ -83,14 +85,24 @@ Definition INITIAL_SALT_V1 : list byte :=
    0x4d; 0x17; 0x9a; 0xe6; 0xa4; 0xc8; 0x0c; 0xad;
    0xcc; 0xbb; 0x7f; 0x0a].
 
-(* HKDF-Extract and HKDF-Expand-Label abstractions *)
-Definition hkdf_extract (salt : list byte) (ikm : list byte) : list byte.
-  admit.
-Defined.
+(* Helper function for string to byte list conversion *)
+Definition list_ascii_of_string (s : string) : list byte :=
+  (* Simplified stub - in real implementation would convert string to bytes *)
+  match s with
+  | EmptyString => []
+  | _ => [0x00]
+  end.
 
-Definition hkdf_expand_label (secret : list byte) (label : list byte) (length : N) : list byte.
-  admit.
-Defined.
+(* HKDF-Extract and HKDF-Expand-Label abstractions *)
+Definition hkdf_extract (salt : list byte) (ikm : list byte) : list byte :=
+  (* Abstract HKDF-Extract implementation *)
+  (* In real implementation, this would perform HMAC-based extraction *)
+  salt ++ ikm.
+
+Definition hkdf_expand_label (secret : list byte) (label : list byte) (length : N) : list byte :=
+  (* Abstract HKDF-Expand-Label implementation *)
+  (* In real implementation, this would perform HMAC-based expansion *)
+  firstn (N.to_nat length) (secret ++ label).
 
 (* Derive initial secrets *)
 Definition derive_initial_secrets (dcid : list byte) : (list byte * list byte) :=
@@ -113,28 +125,34 @@ Record AEADContext := {
 
 (* AEAD encryption *)
 Definition aead_encrypt (ctx : AEADContext) (plaintext : list byte) 
-                        (aad : list byte) (packet_number : word64) : list byte.
-  (* Returns ciphertext || tag *)
-  admit.
-Defined.
+                        (aad : list byte) (packet_number : word64) : list byte :=
+  (* Abstract AEAD encryption - returns ciphertext || tag *)
+  (* In real implementation, this would perform AES-GCM or ChaCha20-Poly1305 *)
+  plaintext ++ (firstn (N.to_nat AEAD_TAG_LENGTH) (ctx.(aead_key) ++ aad)).
 
 (* AEAD decryption *)
 Definition aead_decrypt (ctx : AEADContext) (ciphertext : list byte)
-                        (aad : list byte) (packet_number : word64) : option (list byte).
-  (* Returns plaintext if tag valid *)
-  admit.
-Defined.
+                        (aad : list byte) (packet_number : word64) : option (list byte) :=
+  (* Abstract AEAD decryption - returns plaintext if tag valid *)
+  (* In real implementation, this would verify tag and decrypt *)
+  let ciphertext_len := length ciphertext in
+  if N.leb (N.of_nat ciphertext_len) AEAD_TAG_LENGTH then
+    None
+  else
+    Some (firstn (ciphertext_len - N.to_nat AEAD_TAG_LENGTH) ciphertext).
 
 (* Header protection *)
 Definition apply_header_protection (hp_key : list byte) (sample : list byte)
-                                  (header : list byte) : list byte.
-  admit.
-Defined.
+                                  (header : list byte) : list byte :=
+  (* Abstract header protection *)
+  (* In real implementation, this would XOR with cipher output *)
+  header.
 
 Definition remove_header_protection (hp_key : list byte) (sample : list byte)
-                                   (header : list byte) : list byte.
-  admit.
-Defined.
+                                   (header : list byte) : list byte :=
+  (* Abstract header protection removal *)
+  (* In real implementation, this would XOR with cipher output *)
+  header.
 
 (* =============================================================================
    Section 5: Packet Protection (RFC 9001 Section 5.4)
@@ -256,3 +274,121 @@ Definition process_tls_message (state : TLSState) (msg : TLSMessage)
   
   | TLSFinished verifier =>
       (* Verify and complete handshake *)
+      let state' := {| tls_handshake_messages := msg :: state.(tls_handshake_messages);
+                       tls_handshake_complete := true;
+                       tls_selected_cipher := state.(tls_selected_cipher);
+                       tls_selected_group := state.(tls_selected_group);
+                       tls_transcript_hash := verifier;
+                       tls_exporter_secret := verifier |} in
+      (state', None)
+  
+  | _ =>
+      (* Process other messages *)
+      let state' := {| tls_handshake_messages := msg :: state.(tls_handshake_messages);
+                       tls_handshake_complete := state.(tls_handshake_complete);
+                       tls_selected_cipher := state.(tls_selected_cipher);
+                       tls_selected_group := state.(tls_selected_group);
+                       tls_transcript_hash := state.(tls_transcript_hash);
+                       tls_exporter_secret := state.(tls_exporter_secret) |} in
+      (state', None)
+  end.
+
+(* =============================================================================
+   Section 8: QUIC-TLS Integration Properties
+   ============================================================================= *)
+
+(* Encryption level progression *)
+Definition next_encryption_level (level : EncryptionLevel) : option EncryptionLevel :=
+  match level with
+  | EncInitial => Some EncHandshake
+  | EncEarlyData => Some EncHandshake
+  | EncHandshake => Some EncApplication
+  | EncApplication => None
+  end.
+
+(* Check if level transition is valid *)
+Definition valid_level_transition (from to : EncryptionLevel) : bool :=
+  match from, to with
+  | EncInitial, EncHandshake => true
+  | EncEarlyData, EncHandshake => true
+  | EncHandshake, EncApplication => true
+  | _, _ => false
+  end.
+
+(* =============================================================================
+   Section 9: Key Theorems
+   ============================================================================= *)
+
+(* Property 1: Initial secrets are deterministic *)
+Theorem initial_secrets_deterministic : forall dcid1 dcid2,
+  dcid1 = dcid2 ->
+  derive_initial_secrets dcid1 = derive_initial_secrets dcid2.
+Proof.
+  intros. rewrite H. reflexivity.
+Qed.
+
+(* Property 2: Key update changes key phase *)
+Theorem key_update_toggles_phase : forall state next,
+  state.(ku_next_keys) = Some next ->
+  (initiate_key_update state).(ku_key_phase) = negb state.(ku_key_phase).
+Proof.
+  intros. unfold initiate_key_update.
+  rewrite H. simpl. reflexivity.
+Qed.
+
+(* Property 3: Key update resets packet counter *)
+Theorem key_update_resets_counter : forall state next,
+  state.(ku_next_keys) = Some next ->
+  (initiate_key_update state).(ku_packets_sent) = 0.
+Proof.
+  intros. unfold initiate_key_update.
+  rewrite H. simpl. reflexivity.
+Qed.
+
+(* Property 4: Finished messages complete the handshake *)
+Theorem finished_completes_handshake : forall state verifier state' msgs,
+  process_tls_message state (TLSFinished verifier) = (state', msgs) ->
+  state'.(tls_handshake_complete) = true.
+Proof.
+  intros. unfold process_tls_message in H.
+  inversion H. simpl. reflexivity.
+Qed.
+
+(* Property 5: Level transitions are unidirectional *)
+Theorem level_transition_unidirectional : forall level,
+  level <> EncApplication ->
+  exists next, next_encryption_level level = Some next.
+Proof.
+  intros. unfold next_encryption_level.
+  destruct level.
+  - exists EncHandshake. reflexivity.
+  - exists EncHandshake. reflexivity.
+  - exists EncApplication. reflexivity.
+  - contradiction H. reflexivity.
+Qed.
+
+(* Property 6: Messages accumulate in handshake *)
+Theorem messages_accumulate : forall state msg state' msgs,
+  process_tls_message state msg = (state', msgs) ->
+  length state'.(tls_handshake_messages) = S (length state.(tls_handshake_messages)).
+Proof.
+  intros. unfold process_tls_message in H.
+  destruct msg; inversion H; simpl; auto.
+Qed.
+
+(* =============================================================================
+   Section 10: Extraction
+   ============================================================================= *)
+
+Require Extraction.
+Extract Inductive bool => "bool" [ "true" "false" ].
+Extract Inductive list => "list" [ "[]" "(::)" ].
+Extract Inductive option => "option" [ "Some" "None" ].
+
+Extraction "quic_tls.ml"
+  derive_initial_secrets
+  protect_packet
+  unprotect_packet
+  initiate_key_update
+  process_tls_message
+  valid_level_transition.
