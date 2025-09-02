@@ -1,15 +1,8 @@
 (* =============================================================================
    Formal Verification of QUIC Loss Detection and Congestion Control
-   
-   Specification: RFC 9002 (J. Iyengar, I. Swett, May 2021)
-   Target: QUIC Loss Detection and Congestion Control
-   
-   Module: QUIC Loss Detection and Congestion Control Formalization
+   RFC 9002 (J. Iyengar, I. Swett, May 2021)
    Author: Charles C Norton
    Date: September 1, 2025
-   
-   "Every failure he taught them to perceive, and to mend ere the marring grew great."
-   
    ============================================================================= *)
 
 From Coq Require Import
@@ -34,22 +27,22 @@ Definition word64 := N.
 (* Timer Granularity *)
 Definition kGranularity : N := 1.  (* 1ms *)
 
-(* Initial RTT Constants *)
+(* Initial RTT *)
 Definition kInitialRtt : N := 333.  (* 333ms *)
 
-(* Loss Detection Constants *)
+(* Loss Detection *)
 Definition kPacketThreshold : N := 3.
 Definition kTimeThreshold : N := 9.  (* 9/8 *)
 Definition kMicroSecond : N := 1.
 Definition kMilliSecond : N := 1000.
 
-(* Congestion Control Constants *)
+(* Congestion Control *)
 Definition kMaxDatagramSize : N := 1200.
 Definition kInitialWindow : N := 10 * kMaxDatagramSize.
 Definition kMinimumWindow : N := 2 * kMaxDatagramSize.
 Definition kLossReductionFactor : N := 2.
 
-(* PTO Constants *)
+(* PTO *)
 Definition kPtoGranularity : N := 1.  (* 1ms *)
 Definition kMaxPtoBackoff : N := 6.
 
@@ -82,7 +75,7 @@ Record SentPacket := {
    ============================================================================= *)
 
 Record LossDetectionState := {
-  (* Per-packet-number-space state *)
+  (* Per-space state (simplified to single space) *)
   ld_sent_packets : list SentPacket;
   ld_largest_acked : option word64;
   ld_latest_rtt : N;
@@ -102,7 +95,6 @@ Record LossDetectionState := {
   ld_ecn_ect1_count : N
 }.
 
-(* Initialize loss detection *)
 Definition init_loss_detection : LossDetectionState :=
   {| ld_sent_packets := [];
      ld_largest_acked := None;
@@ -128,7 +120,6 @@ Definition update_rtt (ld : LossDetectionState) (latest_rtt : N)
                  then latest_rtt
                  else N.min ld.(ld_min_rtt) latest_rtt in
   
-  (* Adjust for ack delay if not handshake *)
   let adjusted_rtt := if N.ltb ack_delay latest_rtt
                       then latest_rtt - ack_delay
                       else latest_rtt in
@@ -149,7 +140,7 @@ Definition update_rtt (ld : LossDetectionState) (latest_rtt : N)
        ld_ecn_ect0_count := ld.(ld_ecn_ect0_count);
        ld_ecn_ect1_count := ld.(ld_ecn_ect1_count) |}
   else
-    (* Subsequent RTT samples *)
+    (* Subsequent samples: EWMA update *)
     let rtt_diff := if N.ltb ld.(ld_smoothed_rtt) adjusted_rtt
                     then adjusted_rtt - ld.(ld_smoothed_rtt)
                     else ld.(ld_smoothed_rtt) - adjusted_rtt in
@@ -174,7 +165,6 @@ Definition update_rtt (ld : LossDetectionState) (latest_rtt : N)
    Section 6: Loss Detection (RFC 9002 Section 6)
    ============================================================================= *)
 
-(* Determine which packets are lost *)
 Definition detect_lost_packets (ld : LossDetectionState) (now : N) 
                               : list SentPacket * LossDetectionState :=
   match ld.(ld_largest_acked) with
@@ -210,14 +200,13 @@ Definition detect_lost_packets (ld : LossDetectionState) (now : N)
   end.
 
 (* =============================================================================
-   Section 7: Probe Timeout (PTO) Calculation (RFC 9002 Section 6.2)
+   Section 7: Probe Timeout (RFC 9002 Section 6.2)
    ============================================================================= *)
 
 Definition compute_pto (ld : LossDetectionState) : N :=
   let pto := ld.(ld_smoothed_rtt) + N.max ld.(ld_rttvar) (4 * kGranularity) in
   pto * (N.shiftl 1 (N.min ld.(ld_pto_count) kMaxPtoBackoff)).
 
-(* Set PTO timer *)
 Definition set_pto_timer (ld : LossDetectionState) (now : N) : option N :=
   if existsb (fun pkt => pkt.(ack_eliciting)) ld.(ld_sent_packets) then
     Some (now + compute_pto ld)
@@ -235,7 +224,7 @@ Record CongestionControl := {
   cc_ssthresh : N;
   cc_ecn_ce_counter : N;
   
-  (* Pacing *)
+  (* Pacing (placeholder) *)
   cc_pacing_rate : N;
   
   (* Statistics *)
@@ -244,7 +233,6 @@ Record CongestionControl := {
   cc_bytes_lost : N
 }.
 
-(* Initialize congestion control *)
 Definition init_congestion_control : CongestionControl :=
   {| cc_bytes_in_flight := 0;
      cc_congestion_window := kInitialWindow;
@@ -260,7 +248,6 @@ Definition init_congestion_control : CongestionControl :=
    Section 9: Congestion Control Algorithms (RFC 9002 Section 7.3)
    ============================================================================= *)
 
-(* On packet sent *)
 Definition on_packet_sent (cc : CongestionControl) (sent_bytes : N) : CongestionControl :=
   {| cc_bytes_in_flight := cc.(cc_bytes_in_flight) + sent_bytes;
      cc_congestion_window := cc.(cc_congestion_window);
@@ -272,7 +259,6 @@ Definition on_packet_sent (cc : CongestionControl) (sent_bytes : N) : Congestion
      cc_bytes_acked := cc.(cc_bytes_acked);
      cc_bytes_lost := cc.(cc_bytes_lost) |}.
 
-(* On packet acknowledged *)
 Definition on_packet_acked (cc : CongestionControl) (acked_bytes : N) 
                           (time_sent : N) (now : N) : CongestionControl :=
   let cc' := {| cc_bytes_in_flight := 
@@ -288,11 +274,10 @@ Definition on_packet_acked (cc : CongestionControl) (acked_bytes : N)
                 cc_bytes_acked := cc.(cc_bytes_acked) + acked_bytes;
                 cc_bytes_lost := cc.(cc_bytes_lost) |} in
   
-  (* Check if in recovery *)
   match cc'.(cc_congestion_recovery_start_time) with
   | Some recovery_start =>
       if N.leb time_sent recovery_start then
-        cc'  (* In recovery, don't increase window *)
+        cc'  (* In recovery, no window increase *)
       else
         (* Congestion avoidance *)
         {| cc_bytes_in_flight := cc'.(cc_bytes_in_flight);
@@ -307,8 +292,8 @@ Definition on_packet_acked (cc : CongestionControl) (acked_bytes : N)
            cc_bytes_acked := cc'.(cc_bytes_acked);
            cc_bytes_lost := cc'.(cc_bytes_lost) |}
   | None =>
-      (* Slow start *)
       if N.ltb cc'.(cc_congestion_window) cc'.(cc_ssthresh) then
+        (* Slow start *)
         {| cc_bytes_in_flight := cc'.(cc_bytes_in_flight);
            cc_congestion_window := cc'.(cc_congestion_window) + acked_bytes;
            cc_congestion_recovery_start_time := cc'.(cc_congestion_recovery_start_time);
@@ -333,7 +318,6 @@ Definition on_packet_acked (cc : CongestionControl) (acked_bytes : N)
            cc_bytes_lost := cc'.(cc_bytes_lost) |}
   end.
 
-(* On congestion event (loss or ECN) *)
 Definition on_congestion_event (cc : CongestionControl) (now : N) : CongestionControl :=
   match cc.(cc_congestion_recovery_start_time) with
   | Some recovery_start =>
@@ -393,16 +377,93 @@ Definition process_ecn (ld : LossDetectionState) (cc : CongestionControl)
    Section 11: Key Properties
    ============================================================================= *)
 
-(* Property 1: RTT is always positive after first sample *)
+(* Property 1: RTT remains positive after first sample *)
 Theorem rtt_positive : forall ld latest_rtt ack_delay now,
   latest_rtt > 0 ->
+  ld.(ld_smoothed_rtt) > 0 \/ ld.(ld_first_rtt_sample) = 0 ->
   (update_rtt ld latest_rtt ack_delay now).(ld_smoothed_rtt) > 0.
 Proof.
-  admit.
+  intros ld latest_rtt ack_delay now H H0.
+  unfold update_rtt. simpl.
+  destruct (N.eqb (ld_first_rtt_sample ld) 0) eqn:E.
+  - (* First RTT sample *)
+    simpl. destruct (N.ltb ack_delay latest_rtt) eqn:E2.
+    + (* ack_delay < latest_rtt *)
+      apply N.ltb_lt in E2. 
+      assert (latest_rtt - ack_delay > 0) by lia.
+      exact H1.
+    + (* ack_delay >= latest_rtt *)
+      exact H.
+  - (* Not first RTT sample *)
+    simpl.
+    destruct H0.
+    + (* ld_smoothed_rtt > 0 *)
+      assert (adjusted_pos: (if ack_delay <? latest_rtt 
+                             then latest_rtt - ack_delay 
+                             else latest_rtt) >= 1).
+      {
+        destruct (ack_delay <? latest_rtt) eqn:E2.
+        - apply N.ltb_lt in E2. lia.
+        - lia.
+      }
+      
+      assert (numerator_ge_8: 7 * ld_smoothed_rtt ld + 
+                              (if ack_delay <? latest_rtt 
+                               then latest_rtt - ack_delay 
+                               else latest_rtt) >= 8).
+      {
+        assert (ld_smoothed_rtt ld >= 1) by lia.
+        lia.
+      }
+      
+      assert (result_pos: (7 * ld_smoothed_rtt ld + 
+                          (if ack_delay <? latest_rtt 
+                           then latest_rtt - ack_delay 
+                           else latest_rtt)) / 8 > 0).
+      {
+        set (n := 7 * ld_smoothed_rtt ld + 
+                 (if ack_delay <? latest_rtt 
+                  then latest_rtt - ack_delay 
+                  else latest_rtt)).
+        
+        destruct (N.eq_dec (n / 8) 0).
+        - assert (n < 8).
+          { 
+            rewrite <- N.div_small_iff; [exact e | lia].
+          }
+          unfold n in H1. 
+          assert (n >= 8) by (unfold n; exact numerator_ge_8).
+          lia.
+        - assert (H1: n / 8 >= 1).
+          {
+            destruct (n / 8) eqn:Eq.
+            - contradiction n0; reflexivity.
+            - lia.
+          }
+          unfold n in H1.
+          assert (H2: (7 * ld_smoothed_rtt ld + 
+                      (if ack_delay <? latest_rtt 
+                       then latest_rtt - ack_delay 
+                       else latest_rtt)) / 8 >= 1) by exact H1.
+          assert (H3: 0 < 1) by lia.
+          assert (H4: 0 < (7 * ld_smoothed_rtt ld + 
+                          (if ack_delay <? latest_rtt 
+                           then latest_rtt - ack_delay 
+                           else latest_rtt)) / 8).
+          { 
+            apply N.lt_le_trans with (m := 1).
+            - exact H3.
+            - apply N.ge_le. exact H2.
+          }
+          apply N.lt_gt in H4. exact H4.
+      }
+      exact result_pos.
+    + apply N.eqb_neq in E. contradiction.
 Qed.
 
 (* Property 2: PTO backs off exponentially *)
 Theorem pto_exponential_backoff : forall ld,
+  ld.(ld_pto_count) < kMaxPtoBackoff ->
   compute_pto {| ld_sent_packets := ld.(ld_sent_packets);
                  ld_largest_acked := ld.(ld_largest_acked);
                  ld_latest_rtt := ld.(ld_latest_rtt);
@@ -418,17 +479,46 @@ Theorem pto_exponential_backoff : forall ld,
                  ld_ecn_ect1_count := ld.(ld_ecn_ect1_count) |} >= 
   2 * compute_pto ld.
 Proof.
-  admit.
+  intros ld H_lt. unfold compute_pto.
+  
+  simpl ld_smoothed_rtt.
+  simpl ld_rttvar.
+  simpl ld_pto_count.
+  
+  assert (H: ld_pto_count ld + 1 <= kMaxPtoBackoff) by lia.
+  
+  rewrite (N.min_l (ld_pto_count ld + 1) kMaxPtoBackoff) by exact H.
+  rewrite (N.min_l (ld_pto_count ld) kMaxPtoBackoff) by lia.
+  
+  set (base := ld_smoothed_rtt ld + N.max (ld_rttvar ld) (4 * kGranularity)).
+  
+  assert (H_shift: N.shiftl 1 (ld_pto_count ld + 1) = 2 * N.shiftl 1 (ld_pto_count ld)).
+  {
+    rewrite !N.shiftl_1_l.
+    rewrite N.pow_add_r.
+    rewrite N.pow_1_r.
+    rewrite N.mul_comm.
+    reflexivity.
+  }
+  
+  rewrite H_shift.
+  rewrite N.mul_assoc.
+  rewrite (N.mul_comm base 2).
+  rewrite <- N.mul_assoc.
+  lia.
 Qed.
 
-(* Property 3: Congestion window never below minimum *)
+(* Property 3: Congestion window respects minimum *)
 Theorem cwnd_minimum : forall cc now,
+  cc.(cc_congestion_window) >= kMinimumWindow ->
   (on_congestion_event cc now).(cc_congestion_window) >= kMinimumWindow.
 Proof.
-  intros. unfold on_congestion_event.
+  intros cc now H_init. unfold on_congestion_event.
   destruct cc.(cc_congestion_recovery_start_time).
-  - destruct (N.ltb n now); simpl; apply N.le_max_l.
-  - simpl. apply N.le_max_l.
+  - destruct (N.ltb n now) eqn:E.
+    + simpl. exact H_init.
+    + simpl. lia.
+  - simpl. lia.
 Qed.
 
 (* Property 4: Bytes in flight never negative *)
@@ -457,3 +547,18 @@ Extraction "quic_recovery.ml"
   on_packet_acked
   on_congestion_event
   process_ecn.
+
+(* =============================================================================
+   Missing RFC 9002 Components:
+   
+   - Separate loss detection state per packet number space (Sec 5.1)
+   - Persistent congestion detection and collapse to minimum window (Sec 7.6)
+   - Pacing algorithm implementation (Sec 7.7)
+   - ACK ranges and spurious retransmission detection (Sec 6.1)
+   - Path MTU discovery and validation
+   - Underutilization detection and response
+   - Recovery period exit based on packet acknowledgment timing
+   - max_ack_delay transport parameter handling
+   - Handshake-specific RTT adjustments
+   - Anti-amplification limits during handshake
+   ============================================================================= *)
