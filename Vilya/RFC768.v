@@ -118,25 +118,11 @@ Qed.
 
 (* ===== 1.7 List Manipulation Functions ===== *)
 
-Fixpoint take {A} (n:nat) (xs:list A) : list A :=
-  match n, xs with
-  | O, _ => []
-  | S n', [] => []
-  | S n', x::xs' => x :: take n' xs'
-  end.
+Definition take {A} (n:nat) (xs:list A) : list A := firstn n xs.
 
-Fixpoint drop {A} (n:nat) (xs:list A) : list A :=
-  match n, xs with
-  | O, _ => xs
-  | S n', [] => []
-  | S n', _::xs' => drop n' xs'
-  end.
+Definition drop {A} (n:nat) (xs:list A) : list A := skipn n xs.
 
-Lemma take_length_id : forall (A:Type) (xs:list A), 
-  take (List.length xs) xs = xs.
-Proof. 
-  intros A xs; induction xs; simpl; congruence. 
-Qed.
+Definition take_length_id := firstn_all.
 
 (* ===== 1.8 Byte Range Validation ===== *)
 
@@ -7336,7 +7322,7 @@ Section UDP_Jumbogram.
 
 End UDP_Jumbogram.
 
-(* Extraction *)
+(* Final Complete Extraction with all 37 sections *)
 Require Extraction.
 Require Import ExtrOcamlBasic.
 Require Import ExtrOcamlNatInt.
