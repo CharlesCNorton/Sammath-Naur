@@ -1251,7 +1251,420 @@ Definition handle_retransmit_timeout (tcb : TCB) : TCB * option TCPHeader :=
   end.
   
 (* =============================================================================
-   Section 15: Extraction
+   Section 15: RTT Measurement and Sampling (RFC 6298)
+   ============================================================================= *)
+
+Record RTTSample := {
+  rtt_seq : SeqNum;           (* Sequence number being timed *)
+  rtt_time : N;               (* Timestamp when sent *)
+  rtt_retransmitted : bool   (* Don't sample if retransmitted *)
+}.
+
+Definition update_rtt_measurement (tcb : TCB) (ack : AckNum) (current_time : N) 
+                                  (sample : option RTTSample) : TCB :=
+  match sample with
+  | None => tcb
+  | Some s =>
+      if andb (seq_leq s.(rtt_seq) ack) (negb s.(rtt_retransmitted)) then
+        let measured_rtt := current_time - s.(rtt_time) in
+        let alpha := 125 in  (* 1/8 in fixed point *)
+        let beta := 250 in   (* 1/4 in fixed point *)
+        let rttvar' := if N.eqb tcb.(tcb_srtt) 0 then
+                         measured_rtt / 2
+                       else
+                         ((1000 - beta) * tcb.(tcb_rttvar) + 
+                          beta * (if N.ltb tcb.(tcb_srtt) measured_rtt 
+                                 then measured_rtt - tcb.(tcb_srtt)
+                                 else tcb.(tcb_srtt) - measured_rtt)) / 1000 in
+        let srtt' := if N.eqb tcb.(tcb_srtt) 0 then
+                       measured_rtt
+                     else
+                       ((1000 - alpha) * tcb.(tcb_srtt) + alpha * measured_rtt) / 1000 in
+        let rto' := N.max MIN_RTO (N.min MAX_RTO (srtt' + N.max (4 * rttvar') 1000)) in
+        {| tcb_local_addr := tcb.(tcb_local_addr);
+           tcb_remote_addr := tcb.(tcb_remote_addr);
+           tcb_local_port := tcb.(tcb_local_port);
+           tcb_remote_port := tcb.(tcb_remote_port);
+           tcb_state := tcb.(tcb_state);
+           tcb_snd_una := tcb.(tcb_snd_una);
+           tcb_snd_nxt := tcb.(tcb_snd_nxt);
+           tcb_snd_wnd := tcb.(tcb_snd_wnd);
+           tcb_snd_up := tcb.(tcb_snd_up);
+           tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+           tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+           tcb_iss := tcb.(tcb_iss);
+           tcb_rcv_nxt := tcb.(tcb_rcv_nxt);
+           tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+           tcb_rcv_up := tcb.(tcb_rcv_up);
+           tcb_irs := tcb.(tcb_irs);
+           tcb_rcv_queue := tcb.(tcb_rcv_queue);
+           tcb_retrans_queue := tcb.(tcb_retrans_queue);
+           tcb_cwnd := tcb.(tcb_cwnd);
+           tcb_ssthresh := tcb.(tcb_ssthresh);
+           tcb_dupacks := tcb.(tcb_dupacks);
+           tcb_recover := tcb.(tcb_recover);
+           tcb_srtt := srtt';
+           tcb_rttvar := rttvar';
+           tcb_rto := rto';
+           tcb_backoff := tcb.(tcb_backoff);
+           tcb_retransmit_timer := tcb.(tcb_retransmit_timer);
+           tcb_persist_timer := tcb.(tcb_persist_timer);
+           tcb_keepalive_timer := tcb.(tcb_keepalive_timer);
+           tcb_time_wait_timer := tcb.(tcb_time_wait_timer);
+           tcb_delack_timer := tcb.(tcb_delack_timer);
+           tcb_mss := tcb.(tcb_mss);
+           tcb_window_scale := tcb.(tcb_window_scale);
+           tcb_sack_permitted := tcb.(tcb_sack_permitted);
+           tcb_timestamps := tcb.(tcb_timestamps);
+           tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+           tcb_fin_sent := tcb.(tcb_fin_sent);
+           tcb_fin_rcvd := tcb.(tcb_fin_rcvd) |}
+      else tcb
+  end.
+
+(* Enhanced TCB needs RTT sampling field *)
+(* Add this field to the TCB record: tcb_rtt_sample : option RTTSample *)
+
+(* =============================================================================
+   Section 16: Persist Timer (RFC 9293 Section 3.8.6.1)
+   ============================================================================= *)
+
+Definition start_persist_timer (tcb : TCB) : TCB :=
+  if N.eqb tcb.(tcb_snd_wnd) 0 then
+    {| tcb_local_addr := tcb.(tcb_local_addr);
+       tcb_remote_addr := tcb.(tcb_remote_addr);
+       tcb_local_port := tcb.(tcb_local_port);
+       tcb_remote_port := tcb.(tcb_remote_port);
+       tcb_state := tcb.(tcb_state);
+       tcb_snd_una := tcb.(tcb_snd_una);
+       tcb_snd_nxt := tcb.(tcb_snd_nxt);
+       tcb_snd_wnd := tcb.(tcb_snd_wnd);
+       tcb_snd_up := tcb.(tcb_snd_up);
+       tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+       tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+       tcb_iss := tcb.(tcb_iss);
+       tcb_rcv_nxt := tcb.(tcb_rcv_nxt);
+       tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+       tcb_rcv_up := tcb.(tcb_rcv_up);
+       tcb_irs := tcb.(tcb_irs);
+       tcb_rcv_queue := tcb.(tcb_rcv_queue);
+       tcb_retrans_queue := tcb.(tcb_retrans_queue);
+       tcb_cwnd := tcb.(tcb_cwnd);
+       tcb_ssthresh := tcb.(tcb_ssthresh);
+       tcb_dupacks := tcb.(tcb_dupacks);
+       tcb_recover := tcb.(tcb_recover);
+       tcb_srtt := tcb.(tcb_srtt);
+       tcb_rttvar := tcb.(tcb_rttvar);
+       tcb_rto := tcb.(tcb_rto);
+       tcb_backoff := tcb.(tcb_backoff);
+       tcb_retransmit_timer := tcb.(tcb_retransmit_timer);
+       tcb_persist_timer := Some (N.max tcb.(tcb_rto) 5000);
+       tcb_keepalive_timer := tcb.(tcb_keepalive_timer);
+       tcb_time_wait_timer := tcb.(tcb_time_wait_timer);
+       tcb_delack_timer := tcb.(tcb_delack_timer);
+       tcb_mss := tcb.(tcb_mss);
+       tcb_window_scale := tcb.(tcb_window_scale);
+       tcb_sack_permitted := tcb.(tcb_sack_permitted);
+       tcb_timestamps := tcb.(tcb_timestamps);
+       tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+       tcb_fin_sent := tcb.(tcb_fin_sent);
+       tcb_fin_rcvd := tcb.(tcb_fin_rcvd) |}
+  else tcb.
+
+Definition handle_persist_timeout (tcb : TCB) : TCB * option TCPHeader :=
+  (* Send zero window probe - 1 byte of data or just the sequence number *)
+  let probe_seg := {| tcp_src_port := tcb.(tcb_local_port);
+                      tcp_dst_port := tcb.(tcb_remote_port);
+                      tcp_seq := tcb.(tcb_snd_una);
+                      tcp_ack := tcb.(tcb_rcv_nxt);
+                      tcp_data_offset := 5;
+                      tcp_reserved := 0;
+                      tcp_flags := set_flag 0 FLAG_ACK;
+                      tcp_window := tcb.(tcb_rcv_wnd);
+                      tcp_checksum := 0;
+                      tcp_urgent := 0;
+                      tcp_options := [] |} in
+  (* Exponentially back off persist timer *)
+  let new_persist := match tcb.(tcb_persist_timer) with
+                     | None => Some 5000
+                     | Some t => Some (N.min (t * 2) 60000)
+                     end in
+  ({| tcb_local_addr := tcb.(tcb_local_addr);
+      tcb_remote_addr := tcb.(tcb_remote_addr);
+      tcb_local_port := tcb.(tcb_local_port);
+      tcb_remote_port := tcb.(tcb_remote_port);
+      tcb_state := tcb.(tcb_state);
+      tcb_snd_una := tcb.(tcb_snd_una);
+      tcb_snd_nxt := tcb.(tcb_snd_nxt);
+      tcb_snd_wnd := tcb.(tcb_snd_wnd);
+      tcb_snd_up := tcb.(tcb_snd_up);
+      tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+      tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+      tcb_iss := tcb.(tcb_iss);
+      tcb_rcv_nxt := tcb.(tcb_rcv_nxt);
+      tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+      tcb_rcv_up := tcb.(tcb_rcv_up);
+      tcb_irs := tcb.(tcb_irs);
+      tcb_rcv_queue := tcb.(tcb_rcv_queue);
+      tcb_retrans_queue := tcb.(tcb_retrans_queue);
+      tcb_cwnd := tcb.(tcb_cwnd);
+      tcb_ssthresh := tcb.(tcb_ssthresh);
+      tcb_dupacks := tcb.(tcb_dupacks);
+      tcb_recover := tcb.(tcb_recover);
+      tcb_srtt := tcb.(tcb_srtt);
+      tcb_rttvar := tcb.(tcb_rttvar);
+      tcb_rto := tcb.(tcb_rto);
+      tcb_backoff := tcb.(tcb_backoff);
+      tcb_retransmit_timer := tcb.(tcb_retransmit_timer);
+      tcb_persist_timer := new_persist;
+      tcb_keepalive_timer := tcb.(tcb_keepalive_timer);
+      tcb_time_wait_timer := tcb.(tcb_time_wait_timer);
+      tcb_delack_timer := tcb.(tcb_delack_timer);
+      tcb_mss := tcb.(tcb_mss);
+      tcb_window_scale := tcb.(tcb_window_scale);
+      tcb_sack_permitted := tcb.(tcb_sack_permitted);
+      tcb_timestamps := tcb.(tcb_timestamps);
+      tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+      tcb_fin_sent := tcb.(tcb_fin_sent);
+      tcb_fin_rcvd := tcb.(tcb_fin_rcvd) |}, Some probe_seg).
+
+(* =============================================================================
+   Section 17: Simultaneous Open and Close (RFC 9293 Section 3.5)
+   ============================================================================= *)
+
+Definition handle_simultaneous_open (tcb : TCB) (seg : TCPHeader) : TCB * option TCPHeader :=
+  match tcb.(tcb_state) with
+  | SYN_SENT =>
+      if andb (is_syn_segment seg) (negb (is_ack_segment seg)) then
+        (* Simultaneous open - both sides sent SYN *)
+        let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                       tcb_remote_addr := tcb.(tcb_remote_addr);
+                       tcb_local_port := tcb.(tcb_local_port);
+                       tcb_remote_port := tcb.(tcb_remote_port);
+                       tcb_state := SYN_RECEIVED;
+                       tcb_snd_una := tcb.(tcb_snd_una);
+                       tcb_snd_nxt := tcb.(tcb_snd_nxt);
+                       tcb_snd_wnd := tcb.(tcb_snd_wnd);
+                       tcb_snd_up := tcb.(tcb_snd_up);
+                       tcb_snd_wl1 := seg.(tcp_seq);
+                       tcb_snd_wl2 := seg.(tcp_seq);
+                       tcb_iss := tcb.(tcb_iss);
+                       tcb_rcv_nxt := seq_add seg.(tcp_seq) 1;
+                       tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+                       tcb_rcv_up := tcb.(tcb_rcv_up);
+                       tcb_irs := seg.(tcp_seq);
+                       tcb_rcv_queue := tcb.(tcb_rcv_queue);
+                       tcb_retrans_queue := tcb.(tcb_retrans_queue);
+                       tcb_cwnd := INITIAL_CWND;
+                       tcb_ssthresh := INITIAL_SSTHRESH;
+                       tcb_dupacks := 0;
+                       tcb_recover := 0;
+                       tcb_srtt := 0;
+                       tcb_rttvar := 0;
+                       tcb_rto := INITIAL_RTO;
+                       tcb_backoff := 1;
+                       tcb_retransmit_timer := Some INITIAL_RTO;
+                       tcb_persist_timer := None;
+                       tcb_keepalive_timer := None;
+                       tcb_time_wait_timer := None;
+                       tcb_delack_timer := None;
+                       tcb_mss := tcb.(tcb_mss);
+                       tcb_window_scale := tcb.(tcb_window_scale);
+                       tcb_sack_permitted := tcb.(tcb_sack_permitted);
+                       tcb_timestamps := tcb.(tcb_timestamps);
+                       tcb_last_ack_sent := seg.(tcp_seq);
+                       tcb_fin_sent := false;
+                       tcb_fin_rcvd := false |} in
+        let syn_ack := {| tcp_src_port := tcb'.(tcb_local_port);
+                          tcp_dst_port := tcb'.(tcb_remote_port);
+                          tcp_seq := tcb.(tcb_iss);
+                          tcp_ack := tcb'.(tcb_rcv_nxt);
+                          tcp_data_offset := 5;
+                          tcp_reserved := 0;
+                          tcp_flags := set_flag (set_flag 0 FLAG_SYN) FLAG_ACK;
+                          tcp_window := tcb'.(tcb_rcv_wnd);
+                          tcp_checksum := 0;
+                          tcp_urgent := 0;
+                          tcp_options := [] |} in
+        (tcb', Some syn_ack)
+      else
+        (tcb, None)
+  | _ => (tcb, None)
+  end.
+
+Definition handle_simultaneous_close (tcb : TCB) (seg : TCPHeader) : TCB * option TCPHeader :=
+  match tcb.(tcb_state) with
+  | FIN_WAIT_1 =>
+      if andb (is_fin_segment seg) (negb (is_ack_segment seg)) then
+        (* Simultaneous close - both sides sent FIN *)
+        let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                       tcb_remote_addr := tcb.(tcb_remote_addr);
+                       tcb_local_port := tcb.(tcb_local_port);
+                       tcb_remote_port := tcb.(tcb_remote_port);
+                       tcb_state := CLOSING;
+                       tcb_snd_una := tcb.(tcb_snd_una);
+                       tcb_snd_nxt := tcb.(tcb_snd_nxt);
+                       tcb_snd_wnd := tcb.(tcb_snd_wnd);
+                       tcb_snd_up := tcb.(tcb_snd_up);
+                       tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+                       tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+                       tcb_iss := tcb.(tcb_iss);
+                       tcb_rcv_nxt := seq_add tcb.(tcb_rcv_nxt) 1;
+                       tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+                       tcb_rcv_up := tcb.(tcb_rcv_up);
+                       tcb_irs := tcb.(tcb_irs);
+                       tcb_rcv_queue := tcb.(tcb_rcv_queue);
+                       tcb_retrans_queue := tcb.(tcb_retrans_queue);
+                       tcb_cwnd := tcb.(tcb_cwnd);
+                       tcb_ssthresh := tcb.(tcb_ssthresh);
+                       tcb_dupacks := tcb.(tcb_dupacks);
+                       tcb_recover := tcb.(tcb_recover);
+                       tcb_srtt := tcb.(tcb_srtt);
+                       tcb_rttvar := tcb.(tcb_rttvar);
+                       tcb_rto := tcb.(tcb_rto);
+                       tcb_backoff := tcb.(tcb_backoff);
+                       tcb_retransmit_timer := tcb.(tcb_retransmit_timer);
+                       tcb_persist_timer := tcb.(tcb_persist_timer);
+                       tcb_keepalive_timer := tcb.(tcb_keepalive_timer);
+                       tcb_time_wait_timer := None;
+                       tcb_delack_timer := None;
+                       tcb_mss := tcb.(tcb_mss);
+                       tcb_window_scale := tcb.(tcb_window_scale);
+                       tcb_sack_permitted := tcb.(tcb_sack_permitted);
+                       tcb_timestamps := tcb.(tcb_timestamps);
+                       tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+                       tcb_fin_sent := true;
+                       tcb_fin_rcvd := true |} in
+        (tcb', Some (generate_ack tcb'))
+      else
+        (tcb, None)
+  | _ => (tcb, None)
+  end.
+
+(* =============================================================================
+   Section 18: User API Events (RFC 9293 Section 3.9)
+   ============================================================================= *)
+
+Inductive UserEvent :=
+  | USER_OPEN_ACTIVE : word32 -> word16 -> UserEvent  (* remote addr, port *)
+  | USER_OPEN_PASSIVE : UserEvent
+  | USER_SEND : list byte -> UserEvent
+  | USER_RECEIVE : N -> UserEvent                      (* buffer size *)
+  | USER_CLOSE : UserEvent
+  | USER_ABORT : UserEvent
+  | USER_STATUS : UserEvent.
+
+Definition handle_user_close (tcb : TCB) : TCB * option TCPHeader :=
+  match tcb.(tcb_state) with
+  | ESTABLISHED =>
+      let fin_seg := {| tcp_src_port := tcb.(tcb_local_port);
+                        tcp_dst_port := tcb.(tcb_remote_port);
+                        tcp_seq := tcb.(tcb_snd_nxt);
+                        tcp_ack := tcb.(tcb_rcv_nxt);
+                        tcp_data_offset := 5;
+                        tcp_reserved := 0;
+                        tcp_flags := set_flag (set_flag 0 FLAG_FIN) FLAG_ACK;
+                        tcp_window := tcb.(tcb_rcv_wnd);
+                        tcp_checksum := 0;
+                        tcp_urgent := 0;
+                        tcp_options := [] |} in
+      let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                     tcb_remote_addr := tcb.(tcb_remote_addr);
+                     tcb_local_port := tcb.(tcb_local_port);
+                     tcb_remote_port := tcb.(tcb_remote_port);
+                     tcb_state := FIN_WAIT_1;
+                     tcb_snd_una := tcb.(tcb_snd_una);
+                     tcb_snd_nxt := seq_add tcb.(tcb_snd_nxt) 1;
+                     tcb_snd_wnd := tcb.(tcb_snd_wnd);
+                     tcb_snd_up := tcb.(tcb_snd_up);
+                     tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+                     tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+                     tcb_iss := tcb.(tcb_iss);
+                     tcb_rcv_nxt := tcb.(tcb_rcv_nxt);
+                     tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+                     tcb_rcv_up := tcb.(tcb_rcv_up);
+                     tcb_irs := tcb.(tcb_irs);
+                     tcb_rcv_queue := tcb.(tcb_rcv_queue);
+                     tcb_retrans_queue := tcb.(tcb_retrans_queue);
+                     tcb_cwnd := tcb.(tcb_cwnd);
+                     tcb_ssthresh := tcb.(tcb_ssthresh);
+                     tcb_dupacks := tcb.(tcb_dupacks);
+                     tcb_recover := tcb.(tcb_recover);
+                     tcb_srtt := tcb.(tcb_srtt);
+                     tcb_rttvar := tcb.(tcb_rttvar);
+                     tcb_rto := tcb.(tcb_rto);
+                     tcb_backoff := tcb.(tcb_backoff);
+                     tcb_retransmit_timer := Some tcb.(tcb_rto);
+                     tcb_persist_timer := tcb.(tcb_persist_timer);
+                     tcb_keepalive_timer := tcb.(tcb_keepalive_timer);
+                     tcb_time_wait_timer := None;
+                     tcb_delack_timer := tcb.(tcb_delack_timer);
+                     tcb_mss := tcb.(tcb_mss);
+                     tcb_window_scale := tcb.(tcb_window_scale);
+                     tcb_sack_permitted := tcb.(tcb_sack_permitted);
+                     tcb_timestamps := tcb.(tcb_timestamps);
+                     tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+                     tcb_fin_sent := true;
+                     tcb_fin_rcvd := tcb.(tcb_fin_rcvd) |} in
+      (tcb', Some fin_seg)
+      
+  | CLOSE_WAIT =>
+      let fin_seg := {| tcp_src_port := tcb.(tcb_local_port);
+                        tcp_dst_port := tcb.(tcb_remote_port);
+                        tcp_seq := tcb.(tcb_snd_nxt);
+                        tcp_ack := tcb.(tcb_rcv_nxt);
+                        tcp_data_offset := 5;
+                        tcp_reserved := 0;
+                        tcp_flags := set_flag (set_flag 0 FLAG_FIN) FLAG_ACK;
+                        tcp_window := tcb.(tcb_rcv_wnd);
+                        tcp_checksum := 0;
+                        tcp_urgent := 0;
+                        tcp_options := [] |} in
+      let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                     tcb_remote_addr := tcb.(tcb_remote_addr);
+                     tcb_local_port := tcb.(tcb_local_port);
+                     tcb_remote_port := tcb.(tcb_remote_port);
+                     tcb_state := LAST_ACK;
+                     tcb_snd_una := tcb.(tcb_snd_una);
+                     tcb_snd_nxt := seq_add tcb.(tcb_snd_nxt) 1;
+                     tcb_snd_wnd := tcb.(tcb_snd_wnd);
+                     tcb_snd_up := tcb.(tcb_snd_up);
+                     tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+                     tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+                     tcb_iss := tcb.(tcb_iss);
+                     tcb_rcv_nxt := tcb.(tcb_rcv_nxt);
+                     tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+                     tcb_rcv_up := tcb.(tcb_rcv_up);
+                     tcb_irs := tcb.(tcb_irs);
+                     tcb_rcv_queue := tcb.(tcb_rcv_queue);
+                     tcb_retrans_queue := tcb.(tcb_retrans_queue);
+                     tcb_cwnd := tcb.(tcb_cwnd);
+                     tcb_ssthresh := tcb.(tcb_ssthresh);
+                     tcb_dupacks := tcb.(tcb_dupacks);
+                     tcb_recover := tcb.(tcb_recover);
+                     tcb_srtt := tcb.(tcb_srtt);
+                     tcb_rttvar := tcb.(tcb_rttvar);
+                     tcb_rto := tcb.(tcb_rto);
+                     tcb_backoff := tcb.(tcb_backoff);
+                     tcb_retransmit_timer := Some tcb.(tcb_rto);
+                     tcb_persist_timer := tcb.(tcb_persist_timer);
+                     tcb_keepalive_timer := tcb.(tcb_keepalive_timer);
+                     tcb_time_wait_timer := None;
+                     tcb_delack_timer := tcb.(tcb_delack_timer);
+                     tcb_mss := tcb.(tcb_mss);
+                     tcb_window_scale := tcb.(tcb_window_scale);
+                     tcb_sack_permitted := tcb.(tcb_sack_permitted);
+                     tcb_timestamps := tcb.(tcb_timestamps);
+                     tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+                     tcb_fin_sent := true;
+                     tcb_fin_rcvd := tcb.(tcb_fin_rcvd) |} in
+      (tcb', Some fin_seg)
+      
+  | _ => (tcb, None)
+  end.
+  
+(* =============================================================================
+   Section 19: Extraction
    ============================================================================= *)
 
 Require Extraction.
@@ -1282,6 +1695,20 @@ Extraction "tcp_complete.ml"
   remove_acked_from_queue
   handle_retransmit_timeout
   
+  (* RTT Measurement *)
+  update_rtt_measurement
+  
+  (* Persist Timer *)
+  start_persist_timer
+  handle_persist_timeout
+  
+  (* Simultaneous Open/Close *)
+  handle_simultaneous_open
+  handle_simultaneous_close
+  
+  (* User API *)
+  handle_user_close
+  
   (* Reassembly *)
   reassembly_update
   insert_sorted
@@ -1298,4 +1725,3 @@ Extraction "tcp_complete.ml"
   valid_header
   parse_tcp_options
   calculate_tcp_checksum.
-              
