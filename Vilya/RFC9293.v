@@ -1664,7 +1664,410 @@ Definition handle_user_close (tcb : TCB) : TCB * option TCPHeader :=
   end.
   
 (* =============================================================================
-   Section 19: Extraction
+   Section 19: Complete User API (RFC 9293 Section 3.9)
+   ============================================================================= *)
+
+Definition handle_user_open_active (tcb : TCB) (remote_addr : word32) (remote_port : word16) 
+                                   (iss : SeqNum) : TCB * option TCPHeader :=
+  match tcb.(tcb_state) with
+  | CLOSED =>
+      let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                     tcb_remote_addr := remote_addr;
+                     tcb_local_port := tcb.(tcb_local_port);
+                     tcb_remote_port := remote_port;
+                     tcb_state := SYN_SENT;
+                     tcb_snd_una := iss;
+                     tcb_snd_nxt := seq_add iss 1;
+                     tcb_snd_wnd := 0;
+                     tcb_snd_up := 0;
+                     tcb_snd_wl1 := 0;
+                     tcb_snd_wl2 := 0;
+                     tcb_iss := iss;
+                     tcb_rcv_nxt := 0;
+                     tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+                     tcb_rcv_up := 0;
+                     tcb_irs := 0;
+                     tcb_rcv_queue := [];
+                     tcb_retrans_queue := [];
+                     tcb_cwnd := INITIAL_CWND;
+                     tcb_ssthresh := INITIAL_SSTHRESH;
+                     tcb_dupacks := 0;
+                     tcb_recover := 0;
+                     tcb_srtt := 0;
+                     tcb_rttvar := 0;
+                     tcb_rto := INITIAL_RTO;
+                     tcb_backoff := 1;
+                     tcb_retransmit_timer := Some INITIAL_RTO;
+                     tcb_persist_timer := None;
+                     tcb_keepalive_timer := None;
+                     tcb_time_wait_timer := None;
+                     tcb_delack_timer := None;
+                     tcb_mss := DEFAULT_MSS;
+                     tcb_window_scale := 0;
+                     tcb_sack_permitted := false;
+                     tcb_timestamps := false;
+                     tcb_last_ack_sent := 0;
+                     tcb_fin_sent := false;
+                     tcb_fin_rcvd := false |} in
+      let syn := {| tcp_src_port := tcb'.(tcb_local_port);
+                    tcp_dst_port := remote_port;
+                    tcp_seq := iss;
+                    tcp_ack := 0;
+                    tcp_data_offset := 5;
+                    tcp_reserved := 0;
+                    tcp_flags := set_flag 0 FLAG_SYN;
+                    tcp_window := tcb.(tcb_rcv_wnd);
+                    tcp_checksum := 0;
+                    tcp_urgent := 0;
+                    tcp_options := [] |} in
+      (tcb', Some syn)
+  | _ => (tcb, None)
+  end.
+
+Definition handle_user_open_passive (tcb : TCB) : TCB :=
+  match tcb.(tcb_state) with
+  | CLOSED =>
+      {| tcb_local_addr := tcb.(tcb_local_addr);
+         tcb_remote_addr := 0;
+         tcb_local_port := tcb.(tcb_local_port);
+         tcb_remote_port := 0;
+         tcb_state := LISTEN;
+         tcb_snd_una := 0;
+         tcb_snd_nxt := 0;
+         tcb_snd_wnd := 0;
+         tcb_snd_up := 0;
+         tcb_snd_wl1 := 0;
+         tcb_snd_wl2 := 0;
+         tcb_iss := tcb.(tcb_iss);
+         tcb_rcv_nxt := 0;
+         tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+         tcb_rcv_up := 0;
+         tcb_irs := 0;
+         tcb_rcv_queue := [];
+         tcb_retrans_queue := [];
+         tcb_cwnd := INITIAL_CWND;
+         tcb_ssthresh := INITIAL_SSTHRESH;
+         tcb_dupacks := 0;
+         tcb_recover := 0;
+         tcb_srtt := 0;
+         tcb_rttvar := 0;
+         tcb_rto := INITIAL_RTO;
+         tcb_backoff := 1;
+         tcb_retransmit_timer := None;
+         tcb_persist_timer := None;
+         tcb_keepalive_timer := None;
+         tcb_time_wait_timer := None;
+         tcb_delack_timer := None;
+         tcb_mss := DEFAULT_MSS;
+         tcb_window_scale := 0;
+         tcb_sack_permitted := false;
+         tcb_timestamps := false;
+         tcb_last_ack_sent := 0;
+         tcb_fin_sent := false;
+         tcb_fin_rcvd := false |}
+  | _ => tcb
+  end.
+
+Definition handle_user_abort (tcb : TCB) : TCB * option TCPHeader :=
+  let rst := {| tcp_src_port := tcb.(tcb_local_port);
+                tcp_dst_port := tcb.(tcb_remote_port);
+                tcp_seq := tcb.(tcb_snd_nxt);
+                tcp_ack := 0;
+                tcp_data_offset := 5;
+                tcp_reserved := 0;
+                tcp_flags := set_flag 0 FLAG_RST;
+                tcp_window := 0;
+                tcp_checksum := 0;
+                tcp_urgent := 0;
+                tcp_options := [] |} in
+  let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                 tcb_remote_addr := tcb.(tcb_remote_addr);
+                 tcb_local_port := tcb.(tcb_local_port);
+                 tcb_remote_port := tcb.(tcb_remote_port);
+                 tcb_state := CLOSED;
+                 tcb_snd_una := 0;
+                 tcb_snd_nxt := 0;
+                 tcb_snd_wnd := 0;
+                 tcb_snd_up := 0;
+                 tcb_snd_wl1 := 0;
+                 tcb_snd_wl2 := 0;
+                 tcb_iss := 0;
+                 tcb_rcv_nxt := 0;
+                 tcb_rcv_wnd := 0;
+                 tcb_rcv_up := 0;
+                 tcb_irs := 0;
+                 tcb_rcv_queue := [];
+                 tcb_retrans_queue := [];
+                 tcb_cwnd := INITIAL_CWND;
+                 tcb_ssthresh := INITIAL_SSTHRESH;
+                 tcb_dupacks := 0;
+                 tcb_recover := 0;
+                 tcb_srtt := 0;
+                 tcb_rttvar := 0;
+                 tcb_rto := INITIAL_RTO;
+                 tcb_backoff := 1;
+                 tcb_retransmit_timer := None;
+                 tcb_persist_timer := None;
+                 tcb_keepalive_timer := None;
+                 tcb_time_wait_timer := None;
+                 tcb_delack_timer := None;
+                 tcb_mss := DEFAULT_MSS;
+                 tcb_window_scale := 0;
+                 tcb_sack_permitted := false;
+                 tcb_timestamps := false;
+                 tcb_last_ack_sent := 0;
+                 tcb_fin_sent := false;
+                 tcb_fin_rcvd := false |} in
+  (tcb', Some rst).
+
+(* =============================================================================
+   Section 20: Nagle's Algorithm (RFC 1122 Section 4.2.3.4)
+   ============================================================================= *)
+
+Definition NAGLE_TIMEOUT : N := 200. (* ms *)
+
+Record SendBuffer := {
+  sb_data : list byte;
+  sb_seq : SeqNum;
+  sb_nagle_timer : option N
+}.
+
+Definition should_send_nagle (tcb : TCB) (sb : SendBuffer) : bool :=
+  let unacked := N.ltb tcb.(tcb_snd_una) tcb.(tcb_snd_nxt) in
+  let full_segment := N.eqb (N.of_nat (length sb.(sb_data))) tcb.(tcb_mss) in
+  let no_unacked := negb unacked in
+  let timer_expired := match sb.(sb_nagle_timer) with
+                       | None => false
+                       | Some _ => true
+                       end in
+  orb full_segment (orb no_unacked timer_expired).
+
+Definition update_nagle_timer (sb : SendBuffer) (should_send : bool) : SendBuffer :=
+  if should_send then
+    {| sb_data := [];
+       sb_seq := sb.(sb_seq);
+       sb_nagle_timer := None |}
+  else
+    {| sb_data := sb.(sb_data);
+       sb_seq := sb.(sb_seq);
+       sb_nagle_timer := Some NAGLE_TIMEOUT |}.
+
+(* =============================================================================
+   Section 21: Silly Window Syndrome Avoidance (RFC 1122 Section 4.2.3.3)
+   ============================================================================= *)
+
+Definition MIN_SEGMENT : N := 50. (* Minimum segment to send *)
+
+Definition should_send_sws (tcb : TCB) (data_len : N) : bool :=
+  let can_send := N.min data_len tcb.(tcb_snd_wnd) in
+  orb (N.eqb can_send data_len)                    (* Can send all data *)
+      (orb (N.leb tcb.(tcb_mss) can_send)         (* Can send MSS *)
+           (N.leb (tcb.(tcb_snd_wnd) / 2) can_send)). (* Can send half window *)
+
+Definition receiver_sws_check (tcb : TCB) : word16 :=
+  let available := tcb.(tcb_rcv_wnd) in
+  if orb (N.leb tcb.(tcb_mss) available)
+         (N.leb (MAX_WINDOW / 2) available) then
+    available
+  else
+    0. (* Advertise zero window *)
+
+(* =============================================================================
+   Section 22: Delayed ACKs (RFC 1122 Section 4.2.3.2)
+   ============================================================================= *)
+
+Definition DELACK_TIMEOUT : N := 200. (* ms, max 500ms per RFC *)
+Definition DELACK_THRESHOLD : N := 2. (* ACK every 2nd segment *)
+
+Record DelayedAckState := {
+  da_pending : N;        (* Number of segments pending ACK *)
+  da_timer : option N    (* Delayed ACK timer *)
+}.
+
+Definition should_send_immediate_ack (tcb : TCB) (seg : TCPHeader) : bool :=
+  orb (is_fin_segment seg)
+      (orb (is_syn_segment seg)
+           (orb (is_psh_segment seg)
+                (N.ltb tcb.(tcb_rcv_wnd) tcb.(tcb_mss)))). (* Small window *)
+
+Definition update_delayed_ack (das : DelayedAckState) (immediate : bool) : DelayedAckState * bool :=
+  if immediate then
+    ({| da_pending := 0; da_timer := None |}, true)
+  else
+    let pending' := das.(da_pending) + 1 in
+    if N.leb DELACK_THRESHOLD pending' then
+      ({| da_pending := 0; da_timer := None |}, true)
+    else
+      ({| da_pending := pending'; da_timer := Some DELACK_TIMEOUT |}, false).
+
+Definition handle_delack_timeout (das : DelayedAckState) : DelayedAckState * bool :=
+  ({| da_pending := 0; da_timer := None |}, true).
+
+(* =============================================================================
+   Section 23: Keepalive Processing (RFC 9293 Section 3.8.4)
+   ============================================================================= *)
+
+Definition KEEPALIVE_IDLE : N := 7200000.    (* 2 hours in ms *)
+Definition KEEPALIVE_INTERVAL : N := 75000.  (* 75 seconds *)
+Definition KEEPALIVE_PROBES : N := 9.        (* Max probes before closing *)
+
+Record KeepaliveState := {
+  ka_enabled : bool;
+  ka_probes_sent : N;
+  ka_timer : option N
+}.
+
+Definition start_keepalive (kas : KeepaliveState) (tcb : TCB) : KeepaliveState :=
+  if andb kas.(ka_enabled) 
+         (match tcb.(tcb_state) with ESTABLISHED => true | _ => false end) then
+    {| ka_enabled := true;
+       ka_probes_sent := 0;
+       ka_timer := Some KEEPALIVE_IDLE |}
+  else kas.
+
+Definition handle_keepalive_timeout (kas : KeepaliveState) (tcb : TCB) 
+                                   : KeepaliveState * TCB * option TCPHeader :=
+  if N.ltb kas.(ka_probes_sent) KEEPALIVE_PROBES then
+    let probe := {| tcp_src_port := tcb.(tcb_local_port);
+                    tcp_dst_port := tcb.(tcb_remote_port);
+                    tcp_seq := seq_sub tcb.(tcb_snd_nxt) 1;
+                    tcp_ack := tcb.(tcb_rcv_nxt);
+                    tcp_data_offset := 5;
+                    tcp_reserved := 0;
+                    tcp_flags := set_flag 0 FLAG_ACK;
+                    tcp_window := tcb.(tcb_rcv_wnd);
+                    tcp_checksum := 0;
+                    tcp_urgent := 0;
+                    tcp_options := [] |} in
+    let kas' := {| ka_enabled := kas.(ka_enabled);
+                   ka_probes_sent := kas.(ka_probes_sent) + 1;
+                   ka_timer := Some KEEPALIVE_INTERVAL |} in
+    (kas', tcb, Some probe)
+  else
+    (* Connection dead, close it *)
+    let tcb' := {| tcb_local_addr := tcb.(tcb_local_addr);
+                   tcb_remote_addr := tcb.(tcb_remote_addr);
+                   tcb_local_port := tcb.(tcb_local_port);
+                   tcb_remote_port := tcb.(tcb_remote_port);
+                   tcb_state := CLOSED;
+                   tcb_snd_una := tcb.(tcb_snd_una);
+                   tcb_snd_nxt := tcb.(tcb_snd_nxt);
+                   tcb_snd_wnd := tcb.(tcb_snd_wnd);
+                   tcb_snd_up := tcb.(tcb_snd_up);
+                   tcb_snd_wl1 := tcb.(tcb_snd_wl1);
+                   tcb_snd_wl2 := tcb.(tcb_snd_wl2);
+                   tcb_iss := tcb.(tcb_iss);
+                   tcb_rcv_nxt := tcb.(tcb_rcv_nxt);
+                   tcb_rcv_wnd := tcb.(tcb_rcv_wnd);
+                   tcb_rcv_up := tcb.(tcb_rcv_up);
+                   tcb_irs := tcb.(tcb_irs);
+                   tcb_rcv_queue := [];
+                   tcb_retrans_queue := [];
+                   tcb_cwnd := INITIAL_CWND;
+                   tcb_ssthresh := INITIAL_SSTHRESH;
+                   tcb_dupacks := 0;
+                   tcb_recover := 0;
+                   tcb_srtt := 0;
+                   tcb_rttvar := 0;
+                   tcb_rto := INITIAL_RTO;
+                   tcb_backoff := 1;
+                   tcb_retransmit_timer := None;
+                   tcb_persist_timer := None;
+                   tcb_keepalive_timer := None;
+                   tcb_time_wait_timer := None;
+                   tcb_delack_timer := None;
+                   tcb_mss := tcb.(tcb_mss);
+                   tcb_window_scale := tcb.(tcb_window_scale);
+                   tcb_sack_permitted := tcb.(tcb_sack_permitted);
+                   tcb_timestamps := tcb.(tcb_timestamps);
+                   tcb_last_ack_sent := tcb.(tcb_last_ack_sent);
+                   tcb_fin_sent := false;
+                   tcb_fin_rcvd := false |} in
+    (kas, tcb', None).
+
+(* =============================================================================
+   Section 24: Comprehensive Error Handling
+   ============================================================================= *)
+
+Inductive TCPError :=
+  | ERR_CONNECTION_REFUSED
+  | ERR_CONNECTION_RESET  
+  | ERR_CONNECTION_CLOSING
+  | ERR_CONNECTION_TIMEOUT
+  | ERR_INVALID_STATE
+  | ERR_INVALID_SEGMENT
+  | ERR_BUFFER_OVERFLOW
+  | ERR_NO_ROUTE
+  | ERR_ADDRESS_IN_USE.
+
+Definition validate_segment_checksum (pseudo : TCPPseudoHeader) (hdr : TCPHeader) 
+                                    (data : list byte) : bool :=
+  N.eqb (calculate_tcp_checksum pseudo hdr data) 0.
+
+Definition validate_state_transition (from : TCPState) (to : TCPState) 
+                                    (event : UserEvent) : bool :=
+  match from, event, to with
+  | CLOSED, USER_OPEN_ACTIVE _ _, SYN_SENT => true
+  | CLOSED, USER_OPEN_PASSIVE, LISTEN => true
+  | LISTEN, _, SYN_RECEIVED => true
+  | LISTEN, _, LISTEN => true  (* Can stay in LISTEN *)
+  | SYN_SENT, _, ESTABLISHED => true
+  | SYN_SENT, _, SYN_RECEIVED => true  (* Simultaneous open *)
+  | SYN_SENT, _, CLOSED => true  (* Reset or abort *)
+  | SYN_RECEIVED, _, ESTABLISHED => true
+  | SYN_RECEIVED, _, LISTEN => true  (* Reset *)
+  | SYN_RECEIVED, _, FIN_WAIT_1 => true  (* Close after SYN *)
+  | ESTABLISHED, USER_CLOSE, FIN_WAIT_1 => true
+  | ESTABLISHED, _, CLOSE_WAIT => true  (* Received FIN *)
+  | ESTABLISHED, _, CLOSED => true  (* Reset *)
+  | FIN_WAIT_1, _, FIN_WAIT_2 => true
+  | FIN_WAIT_1, _, TIME_WAIT => true  (* Simultaneous close *)
+  | FIN_WAIT_1, _, CLOSING => true
+  | FIN_WAIT_2, _, TIME_WAIT => true
+  | CLOSE_WAIT, USER_CLOSE, LAST_ACK => true
+  | CLOSING, _, TIME_WAIT => true
+  | LAST_ACK, _, CLOSED => true
+  | TIME_WAIT, _, CLOSED => true
+  | _, _, _ => false  (* Invalid transition *)
+  end.
+
+Record ErrorStats := {
+  err_checksum_failures : N;
+  err_invalid_segments : N;
+  err_resets_received : N;
+  err_resets_sent : N;
+  err_retransmit_timeouts : N;
+  err_zero_windows : N
+}.
+
+Definition update_error_stats (stats : ErrorStats) (err : TCPError) : ErrorStats :=
+  match err with
+  | ERR_INVALID_SEGMENT =>
+      {| err_checksum_failures := stats.(err_checksum_failures);
+         err_invalid_segments := stats.(err_invalid_segments) + 1;
+         err_resets_received := stats.(err_resets_received);
+         err_resets_sent := stats.(err_resets_sent);
+         err_retransmit_timeouts := stats.(err_retransmit_timeouts);
+         err_zero_windows := stats.(err_zero_windows) |}
+  | ERR_CONNECTION_RESET =>
+      {| err_checksum_failures := stats.(err_checksum_failures);
+         err_invalid_segments := stats.(err_invalid_segments);
+         err_resets_received := stats.(err_resets_received) + 1;
+         err_resets_sent := stats.(err_resets_sent);
+         err_retransmit_timeouts := stats.(err_retransmit_timeouts);
+         err_zero_windows := stats.(err_zero_windows) |}
+  | ERR_CONNECTION_TIMEOUT =>
+      {| err_checksum_failures := stats.(err_checksum_failures);
+         err_invalid_segments := stats.(err_invalid_segments);
+         err_resets_received := stats.(err_resets_received);
+         err_resets_sent := stats.(err_resets_sent);
+         err_retransmit_timeouts := stats.(err_retransmit_timeouts) + 1;
+         err_zero_windows := stats.(err_zero_windows) |}
+  | _ => stats
+  end.
+
+(* =============================================================================
+   Section 25: Updated Extraction
    ============================================================================= *)
 
 Require Extraction.
@@ -1682,6 +2085,12 @@ Extraction "tcp_complete.ml"
   update_window
   generate_ack
   generate_rst
+  
+  (* User API *)
+  handle_user_open_active
+  handle_user_open_passive
+  handle_user_close
+  handle_user_abort
   
   (* Congestion control *)
   slow_start_increase
@@ -1702,12 +2111,31 @@ Extraction "tcp_complete.ml"
   start_persist_timer
   handle_persist_timeout
   
+  (* Nagle's Algorithm *)
+  should_send_nagle
+  update_nagle_timer
+  
+  (* SWS Avoidance *)
+  should_send_sws
+  receiver_sws_check
+  
+  (* Delayed ACKs *)
+  should_send_immediate_ack
+  update_delayed_ack
+  handle_delack_timeout
+  
+  (* Keepalive *)
+  start_keepalive
+  handle_keepalive_timeout
+  
+  (* Error Handling *)
+  validate_segment_checksum
+  validate_state_transition
+  update_error_stats
+  
   (* Simultaneous Open/Close *)
   handle_simultaneous_open
   handle_simultaneous_close
-  
-  (* User API *)
-  handle_user_close
   
   (* Reassembly *)
   reassembly_update
@@ -1725,3 +2153,4 @@ Extraction "tcp_complete.ml"
   valid_header
   parse_tcp_options
   calculate_tcp_checksum.
+     
