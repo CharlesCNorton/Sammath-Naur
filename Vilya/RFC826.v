@@ -50,10 +50,61 @@ Definition mk_word16 (n : N) : option word16 :=
 Definition trunc_byte (n : N) : byte := N.land n 255.
 Definition trunc_word16 (n : N) : word16 := N.land n 65535.
 
-(* Note: Bounds on truncation - N.land with a constant mask ensures
-   the result is <= the mask value, which is sufficient for protocol
-   correctness. Formal proof requires bit-level induction not essential
-   to RFC 826 specification compliance. *)
+Lemma trunc_byte_bounded : forall n,
+  trunc_byte n <= 255.
+Proof.
+  intros n.
+  unfold trunc_byte.
+  replace 255 with (N.ones 8) by reflexivity.
+  rewrite N.land_ones by lia.
+  pose proof (N.mod_upper_bound n (2^8)).
+  assert (2^8 <> 0) by (compute; discriminate).
+  specialize (H H0).
+  assert (n mod 2^8 < 256).
+  { replace 256 with (2^8) by reflexivity. assumption. }
+  assert (N.succ 255 = 256) by reflexivity.
+  rewrite <- H2 in H1.
+  apply N.lt_succ_r in H1.
+  assumption.
+Qed.
+
+Lemma trunc_word16_bounded : forall n,
+  trunc_word16 n <= 65535.
+Proof.
+  intros n.
+  unfold trunc_word16.
+  replace 65535 with (N.ones 16) by reflexivity.
+  rewrite N.land_ones by lia.
+  pose proof (N.mod_upper_bound n (2^16)).
+  assert (2^16 <> 0) by (compute; discriminate).
+  specialize (H H0).
+  assert (n mod 2^16 < 65536).
+  { replace 65536 with (2^16) by reflexivity. assumption. }
+  assert (N.succ 65535 = 65536) by reflexivity.
+  rewrite <- H2 in H1.
+  apply N.lt_succ_r in H1.
+  assumption.
+Qed.
+
+Lemma trunc_byte_idempotent : forall n,
+  n <= 255 -> trunc_byte n = n.
+Proof.
+  intros n Hbound.
+  unfold trunc_byte.
+  replace 255 with (N.ones 8) by reflexivity.
+  rewrite N.land_ones by lia.
+  rewrite N.mod_small; lia.
+Qed.
+
+Lemma trunc_word16_idempotent : forall n,
+  n <= 65535 -> trunc_word16 n = n.
+Proof.
+  intros n Hbound.
+  unfold trunc_word16.
+  replace 65535 with (N.ones 16) by reflexivity.
+  rewrite N.land_ones by lia.
+  rewrite N.mod_small; lia.
+Qed.
 
 (* Hardware types from RFC 826 *)
 Definition ARP_HRD_ETHERNET : word16 := 1.
@@ -501,6 +552,76 @@ Definition stop_timer (timer : ARPTimer) : ARPTimer :=
      timer_duration := timer.(timer_duration);
      timer_active := false |}.
 
+Lemma timer_never_expires_when_inactive : forall timer t,
+  timer.(timer_active) = false ->
+  timer_expired timer t = false.
+Proof.
+  intros timer t Hinactive.
+  unfold timer_expired.
+  rewrite Hinactive.
+  reflexivity.
+Qed.
+
+Lemma timer_expires_at_deadline : forall duration start_time,
+  timer_expired (start_timer duration start_time) (start_time + duration) = true.
+Proof.
+  intros duration start_time.
+  unfold timer_expired, start_timer.
+  simpl.
+  rewrite N.leb_refl.
+  reflexivity.
+Qed.
+
+Lemma timer_not_expired_before_deadline : forall duration start_time current_time,
+  current_time < start_time + duration ->
+  timer_expired (start_timer duration start_time) current_time = false.
+Proof.
+  intros duration start_time current_time Hbefore.
+  unfold timer_expired, start_timer.
+  simpl.
+  apply N.leb_gt in Hbefore.
+  rewrite Hbefore.
+  reflexivity.
+Qed.
+
+Lemma timer_expired_after_deadline : forall duration start_time current_time,
+  start_time + duration <= current_time ->
+  timer_expired (start_timer duration start_time) current_time = true.
+Proof.
+  intros duration start_time current_time Hafter.
+  unfold timer_expired, start_timer.
+  simpl.
+  apply N.leb_le.
+  assumption.
+Qed.
+
+Lemma stop_timer_never_expires : forall timer t,
+  timer_expired (stop_timer timer) t = false.
+Proof.
+  intros timer t.
+  unfold timer_expired, stop_timer.
+  simpl.
+  reflexivity.
+Qed.
+
+Lemma start_timer_is_active : forall duration current_time,
+  timer_active (start_timer duration current_time) = true.
+Proof.
+  intros duration current_time.
+  unfold start_timer.
+  simpl.
+  reflexivity.
+Qed.
+
+Lemma stop_timer_is_inactive : forall timer,
+  timer_active (stop_timer timer) = false.
+Proof.
+  intros timer.
+  unfold stop_timer.
+  simpl.
+  reflexivity.
+Qed.
+
 (* =============================================================================
    Section 10B: Enhanced State Machine with Transitions
    ============================================================================= *)
@@ -649,6 +770,31 @@ Proof.
   rewrite Hlookup.
   rewrite Hwindow.
   simpl. reflexivity.
+Qed.
+
+Lemma clean_flood_table_preserves_recent : forall table current_time entry,
+  In entry table ->
+  current_time - entry.(fe_last_request) < ARP_FLOOD_WINDOW * 10 ->
+  In entry (clean_flood_table table current_time).
+Proof.
+  intros table current_time entry Hin Hrecent.
+  unfold clean_flood_table.
+  apply filter_In.
+  split; auto.
+  apply N.ltb_lt.
+  assumption.
+Qed.
+
+Lemma clean_flood_table_removes_old : forall table current_time entry,
+  In entry (clean_flood_table table current_time) ->
+  current_time - entry.(fe_last_request) < ARP_FLOOD_WINDOW * 10.
+Proof.
+  intros table current_time entry Hin.
+  unfold clean_flood_table in Hin.
+  apply filter_In in Hin.
+  destruct Hin as [_ Hcond].
+  apply N.ltb_lt in Hcond.
+  assumption.
 Qed.
 
 (* =============================================================================
@@ -1957,6 +2103,207 @@ Proof.
     + reflexivity.
 Qed.
 
+Theorem send_arp_request_with_flood_check_preserves_my_ip : forall ctx target_ip current_time ctx' pkt,
+  send_arp_request_with_flood_check ctx target_ip current_time = (ctx', pkt) ->
+  earp_my_ip ctx' = earp_my_ip ctx.
+Proof.
+  intros ctx target_ip current_time ctx' pkt Hsend.
+  unfold send_arp_request_with_flood_check in Hsend.
+  destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
+  destruct allowed; injection Hsend as Hctx Hpkt; subst; simpl; reflexivity.
+Qed.
+
+Theorem start_dad_probe_preserves_mac_and_ip : forall ctx ip_to_probe current_time,
+  earp_my_mac (start_dad_probe ctx ip_to_probe current_time) = earp_my_mac ctx /\
+  earp_my_ip (start_dad_probe ctx ip_to_probe current_time) = earp_my_ip ctx.
+Proof.
+  intros ctx ip_to_probe current_time.
+  unfold start_dad_probe.
+  simpl. split; reflexivity.
+Qed.
+
+Theorem start_dad_probe_enters_probe_state : forall ctx ip_to_probe current_time,
+  exists probe,
+    earp_state_data (start_dad_probe ctx ip_to_probe current_time) = StateProbe probe /\
+    probe.(probe_ip) = ip_to_probe /\
+    probe.(probe_count) = 0.
+Proof.
+  intros ctx ip_to_probe current_time.
+  unfold start_dad_probe.
+  exists {| probe_ip := ip_to_probe; probe_count := 0;
+            probe_timer := start_timer ARP_PROBE_WAIT current_time |}.
+  simpl. split; [reflexivity | split; reflexivity].
+Qed.
+
+Theorem make_arp_probe_has_zero_sender_ip : forall my_mac target_ip,
+  let probe := make_arp_probe my_mac target_ip in
+  probe.(arp_spa) = {| ipv4_a := 0; ipv4_b := 0; ipv4_c := 0; ipv4_d := 0 |}.
+Proof.
+  intros my_mac target_ip probe.
+  unfold probe, make_arp_probe.
+  simpl. reflexivity.
+Qed.
+
+Theorem make_arp_probe_is_request : forall my_mac target_ip,
+  (make_arp_probe my_mac target_ip).(arp_op) = ARP_OP_REQUEST.
+Proof.
+  intros my_mac target_ip.
+  unfold make_arp_probe.
+  simpl. reflexivity.
+Qed.
+
+Theorem process_probe_timeout_preserves_mac : forall ctx probe current_time ctx' pkt,
+  process_probe_timeout ctx probe current_time = (ctx', pkt) ->
+  earp_my_mac ctx' = earp_my_mac ctx.
+Proof.
+  intros ctx probe current_time ctx' pkt Hproc.
+  unfold process_probe_timeout in Hproc.
+  destruct (timer_expired (probe_timer probe) current_time) eqn:Hexp.
+  - destruct (N.ltb (probe_count probe) ARP_PROBE_NUM) eqn:Hlt.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. reflexivity.
+Qed.
+
+Theorem process_probe_timeout_increments_count_or_transitions : forall ctx probe current_time ctx' pkt,
+  timer_expired probe.(probe_timer) current_time = true ->
+  process_probe_timeout ctx probe current_time = (ctx', pkt) ->
+  (exists new_probe,
+    earp_state_data ctx' = StateProbe new_probe /\
+    probe_count new_probe = probe_count probe + 1 /\
+    pkt <> None) \/
+  (exists announce,
+    earp_state_data ctx' = StateAnnounce announce /\
+    earp_my_ip ctx' = probe.(probe_ip) /\
+    pkt = None).
+Proof.
+  intros ctx probe current_time ctx' pkt Hexp Hproc.
+  unfold process_probe_timeout in Hproc.
+  rewrite Hexp in Hproc.
+  destruct (N.ltb (probe_count probe) ARP_PROBE_NUM) eqn:Hlt.
+  - left. injection Hproc as Hctx Hpkt. subst.
+    exists {| probe_ip := probe_ip probe; probe_count := probe_count probe + 1;
+              probe_timer := start_timer ARP_PROBE_MIN current_time |}.
+    simpl. split; [reflexivity | split; [reflexivity | discriminate]].
+  - right. injection Hproc as Hctx Hpkt. subst.
+    exists {| announce_count := 0; announce_timer := start_timer ARP_ANNOUNCE_WAIT current_time |}.
+    simpl. split; [reflexivity | split; reflexivity].
+Qed.
+
+Theorem detect_probe_conflict_detects_ip_match : forall ctx probe packet,
+  ip_eq (arp_spa packet) (probe_ip probe) = true ->
+  detect_probe_conflict ctx probe packet = true.
+Proof.
+  intros ctx probe packet Hmatch.
+  unfold detect_probe_conflict.
+  rewrite Hmatch.
+  apply orb_true_l.
+Qed.
+
+Theorem process_announce_timeout_preserves_mac : forall ctx announce current_time ctx' pkt,
+  process_announce_timeout ctx announce current_time = (ctx', pkt) ->
+  earp_my_mac ctx' = earp_my_mac ctx.
+Proof.
+  intros ctx announce current_time ctx' pkt Hproc.
+  unfold process_announce_timeout in Hproc.
+  destruct (timer_expired (announce_timer announce) current_time) eqn:Hexp.
+  - destruct (N.ltb (announce_count announce) ARP_ANNOUNCE_NUM) eqn:Hlt.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. reflexivity.
+Qed.
+
+Theorem process_announce_timeout_increments_or_idles : forall ctx announce current_time ctx' pkt,
+  timer_expired announce.(announce_timer) current_time = true ->
+  process_announce_timeout ctx announce current_time = (ctx', pkt) ->
+  (exists new_announce,
+    earp_state_data ctx' = StateAnnounce new_announce /\
+    announce_count new_announce = announce_count announce + 1 /\
+    pkt <> None) \/
+  (earp_state_data ctx' = StateIdle /\ pkt = None).
+Proof.
+  intros ctx announce current_time ctx' pkt Hexp Hproc.
+  unfold process_announce_timeout in Hproc.
+  rewrite Hexp in Hproc.
+  destruct (N.ltb (announce_count announce) ARP_ANNOUNCE_NUM) eqn:Hlt.
+  - left. injection Hproc as Hctx Hpkt. subst.
+    exists {| announce_count := announce_count announce + 1;
+              announce_timer := start_timer ARP_ANNOUNCE_INTERVAL current_time |}.
+    simpl. split; [reflexivity | split; [reflexivity | discriminate]].
+  - right. injection Hproc as Hctx Hpkt. subst.
+    simpl. split; reflexivity.
+Qed.
+
+Theorem detect_address_conflict_true_means_different_mac : forall ctx packet,
+  detect_address_conflict ctx packet = true ->
+  ip_eq (arp_spa packet) (earp_my_ip ctx) = true /\
+  (mac_bytes (arp_sha packet)) <> (mac_bytes (earp_my_mac ctx)).
+Proof.
+  intros ctx packet Hconf.
+  unfold detect_address_conflict in Hconf.
+  apply andb_true_iff in Hconf.
+  destruct Hconf as [Hipsame Hmacdiff].
+  split; auto.
+  destruct (list_eq_dec N.eq_dec (mac_bytes (arp_sha packet))
+                        (mac_bytes (earp_my_mac ctx))) eqn:Heq.
+  - discriminate.
+  - assumption.
+Qed.
+
+Theorem process_conflict_preserves_mac : forall ctx current_time ctx' pkt,
+  process_conflict ctx current_time = (ctx', pkt) ->
+  earp_my_mac ctx' = earp_my_mac ctx.
+Proof.
+  intros ctx current_time ctx' pkt Hproc.
+  unfold process_conflict in Hproc.
+  destruct (earp_state_data ctx) eqn:Hstate.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - destruct (can_defend d current_time) eqn:Hcan.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+    + injection Hproc as Hctx _. subst. reflexivity.
+Qed.
+
+Theorem process_conflict_preserves_ip : forall ctx current_time ctx' pkt,
+  process_conflict ctx current_time = (ctx', pkt) ->
+  earp_my_ip ctx' = earp_my_ip ctx.
+Proof.
+  intros ctx current_time ctx' pkt Hproc.
+  unfold process_conflict in Hproc.
+  destruct (earp_state_data ctx) eqn:Hstate.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl. reflexivity.
+  - destruct (can_defend d current_time) eqn:Hcan.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+    + injection Hproc as Hctx _. subst. reflexivity.
+Qed.
+
+Theorem process_conflict_enters_defend_state : forall ctx current_time ctx' pkt,
+  process_conflict ctx current_time = (ctx', pkt) ->
+  exists defend, earp_state_data ctx' = StateDefend defend.
+Proof.
+  intros ctx current_time ctx' pkt Hproc.
+  unfold process_conflict in Hproc.
+  destruct (earp_state_data ctx) eqn:Hstate.
+  - injection Hproc as Hctx _. subst. simpl.
+    exists {| defend_last_time := current_time |}. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl.
+    exists {| defend_last_time := current_time |}. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl.
+    exists {| defend_last_time := current_time |}. reflexivity.
+  - injection Hproc as Hctx _. subst. simpl.
+    exists {| defend_last_time := current_time |}. reflexivity.
+  - destruct (can_defend d current_time) eqn:Hcan.
+    + injection Hproc as Hctx _. subst. simpl.
+      exists {| defend_last_time := current_time |}. reflexivity.
+    + injection Hproc as Hctx _. subst. simpl.
+      exists d. rewrite <- Hstate. reflexivity.
+Qed.
+
 (* =============================================================================
    Section 15: Extraction
    ============================================================================= *)
@@ -1969,10 +2316,24 @@ Extract Inductive option => "option" [ "Some" "None" ].
 
 Extraction "arp.ml"
   process_arp_packet
+  process_arp_packet_enhanced
   make_arp_request
   make_arp_reply
+  make_gratuitous_arp
+  make_arp_probe
   lookup_cache
   merge_cache_entry
+  update_cache_entry
+  add_cache_entry
+  age_cache
   resolve_address
+  send_arp_request_with_flood_check
   process_generic_arp
-  convert_to_generic.
+  convert_to_generic
+  update_flood_table
+  clean_flood_table
+  process_timeouts
+  add_pending_request
+  timer_expired
+  start_timer
+  stop_timer.
