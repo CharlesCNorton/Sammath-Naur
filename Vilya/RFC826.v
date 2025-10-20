@@ -1835,6 +1835,7 @@ Proof.
     + reflexivity.
 Qed.
 
+
 Lemma merge_cache_size_bound : forall cache ip mac ttl,
   (length (merge_cache_entry cache ip mac ttl) <= length cache + 1)%nat.
 Proof.
@@ -2614,6 +2615,40 @@ Proof.
     destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
     injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+Qed.
+
+(* ARP packet processing is deterministic: same input always produces same output *)
+Theorem process_arp_deterministic : forall ctx pkt ctx1 resp1 ctx2 resp2,
+  process_arp_packet ctx pkt = (ctx1, resp1) ->
+  process_arp_packet ctx pkt = (ctx2, resp2) ->
+  ctx1 = ctx2 /\ resp1 = resp2.
+Proof.
+  intros ctx pkt ctx1 resp1 ctx2 resp2 H1 H2.
+  rewrite H1 in H2.
+  injection H2 as Hctx Hresp.
+  split; assumption.
+Qed.
+
+(* Cache monotonicity: lookups for unrelated IPs are preserved *)
+Theorem cache_monotonic_unrelated : forall ctx pkt ctx' resp ip mac,
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  lookup_cache (arp_cache ctx) ip = Some mac ->
+  ip <> pkt.(arp_spa) ->
+  lookup_cache (arp_cache ctx') ip = Some mac.
+Proof.
+  intros ctx pkt ctx' resp ip mac Hproc Hlook Hneq.
+  unfold process_arp_packet in Hproc.
+  destruct (is_broadcast_mac (arp_sha pkt)) eqn:Hbcast.
+  - injection Hproc as Hctx Hresp. subst. simpl. assumption.
+  - destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq;
+    injection Hproc as Hctx Hresp;
+    subst ctx';
+    simpl.
+    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
+    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
+    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
+    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
 Qed.
 
 (* Stronger RFC 826 completeness: full behavioral specification with IFF semantics, cache isolation, and complete immutability *)
