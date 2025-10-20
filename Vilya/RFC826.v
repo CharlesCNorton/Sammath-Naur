@@ -30,26 +30,34 @@ Open Scope N_scope.
    Section 1: Basic Types and Constants
    ============================================================================= *)
 
+(* 8-bit unsigned integer type *)
 Definition byte := N.
+(* 16-bit unsigned integer type *)
 Definition word16 := N.
+(* 32-bit unsigned integer type *)
 Definition word32 := N.
 
-(* Bounded type validation *)
+(* Validates n is within byte range [0,255] *)
 Definition is_valid_byte (n : N) : bool := N.leb n 255.
+(* Validates n is within 16-bit range [0,65535] *)
 Definition is_valid_word16 (n : N) : bool := N.leb n 65535.
+(* Validates n is within 32-bit range [0,2^32-1] *)
 Definition is_valid_word32 (n : N) : bool := N.leb n 4294967295.
 
-(* Bounded constructors with proofs *)
+(* Safe byte constructor returning None if out of bounds *)
 Definition mk_byte (n : N) : option byte :=
   if is_valid_byte n then Some n else None.
 
+(* Safe 16-bit word constructor returning None if out of bounds *)
 Definition mk_word16 (n : N) : option word16 :=
   if is_valid_word16 n then Some n else None.
 
-(* Truncation for internal operations *)
+(* Truncates arbitrary natural to byte via bitwise AND with 0xFF *)
 Definition trunc_byte (n : N) : byte := N.land n 255.
+(* Truncates arbitrary natural to 16-bit word via bitwise AND with 0xFFFF *)
 Definition trunc_word16 (n : N) : word16 := N.land n 65535.
 
+(* Truncation to byte preserves boundedness: result ≤ 255 *)
 Lemma trunc_byte_bounded : forall n,
   trunc_byte n <= 255.
 Proof.
@@ -68,6 +76,7 @@ Proof.
   assumption.
 Qed.
 
+(* Truncation to 16-bit word preserves boundedness: result ≤ 65535 *)
 Lemma trunc_word16_bounded : forall n,
   trunc_word16 n <= 65535.
 Proof.
@@ -86,6 +95,7 @@ Proof.
   assumption.
 Qed.
 
+(* Byte truncation is identity on valid bytes *)
 Lemma trunc_byte_idempotent : forall n,
   n <= 255 -> trunc_byte n = n.
 Proof.
@@ -96,6 +106,7 @@ Proof.
   rewrite N.mod_small; lia.
 Qed.
 
+(* 16-bit truncation is identity on valid words *)
 Lemma trunc_word16_idempotent : forall n,
   n <= 65535 -> trunc_word16 n = n.
 Proof.
@@ -1450,6 +1461,7 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
    Section 11: Main Properties to Verify
    ============================================================================= *)
 
+(* IPv4 equality is reflexive *)
 Lemma ip_eq_refl : forall ip, ip_eq ip ip = true.
 Proof.
   intros ip.
@@ -1458,6 +1470,7 @@ Proof.
   reflexivity.
 Qed.
 
+(* IPv4 equality implies structural equality of all octets *)
 Lemma ip_eq_true : forall ip1 ip2,
   ip_eq ip1 ip2 = true ->
   ip1.(ipv4_a) = ip2.(ipv4_a) /\
@@ -1479,6 +1492,7 @@ Qed.
 
 (* Lemmas for RFC 826 compliant functions *)
 
+(* Updating existing non-static entry succeeds with new MAC *)
 Lemma update_cache_entry_exists : forall cache ip mac ttl,
   lookup_cache cache ip <> None ->
   (forall e, In e cache -> ip_eq (ace_ip e) ip = true -> ace_static e = false) ->
@@ -1504,6 +1518,7 @@ Proof.
       * intros. apply Hno_static. right. assumption. assumption.
 Qed.
 
+(* Adding entry for non-existent IP succeeds *)
 Lemma add_cache_entry_not_exists : forall cache ip mac ttl,
   lookup_cache cache ip = None ->
   lookup_cache (add_cache_entry cache ip mac ttl) ip = Some mac.
@@ -1519,6 +1534,7 @@ Proof.
       simpl in Hnone. rewrite Heq in Hnone. assumption.
 Qed.
 
+(* RFC 826 merge when target ensures entry exists (possibly static MAC) *)
 Lemma rfc826_merge_updates_or_adds : forall cache ip mac ttl target,
   target = true ->
   exists m, lookup_cache (rfc826_merge cache ip mac ttl target) ip = Some m.
@@ -1546,6 +1562,7 @@ Proof.
         simpl in Hlook. rewrite Heq in Hlook. assumption.
 Qed.
 
+(* RFC 826 merge with no static entries guarantees exact MAC *)
 Lemma rfc826_merge_target : forall cache ip mac ttl,
   (forall e, In e cache -> ip_eq (ace_ip e) ip = true -> ace_static e = false) ->
   lookup_cache (rfc826_merge cache ip mac ttl true) ip = Some mac.
@@ -1699,6 +1716,7 @@ Proof.
     + simpl. lia.
 Qed.
 
+(* Transitivity of IP inequality: if ip1=ip2 and ip2≠ip3, then ip1≠ip3 *)
 Lemma ip_eq_trans_false : forall ip1 ip2 ip3,
   ip_eq ip1 ip2 = true ->
   ip_eq ip2 ip3 = false ->
@@ -1720,6 +1738,7 @@ Proof.
   - reflexivity.
 Qed.
 
+(* Cache update preserves lookups for unrelated IP addresses *)
 Lemma update_cache_entry_preserves_other : forall cache ip mac ttl other_ip,
   other_ip <> ip ->
   lookup_cache (update_cache_entry cache ip mac ttl) other_ip = lookup_cache cache other_ip.
@@ -1753,6 +1772,7 @@ Proof.
       * apply IH.
 Qed.
 
+(* Cache addition preserves lookups for unrelated IP addresses *)
 Lemma add_cache_entry_preserves_other : forall cache ip mac ttl other_ip,
   other_ip <> ip ->
   lookup_cache (add_cache_entry cache ip mac ttl) other_ip = lookup_cache cache other_ip.
@@ -1777,6 +1797,7 @@ Proof.
       * apply IH.
 Qed.
 
+(* RFC 826 merge operation preserves lookups for all unrelated IPs *)
 Lemma rfc826_merge_preserves_other_ips : forall cache ip mac ttl i_am_target other_ip,
   other_ip <> ip ->
   lookup_cache (rfc826_merge cache ip mac ttl i_am_target) other_ip = lookup_cache cache other_ip.
@@ -2502,6 +2523,7 @@ Proof.
   simpl. apply rfc826_merge_target. assumption.
 Qed.
 
+(* RFC 826 algorithm completeness: proves reply generation, cache updates, and identity preservation *)
 Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
   is_broadcast_mac pkt.(arp_sha) = false ->
   process_arp_packet ctx pkt = (ctx', resp) ->
@@ -2570,6 +2592,7 @@ Proof.
     injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
 Qed.
 
+(* Stronger RFC 826 completeness: full behavioral specification with IFF semantics, cache isolation, and complete immutability *)
 Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
   is_broadcast_mac pkt.(arp_sha) = false ->
   process_arp_packet ctx pkt = (ctx', resp) ->
