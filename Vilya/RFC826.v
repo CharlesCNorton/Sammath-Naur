@@ -159,6 +159,13 @@ Definition is_broadcast_mac (m : MACAddress) : bool :=
   | _ => false
   end.
 
+(* Check if MAC address is multicast (I/G bit = 1) *)
+Definition is_multicast_mac (m : MACAddress) : bool :=
+  match m.(mac_bytes) with
+  | b0 :: _ => N.testbit b0 0  (* Least significant bit of first byte *)
+  | _ => false
+  end.
+
 (* =============================================================================
    Section 3: ARP Packet Structure (RFC 826 Format)
    ============================================================================= *)
@@ -1372,6 +1379,10 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                      earp_flood_table := cleaned_flood;
                      earp_last_cache_cleanup := current_time |} in
 
+  (* RFC 826: Reject packets with broadcast sender MAC *)
+  if is_broadcast_mac packet.(arp_sha)
+  then (ctx_aged, None)
+  else
   (* Check for conflicts in PROBE state *)
   match ctx_aged.(earp_state_data) with
   | StateProbe probe =>
@@ -1749,6 +1760,20 @@ Proof.
   split; [symmetry; exact Hctx | symmetry; exact Hresp].
 Qed.
 
+Theorem enhanced_broadcast_sender_no_cache_pollution : forall ctx pkt ctx' resp t dt,
+  is_broadcast_mac pkt.(arp_sha) = true ->
+  process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
+  earp_cache ctx' = age_cache (earp_cache ctx) dt /\ resp = None.
+Proof.
+  intros ctx pkt ctx' resp t dt Hbroadcast Hproc.
+  unfold process_arp_packet_enhanced in Hproc.
+  destruct (is_broadcast_mac (arp_sha pkt)) eqn:Hcheck.
+  - injection Hproc as Hctx Hresp.
+    subst ctx'. simpl.
+    split; [reflexivity | symmetry; exact Hresp].
+  - rewrite Hbroadcast in Hcheck. discriminate.
+Qed.
+
 (* Theorem: Broadcast sender packets don't pollute cache *)
 Theorem broadcast_sender_no_cache_pollution : forall ctx packet ctx' resp,
   is_broadcast_mac packet.(arp_sha) = true ->
@@ -1891,17 +1916,10 @@ Lemma lor_disjoint_parts : forall a b,
   N.lor a b = a + b.
 Proof.
   intros a b Hdisj.
-  apply N.bits_inj_iff. intros n.
-  rewrite N.lor_spec, N.add_nocarry_lxor.
-  - rewrite N.lxor_spec.
-    symmetry.
-    apply xorb_eq_orb_when_disjoint.
-    assert (Heq: N.land a b = 0) by assumption.
-    rewrite <- (N.bits_inj_iff (N.land a b) 0) in Hdisj.
-    specialize (Hdisj n).
-    rewrite N.land_spec, N.bits_0 in Hdisj.
-    assumption.
-  - assumption.
+  rewrite <- N.lxor_lor by assumption.
+  symmetry.
+  apply N.add_nocarry_lxor.
+  assumption.
 Qed.
 
 Lemma div2_8times_eq_div256 : forall n,
@@ -2316,6 +2334,41 @@ Proof.
       exists {| defend_last_time := current_time |}. reflexivity.
     + injection Hproc as Hctx _. subst. simpl.
       exists d. rewrite <- Hstate. reflexivity.
+Qed.
+
+Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
+  is_broadcast_mac pkt.(arp_sha) = false ->
+  pkt.(arp_op) = ARP_OP_REQUEST ->
+  ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+  (forall e, In e ctx.(arp_cache) ->
+   ip_eq (ace_ip e) pkt.(arp_spa) = true ->
+   ace_static e = false) ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  exists reply,
+    resp = Some reply /\
+    reply.(arp_op) = ARP_OP_REPLY /\
+    reply.(arp_spa) = ctx.(arp_my_ip) /\
+    reply.(arp_tpa) = pkt.(arp_spa) /\
+    reply.(arp_sha) = ctx.(arp_my_mac) /\
+    reply.(arp_tha) = pkt.(arp_sha) /\
+    lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
+Proof.
+  intros ctx pkt resp ctx' Hno_bcast Hop Htarget Hno_static Hproc.
+  unfold process_arp_packet in Hproc.
+  rewrite Hno_bcast in Hproc.
+  rewrite Htarget in Hproc.
+  apply N.eqb_eq in Hop.
+  rewrite Hop in Hproc.
+  injection Hproc as Hctx Hresp.
+  subst ctx' resp.
+  exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
+  split. reflexivity.
+  split. unfold make_arp_reply. simpl. reflexivity.
+  split. unfold make_arp_reply. simpl. reflexivity.
+  split. unfold make_arp_reply. simpl. reflexivity.
+  split. unfold make_arp_reply. simpl. reflexivity.
+  split. unfold make_arp_reply. simpl. reflexivity.
+  simpl. apply rfc826_merge_target. assumption.
 Qed.
 
 (* =============================================================================
