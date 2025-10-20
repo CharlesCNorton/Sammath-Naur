@@ -1699,6 +1699,97 @@ Proof.
     + simpl. lia.
 Qed.
 
+Lemma ip_eq_trans_false : forall ip1 ip2 ip3,
+  ip_eq ip1 ip2 = true ->
+  ip_eq ip2 ip3 = false ->
+  ip_eq ip1 ip3 = false.
+Proof.
+  intros ip1 ip2 ip3 H12 H23.
+  destruct (ip_eq ip1 ip3) eqn:H13.
+  - apply ip_eq_true in H12.
+    apply ip_eq_true in H13.
+    destruct H12 as [Ha12 [Hb12 [Hc12 Hd12]]].
+    destruct H13 as [Ha13 [Hb13 [Hc13 Hd13]]].
+    destruct ip1, ip2, ip3. simpl in *.
+    subst.
+    unfold ip_eq in H23. simpl in H23.
+    rewrite N.eqb_refl in H23. simpl in H23.
+    rewrite N.eqb_refl in H23. simpl in H23.
+    rewrite N.eqb_refl in H23. simpl in H23.
+    rewrite N.eqb_refl in H23. discriminate.
+  - reflexivity.
+Qed.
+
+Lemma update_cache_entry_preserves_other : forall cache ip mac ttl other_ip,
+  other_ip <> ip ->
+  lookup_cache (update_cache_entry cache ip mac ttl) other_ip = lookup_cache cache other_ip.
+Proof.
+  intros cache ip mac ttl other_ip Hneq.
+  unfold update_cache_entry.
+  induction cache as [|e rest IH].
+  - simpl. reflexivity.
+  - simpl.
+    destruct (ip_eq (ace_ip e) ip) eqn:Heq_e_ip.
+    + destruct (ace_static e) eqn:Hstatic; simpl.
+      * destruct (ip_eq (ace_ip e) other_ip) eqn:Heq_e_other.
+        apply ip_eq_true in Heq_e_ip.
+        apply ip_eq_true in Heq_e_other.
+        destruct Heq_e_ip as [Ha [Hb [Hc Hd]]].
+        destruct Heq_e_other as [Ha' [Hb' [Hc' Hd']]].
+        destruct (ace_ip e), ip, other_ip. simpl in *.
+        subst. contradiction Hneq. reflexivity.
+        reflexivity.
+      * destruct (ip_eq ip other_ip) eqn:Heq_ip_other.
+        apply ip_eq_true in Heq_ip_other.
+        destruct Heq_ip_other as [Ha' [Hb' [Hc' Hd']]].
+        destruct ip, other_ip. simpl in *.
+        subst. contradiction Hneq. reflexivity.
+        assert (Heq_e_other: ip_eq (ace_ip e) other_ip = false).
+        { apply (ip_eq_trans_false (ace_ip e) ip other_ip); assumption. }
+        rewrite Heq_e_other. reflexivity.
+    + simpl.
+      destruct (ip_eq (ace_ip e) other_ip) eqn:Heq_e_other.
+      * reflexivity.
+      * apply IH.
+Qed.
+
+Lemma add_cache_entry_preserves_other : forall cache ip mac ttl other_ip,
+  other_ip <> ip ->
+  lookup_cache (add_cache_entry cache ip mac ttl) other_ip = lookup_cache cache other_ip.
+Proof.
+  intros cache ip mac ttl other_ip Hneq.
+  unfold add_cache_entry.
+  induction cache as [|e rest IH].
+  - simpl.
+    destruct (ip_eq ip other_ip) eqn:Heq.
+    + apply ip_eq_true in Heq.
+      destruct Heq as [Ha [Hb [Hc Hd]]].
+      destruct ip, other_ip. simpl in *.
+      subst. contradiction Hneq. reflexivity.
+    + reflexivity.
+  - simpl.
+    destruct (ip_eq (ace_ip e) ip) eqn:Heq_e_ip.
+    + simpl.
+      destruct (ip_eq (ace_ip e) other_ip); reflexivity.
+    + simpl.
+      destruct (ip_eq (ace_ip e) other_ip) eqn:Heq_e_other.
+      * reflexivity.
+      * apply IH.
+Qed.
+
+Lemma rfc826_merge_preserves_other_ips : forall cache ip mac ttl i_am_target other_ip,
+  other_ip <> ip ->
+  lookup_cache (rfc826_merge cache ip mac ttl i_am_target) other_ip = lookup_cache cache other_ip.
+Proof.
+  intros cache ip mac ttl i_am_target other_ip Hneq.
+  unfold rfc826_merge.
+  destruct (lookup_cache cache ip) eqn:Hlookup.
+  - apply update_cache_entry_preserves_other. assumption.
+  - destruct i_am_target.
+    + apply add_cache_entry_preserves_other. assumption.
+    + reflexivity.
+Qed.
+
 Lemma merge_cache_size_bound : forall cache ip mac ttl,
   (length (merge_cache_entry cache ip mac ttl) <= length cache + 1)%nat.
 Proof.
@@ -2471,7 +2562,161 @@ Proof.
     rewrite Hno_bcast in Hproc.
     destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
-    injection Hproc as Hctx _; subst; simpl; split; reflexivity.
+    injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+  - unfold process_arp_packet in Hproc.
+    rewrite Hno_bcast in Hproc.
+    destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
+    injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+Qed.
+
+Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
+  is_broadcast_mac pkt.(arp_sha) = false ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (* Part 1: Complete response characterization *)
+  ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true /\ pkt.(arp_op) = ARP_OP_REQUEST) ->
+   exists reply,
+     resp = Some reply /\
+     reply.(arp_op) = ARP_OP_REPLY /\
+     reply.(arp_spa) = ctx.(arp_my_ip) /\
+     reply.(arp_tpa) = pkt.(arp_spa) /\
+     reply.(arp_sha) = ctx.(arp_my_mac) /\
+     reply.(arp_tha) = pkt.(arp_sha)) /\
+  (* Part 2: No response in all other cases *)
+  ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = false \/ pkt.(arp_op) <> ARP_OP_REQUEST) ->
+   resp = None) /\
+  (* Part 3: Cache updated when target (exact MAC if no static entry blocks) *)
+  (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+   exists mac, lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some mac) /\
+  (* Part 4: Cache not updated when not target and not in cache *)
+  (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = false ->
+   lookup_cache ctx.(arp_cache) pkt.(arp_spa) = None ->
+   lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = None) /\
+  (* Part 5: Cache entries for other IPs preserved *)
+  (forall other_ip,
+   other_ip <> pkt.(arp_spa) ->
+   lookup_cache ctx'.(arp_cache) other_ip = lookup_cache ctx.(arp_cache) other_ip) /\
+  (* Part 6: Identity preservation - MAC and IP unchanged *)
+  (arp_my_mac ctx' = arp_my_mac ctx) /\
+  (arp_my_ip ctx' = arp_my_ip ctx) /\
+  (* Part 7: State and control fields preserved *)
+  (arp_state ctx' = arp_state ctx) /\
+  (arp_pending ctx' = arp_pending ctx) /\
+  (arp_retries ctx' = arp_retries ctx).
+Proof.
+  intros ctx pkt ctx' resp Hno_bcast Hproc.
+  unfold process_arp_packet in Hproc.
+  rewrite Hno_bcast in Hproc.
+  destruct (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip)) eqn:Htgt;
+  destruct (N.eqb pkt.(arp_op) ARP_OP_REQUEST) eqn:Hreq.
+
+  (* Case 1: Target is me, operation is REQUEST *)
+  - injection Hproc as Hctx Hresp.
+    subst ctx' resp.
+    split.
+    { intros [_ H].
+      exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
+      split. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      unfold make_arp_reply. simpl. reflexivity. }
+    split.
+    { intros [H | H].
+      * congruence.
+      * apply N.eqb_eq in Hreq. contradiction. }
+    split.
+    { intros _.
+      simpl.
+      apply rfc826_merge_updates_or_adds with (target := true).
+      reflexivity. }
+    split.
+    { intros H _.
+      congruence. }
+    split.
+    { intros other_ip Hneq.
+      simpl.
+      apply rfc826_merge_preserves_other_ips.
+      assumption. }
+    simpl. repeat split; reflexivity.
+
+  (* Case 2: Target is me, operation is not REQUEST *)
+  - injection Hproc as Hctx Hresp.
+    subst ctx' resp.
+    split.
+    { intros [_ H].
+      apply N.eqb_neq in Hreq.
+      contradiction. }
+    split.
+    { intros _.
+      reflexivity. }
+    split.
+    { intros _.
+      simpl.
+      apply rfc826_merge_updates_or_adds with (target := true).
+      reflexivity. }
+    split.
+    { intros H _.
+      congruence. }
+    split.
+    { intros other_ip Hneq.
+      simpl.
+      apply rfc826_merge_preserves_other_ips.
+      assumption. }
+    simpl. repeat split; reflexivity.
+
+  (* Case 3: Target is not me, operation is REQUEST *)
+  - injection Hproc as Hctx Hresp.
+    subst ctx' resp.
+    split.
+    { intros [H _].
+      congruence. }
+    split.
+    { intros _.
+      reflexivity. }
+    split.
+    { intros H.
+      congruence. }
+    split.
+    { intros _ Hnot_in.
+      simpl.
+      rewrite rfc826_merge_not_target by assumption.
+      assumption. }
+    split.
+    { intros other_ip Hneq.
+      simpl.
+      destruct (lookup_cache (arp_cache ctx) (arp_spa pkt)) eqn:Hlookup.
+      * apply rfc826_merge_preserves_other_ips. assumption.
+      * rewrite rfc826_merge_not_target by assumption.
+        reflexivity. }
+    simpl. repeat split; reflexivity.
+
+  (* Case 4: Target is not me, operation is not REQUEST *)
+  - injection Hproc as Hctx Hresp.
+    subst ctx' resp.
+    split.
+    { intros [H _].
+      congruence. }
+    split.
+    { intros _.
+      reflexivity. }
+    split.
+    { intros H.
+      congruence. }
+    split.
+    { intros _ Hnot_in.
+      simpl.
+      rewrite rfc826_merge_not_target by assumption.
+      assumption. }
+    split.
+    { intros other_ip Hneq.
+      simpl.
+      destruct (lookup_cache (arp_cache ctx) (arp_spa pkt)) eqn:Hlookup.
+      * apply rfc826_merge_preserves_other_ips. assumption.
+      * rewrite rfc826_merge_not_target by assumption.
+        reflexivity. }
+    simpl. repeat split; reflexivity.
 Qed.
 
 (* =============================================================================
