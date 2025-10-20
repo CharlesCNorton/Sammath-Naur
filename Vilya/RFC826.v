@@ -1616,6 +1616,19 @@ Proof.
 Qed.
 
 (* Property 3: RFC 826 Bidirectional learning - only when target and valid MAC *)
+Lemma process_arp_packet_preserves_identity : forall ctx pkt ctx' resp,
+  is_broadcast_mac pkt.(arp_sha) = false ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  arp_my_mac ctx' = arp_my_mac ctx /\ arp_my_ip ctx' = arp_my_ip ctx.
+Proof.
+  intros ctx pkt ctx' resp Hno_bcast Hproc.
+  unfold process_arp_packet in Hproc.
+  rewrite Hno_bcast in Hproc.
+  destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx));
+  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST);
+  injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
+Qed.
+
 Theorem bidirectional_cache_update_when_target : forall ctx packet ctx' response,
   (forall e, In e ctx.(arp_cache) ->
    ip_eq (ace_ip e) packet.(arp_spa) = true -> ace_static e = false) ->
@@ -2398,12 +2411,68 @@ Proof.
   simpl. apply rfc826_merge_target. assumption.
 Qed.
 
-(* NOTE: RFC 826 Algorithm Completeness is provable via combination of:
-   - arp_request_reply_roundtrip_correctness (reply generation)
-   - rfc826_merge_updates_or_adds (cache updates when targeted)
-   - rfc826_merge_not_target (no pollution when not targeted)
-   - Context preservation (demonstrated throughout)
-   A unified completeness theorem is left as future work. *)
+Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
+  is_broadcast_mac pkt.(arp_sha) = false ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+   pkt.(arp_op) = ARP_OP_REQUEST ->
+   exists reply,
+     resp = Some reply /\
+     reply.(arp_op) = ARP_OP_REPLY /\
+     reply.(arp_spa) = ctx.(arp_my_ip) /\
+     reply.(arp_tpa) = pkt.(arp_spa) /\
+     reply.(arp_sha) = ctx.(arp_my_mac) /\
+     reply.(arp_tha) = pkt.(arp_sha)) /\
+  (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+   exists new_mac,
+    lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some new_mac) /\
+  (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = false ->
+   lookup_cache ctx.(arp_cache) pkt.(arp_spa) = None ->
+   lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = None) /\
+  (arp_my_mac ctx' = arp_my_mac ctx /\
+   arp_my_ip ctx' = arp_my_ip ctx).
+Proof.
+  intros ctx pkt ctx' resp Hno_bcast Hproc.
+  repeat split.
+  - intros Htarget Hreq.
+    unfold process_arp_packet in Hproc.
+    rewrite Hno_bcast in Hproc.
+    rewrite Htarget in Hproc.
+    apply N.eqb_eq in Hreq.
+    rewrite Hreq in Hproc.
+    injection Hproc as Hctx Hresp.
+    subst ctx' resp.
+    exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
+    split. reflexivity.
+    split. unfold make_arp_reply. simpl. reflexivity.
+    split. unfold make_arp_reply. simpl. reflexivity.
+    split. unfold make_arp_reply. simpl. reflexivity.
+    split. unfold make_arp_reply. simpl. reflexivity.
+    unfold make_arp_reply. simpl. reflexivity.
+  - intros Htarget.
+    unfold process_arp_packet in Hproc.
+    rewrite Hno_bcast in Hproc.
+    rewrite Htarget in Hproc.
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST);
+    injection Hproc as Hctx _; subst ctx'; simpl;
+    apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+  - intros Hnot_target Hnot_in_cache.
+    unfold process_arp_packet in Hproc.
+    rewrite Hno_bcast in Hproc.
+    rewrite Hnot_target in Hproc.
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
+    + injection Hproc as Hctx _. subst ctx'. simpl.
+      rewrite rfc826_merge_not_target by assumption.
+      assumption.
+    + injection Hproc as Hctx _. subst ctx'. simpl.
+      rewrite rfc826_merge_not_target by assumption.
+      assumption.
+  - unfold process_arp_packet in Hproc.
+    rewrite Hno_bcast in Hproc.
+    destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
+    injection Hproc as Hctx _; subst; simpl; split; reflexivity.
+Qed.
 
 (* =============================================================================
    Section 15: Extraction
