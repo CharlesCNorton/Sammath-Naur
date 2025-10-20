@@ -20,7 +20,8 @@ From Coq Require Import
   Bool
   Arith
   Lia
-  Eqdep_dec.
+  Eqdep_dec
+  ProofIrrelevance.
 
 Import ListNotations.
 Open Scope N_scope.
@@ -539,13 +540,116 @@ Record NetworkInterface := {
   if_up : bool
 }.
 
+Record FloodEntry := {
+  fe_ip : IPv4Address;
+  fe_last_request : N;
+  fe_request_count : N
+}.
+
+Definition FloodTable := list FloodEntry.
+
 Record EnhancedARPContext := {
   earp_my_mac : MACAddress;
   earp_my_ip : IPv4Address;
   earp_cache : ARPCache;
   earp_state_data : ARPStateData;
-  earp_iface : NetworkInterface
+  earp_iface : NetworkInterface;
+  earp_flood_table : FloodTable;
+  earp_last_cache_cleanup : N
 }.
+
+(* =============================================================================
+   Section 10B1: Flood Prevention Mechanism
+   ============================================================================= *)
+
+Definition ARP_FLOOD_WINDOW : N := 1000.
+Definition ARP_FLOOD_THRESHOLD : N := 5.
+
+Definition flood_eq (ip1 ip2 : IPv4Address) : bool := ip_eq ip1 ip2.
+
+Definition lookup_flood_entry (table : FloodTable) (ip : IPv4Address) : option FloodEntry :=
+  let fix find (t : FloodTable) : option FloodEntry :=
+    match t with
+    | [] => None
+    | entry :: rest =>
+        if flood_eq entry.(fe_ip) ip
+        then Some entry
+        else find rest
+    end
+  in find table.
+
+Definition update_flood_table (table : FloodTable) (ip : IPv4Address) (current_time : N)
+                               : FloodTable * bool :=
+  match lookup_flood_entry table ip with
+  | None =>
+      let new_entry := {| fe_ip := ip; fe_last_request := current_time; fe_request_count := 1 |} in
+      (new_entry :: table, true)
+  | Some entry =>
+      let time_diff := current_time - entry.(fe_last_request) in
+      if N.leb time_diff ARP_FLOOD_WINDOW
+      then
+        let new_count := entry.(fe_request_count) + 1 in
+        if N.leb new_count ARP_FLOOD_THRESHOLD
+        then
+          let updated := {| fe_ip := ip; fe_last_request := current_time;
+                           fe_request_count := new_count |} in
+          let fix replace (t : FloodTable) : FloodTable :=
+            match t with
+            | [] => [updated]
+            | e :: rest => if flood_eq e.(fe_ip) ip then updated :: rest else e :: replace rest
+            end
+          in (replace table, true)
+        else
+          (table, false)
+      else
+        let reset_entry := {| fe_ip := ip; fe_last_request := current_time; fe_request_count := 1 |} in
+        let fix replace (t : FloodTable) : FloodTable :=
+          match t with
+          | [] => [reset_entry]
+          | e :: rest => if flood_eq e.(fe_ip) ip then reset_entry :: rest else e :: replace rest
+          end
+        in (replace table, true)
+  end.
+
+Definition clean_flood_table (table : FloodTable) (current_time : N) : FloodTable :=
+  filter (fun entry =>
+    N.ltb (current_time - entry.(fe_last_request)) (ARP_FLOOD_WINDOW * 10)) table.
+
+Lemma flood_table_allows_first_request : forall table ip current_time,
+  lookup_flood_entry table ip = None ->
+  snd (update_flood_table table ip current_time) = true.
+Proof.
+  intros table ip current_time Hlookup.
+  unfold update_flood_table.
+  rewrite Hlookup.
+  simpl. reflexivity.
+Qed.
+
+Lemma flood_table_rejects_excessive : forall table ip current_time entry,
+  lookup_flood_entry table ip = Some entry ->
+  N.leb (current_time - entry.(fe_last_request)) ARP_FLOOD_WINDOW = true ->
+  N.leb (entry.(fe_request_count) + 1) ARP_FLOOD_THRESHOLD = false ->
+  snd (update_flood_table table ip current_time) = false.
+Proof.
+  intros table ip current_time entry Hlookup Hwindow Hthreshold.
+  unfold update_flood_table.
+  rewrite Hlookup.
+  rewrite Hwindow.
+  rewrite Hthreshold.
+  simpl. reflexivity.
+Qed.
+
+Lemma flood_table_resets_after_window : forall table ip current_time entry,
+  lookup_flood_entry table ip = Some entry ->
+  N.leb (current_time - entry.(fe_last_request)) ARP_FLOOD_WINDOW = false ->
+  snd (update_flood_table table ip current_time) = true.
+Proof.
+  intros table ip current_time entry Hlookup Hwindow.
+  unfold update_flood_table.
+  rewrite Hlookup.
+  rewrite Hwindow.
+  simpl. reflexivity.
+Qed.
 
 (* =============================================================================
    Section 10C: Request Queue Management and Retries
@@ -562,7 +666,9 @@ Definition add_pending_request (ctx : EnhancedARPContext) (target_ip : IPv4Addre
          earp_my_ip := ctx.(earp_my_ip);
          earp_cache := ctx.(earp_cache);
          earp_state_data := StatePending (new_req :: reqs);
-         earp_iface := ctx.(earp_iface) |}
+         earp_iface := ctx.(earp_iface);
+         earp_flood_table := ctx.(earp_flood_table);
+         earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}
   | _ =>
       let new_req := {| preq_target_ip := target_ip;
                        preq_retries := 0;
@@ -571,7 +677,9 @@ Definition add_pending_request (ctx : EnhancedARPContext) (target_ip : IPv4Addre
          earp_my_ip := ctx.(earp_my_ip);
          earp_cache := ctx.(earp_cache);
          earp_state_data := StatePending [new_req];
-         earp_iface := ctx.(earp_iface) |}
+         earp_iface := ctx.(earp_iface);
+         earp_flood_table := ctx.(earp_flood_table);
+         earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}
   end.
 
 Definition remove_pending_request (reqs : list PendingRequest) (target_ip : IPv4Address)
@@ -608,11 +716,13 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
           earp_my_ip := ctx.(earp_my_ip);
           earp_cache := ctx.(earp_cache);
           earp_state_data := if new_reqs then StatePending new_reqs else StateIdle;
-          earp_iface := ctx.(earp_iface) |}, packets)
+          earp_iface := ctx.(earp_iface);
+          earp_flood_table := ctx.(earp_flood_table);
+          earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}, packets)
   | _ => (ctx, [])
   end.
 
-(* RFC 826 High-Level Address Resolution *)
+(* RFC 826 High-Level Address Resolution with Flood Prevention *)
 Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
                            (current_time : N)
   : option MACAddress * EnhancedARPContext * option ARPEthernetIPv4 :=
@@ -620,9 +730,21 @@ Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
   | Some mac =>
       (Some mac, ctx, None)
   | None =>
-      let ctx' := add_pending_request ctx target_ip current_time in
-      let req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
-      (None, ctx', Some req)
+      let '(new_flood, allowed) := update_flood_table ctx.(earp_flood_table) target_ip current_time in
+      if allowed
+      then
+        let ctx' := add_pending_request ctx target_ip current_time in
+        let ctx'' := {| earp_my_mac := ctx'.(earp_my_mac);
+                       earp_my_ip := ctx'.(earp_my_ip);
+                       earp_cache := ctx'.(earp_cache);
+                       earp_state_data := ctx'.(earp_state_data);
+                       earp_iface := ctx'.(earp_iface);
+                       earp_flood_table := new_flood;
+                       earp_last_cache_cleanup := ctx'.(earp_last_cache_cleanup) |} in
+        let req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
+        (None, ctx'', Some req)
+      else
+        (None, ctx, None)
   end.
 
 (* =============================================================================
@@ -637,7 +759,9 @@ Definition start_dad_probe (ctx : EnhancedARPContext) (ip_to_probe : IPv4Address
      earp_state_data := StateProbe {| probe_ip := ip_to_probe;
                                      probe_count := 0;
                                      probe_timer := start_timer ARP_PROBE_WAIT current_time |};
-     earp_iface := ctx.(earp_iface) |}.
+     earp_iface := ctx.(earp_iface);
+     earp_flood_table := ctx.(earp_flood_table);
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
 
 Definition make_arp_probe (my_mac : MACAddress) (target_ip : IPv4Address)
                           : ARPEthernetIPv4 :=
@@ -661,7 +785,9 @@ Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
                     earp_state_data := StateProbe new_probe;
-                    earp_iface := ctx.(earp_iface) |} in
+                    earp_iface := ctx.(earp_iface);
+                    earp_flood_table := ctx.(earp_flood_table);
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
       (ctx', Some (make_arp_probe ctx.(earp_my_mac) probe.(probe_ip)))
     else
       let announce := {| announce_count := 0;
@@ -670,7 +796,9 @@ Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
                     earp_my_ip := probe.(probe_ip);
                     earp_cache := ctx.(earp_cache);
                     earp_state_data := StateAnnounce announce;
-                    earp_iface := ctx.(earp_iface) |} in
+                    earp_iface := ctx.(earp_iface);
+                    earp_flood_table := ctx.(earp_flood_table);
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
       (ctx', None)
   else
     (ctx, None).
@@ -697,14 +825,18 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
                     earp_state_data := StateAnnounce new_announce;
-                    earp_iface := ctx.(earp_iface) |} in
+                    earp_iface := ctx.(earp_iface);
+                    earp_flood_table := ctx.(earp_flood_table);
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
       (ctx', Some (make_gratuitous_arp ctx.(earp_my_mac) ctx.(earp_my_ip)))
     else
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
                     earp_state_data := StateIdle;
-                    earp_iface := ctx.(earp_iface) |} in
+                    earp_iface := ctx.(earp_iface);
+                    earp_flood_table := ctx.(earp_flood_table);
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
       (ctx', None)
   else
     (ctx, None).
@@ -737,7 +869,9 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                       earp_my_ip := ctx.(earp_my_ip);
                       earp_cache := ctx.(earp_cache);
                       earp_state_data := StateDefend new_defend;
-                      earp_iface := ctx.(earp_iface) |} in
+                      earp_iface := ctx.(earp_iface);
+                      earp_flood_table := ctx.(earp_flood_table);
+                      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
         (ctx', Some (make_defend_packet ctx))
       else
         (ctx, None)
@@ -747,9 +881,80 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
                     earp_state_data := StateDefend new_defend;
-                    earp_iface := ctx.(earp_iface) |} in
+                    earp_iface := ctx.(earp_iface);
+                    earp_flood_table := ctx.(earp_flood_table);
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
       (ctx', Some (make_defend_packet ctx))
   end.
+
+Definition send_arp_request_with_flood_check (ctx : EnhancedARPContext)
+                                              (target_ip : IPv4Address)
+                                              (current_time : N)
+                                              : EnhancedARPContext * option ARPEthernetIPv4 :=
+  let '(new_flood_table, allowed) := update_flood_table ctx.(earp_flood_table) target_ip current_time in
+  if allowed
+  then
+    let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
+                  earp_my_ip := ctx.(earp_my_ip);
+                  earp_cache := ctx.(earp_cache);
+                  earp_state_data := ctx.(earp_state_data);
+                  earp_iface := ctx.(earp_iface);
+                  earp_flood_table := new_flood_table;
+                  earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+    let request := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
+    (ctx', Some request)
+  else
+    let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
+                  earp_my_ip := ctx.(earp_my_ip);
+                  earp_cache := ctx.(earp_cache);
+                  earp_state_data := ctx.(earp_state_data);
+                  earp_iface := ctx.(earp_iface);
+                  earp_flood_table := new_flood_table;
+                  earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+    (ctx', None).
+
+Lemma send_arp_request_preserves_cache : forall ctx target_ip current_time ctx' pkt,
+  send_arp_request_with_flood_check ctx target_ip current_time = (ctx', pkt) ->
+  ctx'.(earp_cache) = ctx.(earp_cache).
+Proof.
+  intros ctx target_ip current_time ctx' pkt Hsend.
+  unfold send_arp_request_with_flood_check in Hsend.
+  destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
+  destruct allowed; injection Hsend as Hctx Hpkt; subst; simpl; reflexivity.
+Qed.
+
+Lemma send_arp_request_updates_flood_table : forall ctx target_ip current_time ctx' pkt,
+  send_arp_request_with_flood_check ctx target_ip current_time = (ctx', pkt) ->
+  ctx'.(earp_flood_table) = fst (update_flood_table ctx.(earp_flood_table) target_ip current_time).
+Proof.
+  intros ctx target_ip current_time ctx' pkt Hsend.
+  unfold send_arp_request_with_flood_check in Hsend.
+  destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
+  assert (Heq: fst (new_flood, allowed) = new_flood) by reflexivity.
+  destruct allowed; injection Hsend as Hctx Hpkt; subst; simpl; rewrite <- Heq; rewrite <- Hflood; reflexivity.
+Qed.
+
+Lemma send_arp_request_respects_flood_limit : forall ctx target_ip current_time entry ctx' pkt,
+  lookup_flood_entry ctx.(earp_flood_table) target_ip = Some entry ->
+  N.leb (current_time - entry.(fe_last_request)) ARP_FLOOD_WINDOW = true ->
+  N.leb (entry.(fe_request_count) + 1) ARP_FLOOD_THRESHOLD = false ->
+  send_arp_request_with_flood_check ctx target_ip current_time = (ctx', pkt) ->
+  pkt = None.
+Proof.
+  intros ctx target_ip current_time entry ctx' pkt Hlookup Hwindow Hthreshold Hsend.
+  unfold send_arp_request_with_flood_check in Hsend.
+  destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
+  assert (Hallowed: allowed = false).
+  { unfold update_flood_table in Hflood.
+    rewrite Hlookup in Hflood.
+    rewrite Hwindow in Hflood.
+    rewrite Hthreshold in Hflood.
+    injection Hflood as Hflood_table Hflood_allowed.
+    symmetry. exact Hflood_allowed. }
+  rewrite Hallowed in Hsend.
+  injection Hsend as Hctx Hpkt.
+  symmetry. exact Hpkt.
+Qed.
 
 (* =============================================================================
    Section 10G: Integrated Packet Processing with Cache Aging
@@ -796,6 +1001,200 @@ Proof.
   - simpl. rewrite map_age_zero_entry. f_equal. apply IH.
 Qed.
 
+Theorem age_cache_preserves_nonzero_ttl : forall cache,
+  (forall e, In e cache -> ace_static e = false -> ace_ttl e > 0) ->
+  age_cache cache 0 = cache.
+Proof.
+  intros cache Hnonzero.
+  unfold age_cache.
+  rewrite map_age_zero.
+  induction cache as [|e rest IH].
+  - simpl. reflexivity.
+  - simpl. destruct (ace_static e) eqn:Hstatic.
+    + simpl. f_equal. apply IH.
+      intros. apply Hnonzero. right. assumption. assumption.
+    + assert (Httl: ace_ttl e > 0).
+      { apply Hnonzero. left. reflexivity. assumption. }
+      assert (N.leb (ace_ttl e) 0 = false).
+      { apply N.leb_gt. lia. }
+      rewrite H. simpl. f_equal. apply IH.
+      intros. apply Hnonzero. right. assumption. assumption.
+Qed.
+
+
+
+Theorem cache_aging_preserves_lookup_static : forall cache ip mac elapsed,
+  In {| ace_ip := ip; ace_mac := mac; ace_ttl := 100; ace_static := true |} cache ->
+  In {| ace_ip := ip; ace_mac := mac; ace_ttl := 100; ace_static := true |}
+     (age_cache cache elapsed).
+Proof.
+  intros cache ip mac elapsed Hin.
+  unfold age_cache.
+  apply filter_In. split.
+  - apply in_map_iff. exists {| ace_ip := ip; ace_mac := mac; ace_ttl := 100; ace_static := true |}.
+    split.
+    + simpl. reflexivity.
+    + assumption.
+  - simpl. reflexivity.
+Qed.
+
+Theorem flood_table_bounded_requests : forall table ip t,
+  snd (update_flood_table table ip t) = true ->
+  exists entry table',
+    fst (update_flood_table table ip t) = table' /\
+    (lookup_flood_entry table' ip = Some entry ->
+     N.leb (fe_request_count entry) ARP_FLOOD_THRESHOLD = true).
+Proof.
+  intros table ip t Hallowed.
+  unfold update_flood_table in *.
+  destruct (lookup_flood_entry table ip) as [old_entry|] eqn:Hlookup.
+  - destruct (N.leb (t - fe_last_request old_entry) ARP_FLOOD_WINDOW) eqn:Hwindow.
+    + destruct (N.leb (fe_request_count old_entry + 1) ARP_FLOOD_THRESHOLD) eqn:Hthresh.
+      * exists {| fe_ip := ip; fe_last_request := t; fe_request_count := fe_request_count old_entry + 1 |}.
+        remember (let fix replace (t0 : FloodTable) : FloodTable :=
+                    match t0 with
+                    | [] => [{| fe_ip := ip; fe_last_request := t;
+                               fe_request_count := fe_request_count old_entry + 1 |}]
+                    | e :: rest =>
+                        if flood_eq (fe_ip e) ip
+                        then {| fe_ip := ip; fe_last_request := t;
+                               fe_request_count := fe_request_count old_entry + 1 |} :: rest
+                        else e :: replace rest
+                    end
+                  in replace table) as new_table.
+        exists new_table. split.
+        { reflexivity. }
+        { intro Hlookup'. assumption. }
+      * simpl in Hallowed. discriminate.
+    + exists {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}.
+      remember (let fix replace (t0 : FloodTable) : FloodTable :=
+                  match t0 with
+                  | [] => [{| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}]
+                  | e :: rest =>
+                      if flood_eq (fe_ip e) ip
+                      then {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |} :: rest
+                      else e :: replace rest
+                  end
+                in replace table) as new_table.
+      exists new_table. split.
+      { reflexivity. }
+      { intro Hlookup'. unfold ARP_FLOOD_THRESHOLD. simpl. reflexivity. }
+  - exists {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}.
+    exists ({| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |} :: table).
+    split.
+    + reflexivity.
+    + intro Hlookup'. unfold ARP_FLOOD_THRESHOLD. simpl. reflexivity.
+Qed.
+
+Theorem arp_request_reply_duality : forall my_mac my_ip sender_mac sender_ip,
+  let req := make_arp_request my_mac my_ip sender_ip in
+  let reply := make_arp_reply sender_mac sender_ip my_mac my_ip in
+  arp_spa reply = sender_ip /\
+  arp_tpa reply = my_ip /\
+  arp_sha reply = sender_mac /\
+  arp_tha reply = my_mac /\
+  arp_spa req = my_ip /\
+  arp_tpa req = sender_ip.
+Proof.
+  intros my_mac my_ip sender_mac sender_ip req reply.
+  unfold req, reply, make_arp_request, make_arp_reply.
+  simpl. repeat split.
+Qed.
+
+Theorem gratuitous_arp_self_announcing : forall mac ip,
+  let garp := make_gratuitous_arp mac ip in
+  arp_spa garp = arp_tpa garp /\
+  arp_tha garp = MAC_BROADCAST /\
+  arp_spa garp = ip /\
+  arp_op garp = ARP_OP_REQUEST.
+Proof.
+  intros mac ip garp.
+  unfold garp, make_gratuitous_arp.
+  simpl. repeat split.
+Qed.
+
+Theorem cache_ip_determines_mac : forall cache ip mac1 mac2,
+  lookup_cache cache ip = Some mac1 ->
+  lookup_cache cache ip = Some mac2 ->
+  mac1 = mac2.
+Proof.
+  intros cache ip mac1 mac2 H1 H2.
+  congruence.
+Qed.
+
+Theorem mac_address_equality_decidable : forall m1 m2 : MACAddress,
+  {m1 = m2} + {m1 <> m2}.
+Proof.
+  intros m1 m2.
+  destruct m1 as [bytes1 valid1].
+  destruct m2 as [bytes2 valid2].
+  destruct (list_eq_dec N.eq_dec bytes1 bytes2) as [Heq|Hneq].
+  - left. subst bytes2.
+    assert (valid1 = valid2) by apply proof_irrelevance.
+    subst. reflexivity.
+  - right. intro Hcontr. injection Hcontr as Heq. contradiction.
+Qed.
+
+Theorem ipv4_address_equality_decidable : forall ip1 ip2 : IPv4Address,
+  {ip1 = ip2} + {ip1 <> ip2}.
+Proof.
+  intros ip1 ip2.
+  destruct ip1 as [a1 b1 c1 d1].
+  destruct ip2 as [a2 b2 c2 d2].
+  destruct (N.eq_dec a1 a2); [|right; intro H; injection H; contradiction].
+  destruct (N.eq_dec b1 b2); [|right; intro H; injection H; contradiction].
+  destruct (N.eq_dec c1 c2); [|right; intro H; injection H; contradiction].
+  destruct (N.eq_dec d1 d2); [|right; intro H; injection H; contradiction].
+  left. subst. reflexivity.
+Qed.
+
+Theorem broadcast_mac_is_broadcast : is_broadcast_mac MAC_BROADCAST = true.
+Proof.
+  unfold is_broadcast_mac, MAC_BROADCAST. simpl. reflexivity.
+Qed.
+
+Theorem arp_request_reply_protocol_symmetry :
+  forall my_mac my_ip target_mac target_ip,
+    let request := make_arp_request my_mac my_ip target_ip in
+    let reply := make_arp_reply target_mac target_ip my_mac my_ip in
+    (arp_spa request = my_ip /\ arp_tpa request = target_ip) /\
+    (arp_spa reply = target_ip /\ arp_tpa reply = my_ip) /\
+    (arp_sha request = my_mac /\ arp_tha reply = my_mac) /\
+    (arp_sha reply = target_mac /\ arp_op request = ARP_OP_REQUEST /\ arp_op reply = ARP_OP_REPLY).
+Proof.
+  intros my_mac my_ip target_mac target_ip request reply.
+  unfold request, reply, make_arp_request, make_arp_reply.
+  simpl. repeat split.
+Qed.
+
+Theorem arp_gratuitous_announces_self :
+  forall mac ip,
+    let garp := make_gratuitous_arp mac ip in
+    arp_spa garp = ip /\ arp_tpa garp = ip /\ arp_sha garp = mac.
+Proof.
+  intros mac ip garp.
+  unfold garp, make_gratuitous_arp. simpl. repeat split.
+Qed.
+
+Theorem arp_static_entry_survives_all_aging :
+  forall cache ip mac ttl elapsed,
+    In {| ace_ip := ip; ace_mac := mac; ace_ttl := ttl; ace_static := true |} cache ->
+    In {| ace_ip := ip; ace_mac := mac; ace_ttl := ttl; ace_static := true |}
+       (age_cache cache elapsed).
+Proof.
+  intros cache ip mac ttl elapsed Hin.
+  unfold age_cache.
+  apply filter_In. split.
+  - apply in_map_iff.
+    exists {| ace_ip := ip; ace_mac := mac; ace_ttl := ttl; ace_static := true |}.
+    split.
+    + simpl. reflexivity.
+    + assumption.
+  - simpl. reflexivity.
+Qed.
+
+
+
 Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                                        (packet : ARPEthernetIPv4)
                                        (current_time : N)
@@ -803,11 +1202,17 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                                        : EnhancedARPContext * option ARPEthernetIPv4 :=
   (* Age cache first *)
   let aged_cache := age_cache ctx.(earp_cache) elapsed_since_last in
+
+  (* Clean flood table *)
+  let cleaned_flood := clean_flood_table ctx.(earp_flood_table) current_time in
+
   let ctx_aged := {| earp_my_mac := ctx.(earp_my_mac);
                      earp_my_ip := ctx.(earp_my_ip);
                      earp_cache := aged_cache;
                      earp_state_data := ctx.(earp_state_data);
-                     earp_iface := ctx.(earp_iface) |} in
+                     earp_iface := ctx.(earp_iface);
+                     earp_flood_table := cleaned_flood;
+                     earp_last_cache_cleanup := current_time |} in
 
   (* Check for conflicts in PROBE state *)
   match ctx_aged.(earp_state_data) with
@@ -824,7 +1229,9 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := cache';
                       earp_state_data := ctx_aged.(earp_state_data);
-                      earp_iface := ctx_aged.(earp_iface) |} in
+                      earp_iface := ctx_aged.(earp_iface);
+                      earp_flood_table := ctx_aged.(earp_flood_table);
+                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
         (ctx', None)
   | _ =>
       (* Check for address conflict *)
@@ -850,7 +1257,9 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := cache';
                       earp_state_data := new_state;
-                      earp_iface := ctx_aged.(earp_iface) |} in
+                      earp_iface := ctx_aged.(earp_iface);
+                      earp_flood_table := ctx_aged.(earp_flood_table);
+                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
 
         (* Generate reply if request is for us *)
         if ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip)
@@ -1407,8 +1816,9 @@ Proof.
   reflexivity.
 Qed.
 
-Theorem resolve_address_cache_miss : forall ctx target_ip current_time,
+Theorem resolve_address_cache_miss_allowed : forall ctx target_ip current_time,
   lookup_cache ctx.(earp_cache) target_ip = None ->
+  snd (update_flood_table ctx.(earp_flood_table) target_ip current_time) = true ->
   exists ctx' req,
     resolve_address ctx target_ip current_time = (None, ctx', Some req) /\
     req.(arp_op) = ARP_OP_REQUEST /\
@@ -1416,9 +1826,11 @@ Theorem resolve_address_cache_miss : forall ctx target_ip current_time,
     req.(arp_sha) = ctx.(earp_my_mac) /\
     req.(arp_spa) = ctx.(earp_my_ip).
 Proof.
-  intros ctx target_ip current_time Hlookup.
+  intros ctx target_ip current_time Hlookup Hallowed.
   unfold resolve_address.
   rewrite Hlookup.
+  destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
+  simpl in Hallowed. subst allowed.
   eexists. eexists.
   split.
   - reflexivity.
@@ -1427,6 +1839,19 @@ Proof.
     split. reflexivity.
     split. reflexivity.
     reflexivity.
+Qed.
+
+Theorem resolve_address_cache_miss_rejected : forall ctx target_ip current_time,
+  lookup_cache ctx.(earp_cache) target_ip = None ->
+  snd (update_flood_table ctx.(earp_flood_table) target_ip current_time) = false ->
+  resolve_address ctx target_ip current_time = (None, ctx, None).
+Proof.
+  intros ctx target_ip current_time Hlookup Hrejected.
+  unfold resolve_address.
+  rewrite Hlookup.
+  destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
+  simpl in Hrejected. subst allowed.
+  reflexivity.
 Qed.
 
 Theorem process_generic_arp_round_trip : forall packet,
@@ -1512,7 +1937,10 @@ Proof.
   unfold resolve_address.
   destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup; simpl.
   - reflexivity.
-  - symmetry. apply add_pending_request_preserves_mac.
+  - destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed].
+    destruct allowed; simpl.
+    + rewrite add_pending_request_preserves_mac. reflexivity.
+    + reflexivity.
 Qed.
 
 Theorem resolve_address_preserves_ip : forall ctx target_ip current_time,
@@ -1523,7 +1951,10 @@ Proof.
   unfold resolve_address.
   destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup; simpl.
   - reflexivity.
-  - symmetry. apply add_pending_request_preserves_ip.
+  - destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed].
+    destruct allowed; simpl.
+    + rewrite add_pending_request_preserves_ip. reflexivity.
+    + reflexivity.
 Qed.
 
 (* =============================================================================
