@@ -111,7 +111,7 @@ Definition ARP_HRD_ETHERNET : word16 := 1.
 Definition ARP_HRD_PACKET_RADIO : word16 := 2.  (* Experimental *)
 
 (* Protocol types (EtherType values) *)
-Definition ARP_PRO_IP : word16 := 0x0800.       (* IPv4 *)
+Definition ARP_PRO_IP : word16 := 2048.         (* IPv4, 0x0800 *)
 
 (* Operation codes *)
 Definition ARP_OP_REQUEST : word16 := 1.
@@ -144,6 +144,12 @@ Record IPv4Address := {
 (* Broadcast addresses *)
 Definition MAC_BROADCAST : MACAddress.
   refine {| mac_bytes := [255; 255; 255; 255; 255; 255] |}.
+  reflexivity.
+Defined.
+
+(* Zero MAC address for unknown target hardware in ARP requests *)
+Definition MAC_ZERO : MACAddress.
+  refine {| mac_bytes := [0; 0; 0; 0; 0; 0] |}.
   reflexivity.
 Defined.
 
@@ -313,12 +319,12 @@ Qed.
    Section 5: Packet Construction
    ============================================================================= *)
 
-Definition make_arp_request (my_mac : MACAddress) (my_ip : IPv4Address) 
+Definition make_arp_request (my_mac : MACAddress) (my_ip : IPv4Address)
                            (target_ip : IPv4Address) : ARPEthernetIPv4 :=
   {| arp_op := ARP_OP_REQUEST;
      arp_sha := my_mac;
      arp_spa := my_ip;
-     arp_tha := MAC_BROADCAST;  (* Unknown, use zeros or broadcast *)
+     arp_tha := MAC_ZERO;  (* Unknown target MAC, RFC 826 *)
      arp_tpa := target_ip |}.
 
 Definition make_arp_reply (my_mac : MACAddress) (my_ip : IPv4Address)
@@ -341,7 +347,7 @@ Definition serialize_ipv4 (ip : IPv4Address) : list byte :=
 
 (* Helper: split 16-bit value into 2 bytes (big-endian) *)
 Definition split_word16 (w : word16) : list byte :=
-  [N.shiftr w 8; N.land w 0xFF].
+  [N.shiftr w 8; N.land w 255].
 
 (* Helper: combine 2 bytes into 16-bit value (big-endian) *)
 Definition combine_word16 (hi lo : byte) : word16 :=
@@ -491,12 +497,12 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
    Section 9: Gratuitous ARP
    ============================================================================= *)
 
-Definition make_gratuitous_arp (my_mac : MACAddress) (my_ip : IPv4Address) 
+Definition make_gratuitous_arp (my_mac : MACAddress) (my_ip : IPv4Address)
                                : ARPEthernetIPv4 :=
-  {| arp_op := ARP_OP_REQUEST;  (* Or REPLY, both are used *)
+  {| arp_op := ARP_OP_REQUEST;  (* Request-form gratuitous ARP *)
      arp_sha := my_mac;
      arp_spa := my_ip;
-     arp_tha := MAC_BROADCAST;
+     arp_tha := MAC_ZERO;  (* Unknown in payload, broadcast at L2 *)
      arp_tpa := my_ip |}.  (* Target IP = Source IP for gratuitous *)
 
 (* =============================================================================
@@ -857,14 +863,18 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
         else
           (req :: kept_reqs, packets)
       in
-      let '(new_reqs, packets) := fold_left process_req reqs ([], []) in
+      let '(acc_reqs, packets) := fold_left process_req reqs ([], []) in
+      let new_reqs := rev acc_reqs in
       ({| earp_my_mac := ctx.(earp_my_mac);
           earp_my_ip := ctx.(earp_my_ip);
           earp_cache := ctx.(earp_cache);
-          earp_state_data := if new_reqs then StatePending new_reqs else StateIdle;
+          earp_state_data := match new_reqs with
+                             | [] => StateIdle
+                             | _ => StatePending new_reqs
+                             end;
           earp_iface := ctx.(earp_iface);
           earp_flood_table := ctx.(earp_flood_table);
-          earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}, packets)
+          earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}, rev packets)
   | _ => (ctx, [])
   end.
 
@@ -914,7 +924,7 @@ Definition make_arp_probe (my_mac : MACAddress) (target_ip : IPv4Address)
   {| arp_op := ARP_OP_REQUEST;
      arp_sha := my_mac;
      arp_spa := {| ipv4_a := 0; ipv4_b := 0; ipv4_c := 0; ipv4_d := 0 |};  (* Sender IP = 0 *)
-     arp_tha := MAC_BROADCAST;
+     arp_tha := MAC_ZERO;  (* Unknown target MAC *)
      arp_tpa := target_ip |}.
 
 Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
@@ -1107,18 +1117,20 @@ Qed.
    ============================================================================= *)
 
 Definition age_cache (cache : ARPCache) (elapsed : N) : ARPCache :=
-  filter (fun entry =>
-    if entry.(ace_static)
-    then true
-    else negb (N.leb entry.(ace_ttl) elapsed))
-  (map (fun entry =>
-    if entry.(ace_static)
-    then entry
-    else {| ace_ip := entry.(ace_ip);
-            ace_mac := entry.(ace_mac);
-            ace_ttl := entry.(ace_ttl) - elapsed;
-            ace_static := entry.(ace_static) |})
-  cache).
+  let dec (e : ARPCacheEntry) :=
+    if e.(ace_static)
+    then e
+    else {| ace_ip := e.(ace_ip);
+            ace_mac := e.(ace_mac);
+            ace_ttl := e.(ace_ttl) - elapsed;
+            ace_static := e.(ace_static) |}
+  in
+  filter
+    (fun e =>
+       if e.(ace_static)
+       then true
+       else negb (N.leb e.(ace_ttl) 0))
+    (map dec cache).
 
 Lemma map_age_zero_entry : forall entry,
   (if ace_static entry
@@ -1250,7 +1262,7 @@ Qed.
 Theorem gratuitous_arp_self_announcing : forall mac ip,
   let garp := make_gratuitous_arp mac ip in
   arp_spa garp = arp_tpa garp /\
-  arp_tha garp = MAC_BROADCAST /\
+  arp_tha garp = MAC_ZERO /\
   arp_spa garp = ip /\
   arp_op garp = ARP_OP_REQUEST.
 Proof.
@@ -1368,9 +1380,10 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
         let ctx' := start_dad_probe ctx_aged probe.(probe_ip) current_time in
         (ctx', None)
       else
-        (* Continue with normal processing *)
-        let cache' := merge_cache_entry ctx_aged.(earp_cache)
-                                        packet.(arp_spa) packet.(arp_sha) 300 in
+        (* Continue with RFC 826 strict processing *)
+        let i_am_target := ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip) in
+        let cache' := rfc826_merge ctx_aged.(earp_cache)
+                                   packet.(arp_spa) packet.(arp_sha) 300 i_am_target in
         let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := cache';
@@ -1385,9 +1398,10 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
       then
         process_conflict ctx_aged current_time
       else
-        (* Normal processing *)
-        let cache' := merge_cache_entry ctx_aged.(earp_cache)
-                                        packet.(arp_spa) packet.(arp_sha) 300 in
+        (* RFC 826 strict processing *)
+        let i_am_target := ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip) in
+        let cache' := rfc826_merge ctx_aged.(earp_cache)
+                                   packet.(arp_spa) packet.(arp_sha) 300 i_am_target in
 
         (* Remove from pending if this is a reply to our request *)
         let new_state :=
