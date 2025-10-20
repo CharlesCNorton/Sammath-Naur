@@ -217,6 +217,47 @@ Definition rfc826_merge (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
   end.
 
 (* =============================================================================
+   Section 4A: Additional Cache Properties
+   ============================================================================= *)
+
+Theorem static_entries_preserved : forall cache ip mac ttl e,
+  In e cache ->
+  ace_static e = true ->
+  ip_eq e.(ace_ip) ip = true ->
+  In e (update_cache_entry cache ip mac ttl).
+Proof.
+  intros cache ip mac ttl e Hin Hstatic Heq_ip.
+  unfold update_cache_entry.
+  induction cache as [|e' rest IH].
+  - inversion Hin.
+  - simpl. destruct (ip_eq (ace_ip e') ip) eqn:Heq'.
+    + destruct (ace_static e') eqn:Hstatic'.
+      * destruct Hin as [Heq_e | Hin_rest].
+        { subst e'. left. reflexivity. }
+        { right. assumption. }
+      * destruct Hin as [Heq_e | Hin_rest].
+        { subst e'. rewrite Hstatic in Hstatic'. discriminate. }
+        { right. assumption. }
+    + destruct Hin as [Heq_e | Hin_rest].
+      * left. assumption.
+      * right. apply IH. assumption.
+Qed.
+
+Theorem lookup_empty : forall ip,
+  lookup_cache [] ip = None.
+Proof.
+  intros ip. unfold lookup_cache. simpl. reflexivity.
+Qed.
+
+Theorem rfc826_merge_not_target : forall cache ip mac ttl,
+  lookup_cache cache ip = None ->
+  rfc826_merge cache ip mac ttl false = cache.
+Proof.
+  intros cache ip mac ttl Hnone.
+  unfold rfc826_merge. rewrite Hnone. reflexivity.
+Qed.
+
+(* =============================================================================
    Section 5: Packet Construction
    ============================================================================= *)
 
@@ -290,6 +331,48 @@ Definition parse_arp_packet (data : list byte) : option ARPEthernetIPv4 :=
     else None
   | _ => None
   end.
+
+(* =============================================================================
+   Section 6A: Generic Hardware/Protocol Type Processing
+   ============================================================================= *)
+
+Definition is_supported_hw_proto (hrd : word16) (pro : word16) : bool :=
+  (N.eqb hrd ARP_HRD_ETHERNET && N.eqb pro ARP_PRO_IP).
+
+Definition process_generic_arp (packet : ARPPacket)
+  : option ARPEthernetIPv4 :=
+  if is_supported_hw_proto packet.(ar_hrd) packet.(ar_pro) then
+    if (N.eqb packet.(ar_hln) ETHERNET_ADDR_LEN) &&
+       (N.eqb packet.(ar_pln) IPV4_ADDR_LEN) then
+      match packet.(ar_sha), packet.(ar_spa), packet.(ar_tha), packet.(ar_tpa) with
+      | [sha1; sha2; sha3; sha4; sha5; sha6],
+        [spa1; spa2; spa3; spa4],
+        [tha1; tha2; tha3; tha4; tha5; tha6],
+        [tpa1; tpa2; tpa3; tpa4] =>
+          Some {| arp_op := packet.(ar_op);
+                  arp_sha := {| mac_bytes := [sha1; sha2; sha3; sha4; sha5; sha6];
+                               mac_valid := eq_refl |};
+                  arp_spa := {| ipv4_a := spa1; ipv4_b := spa2;
+                               ipv4_c := spa3; ipv4_d := spa4 |};
+                  arp_tha := {| mac_bytes := [tha1; tha2; tha3; tha4; tha5; tha6];
+                               mac_valid := eq_refl |};
+                  arp_tpa := {| ipv4_a := tpa1; ipv4_b := tpa2;
+                               ipv4_c := tpa3; ipv4_d := tpa4 |} |}
+      | _, _, _, _ => None
+      end
+    else None
+  else None.
+
+Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
+  {| ar_hrd := ARP_HRD_ETHERNET;
+     ar_pro := ARP_PRO_IP;
+     ar_hln := ETHERNET_ADDR_LEN;
+     ar_pln := IPV4_ADDR_LEN;
+     ar_op := packet.(arp_op);
+     ar_sha := serialize_mac packet.(arp_sha);
+     ar_spa := serialize_ipv4 packet.(arp_spa);
+     ar_tha := serialize_mac packet.(arp_tha);
+     ar_tpa := serialize_ipv4 packet.(arp_tpa) |}.
 
 (* =============================================================================
    Section 7: Protocol State Machine
@@ -529,6 +612,19 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
   | _ => (ctx, [])
   end.
 
+(* RFC 826 High-Level Address Resolution *)
+Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
+                           (current_time : N)
+  : option MACAddress * EnhancedARPContext * option ARPEthernetIPv4 :=
+  match lookup_cache ctx.(earp_cache) target_ip with
+  | Some mac =>
+      (Some mac, ctx, None)
+  | None =>
+      let ctx' := add_pending_request ctx target_ip current_time in
+      let req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
+      (None, ctx', Some req)
+  end.
+
 (* =============================================================================
    Section 10D: Duplicate Address Detection (DAD) / RFC 5227 ARP Probe
    ============================================================================= *)
@@ -672,6 +768,33 @@ Definition age_cache (cache : ARPCache) (elapsed : N) : ARPCache :=
             ace_ttl := entry.(ace_ttl) - elapsed;
             ace_static := entry.(ace_static) |})
   cache).
+
+Lemma map_age_zero_entry : forall entry,
+  (if ace_static entry
+   then entry
+   else {| ace_ip := ace_ip entry;
+           ace_mac := ace_mac entry;
+           ace_ttl := ace_ttl entry - 0;
+           ace_static := ace_static entry |}) = entry.
+Proof.
+  intros entry. destruct (ace_static entry) eqn:Hstatic.
+  - reflexivity.
+  - rewrite N.sub_0_r. destruct entry as [ip mac ttl st]. simpl. simpl in Hstatic. rewrite Hstatic. reflexivity.
+Qed.
+
+Lemma map_age_zero : forall cache,
+  map (fun entry =>
+    if ace_static entry
+    then entry
+    else {| ace_ip := ace_ip entry;
+            ace_mac := ace_mac entry;
+            ace_ttl := ace_ttl entry - 0;
+            ace_static := ace_static entry |}) cache = cache.
+Proof.
+  intros cache. induction cache as [|e rest IH].
+  - simpl. reflexivity.
+  - simpl. rewrite map_age_zero_entry. f_equal. apply IH.
+Qed.
 
 Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                                        (packet : ARPEthernetIPv4)
@@ -1271,6 +1394,139 @@ Proof.
 Qed.
 
 (* =============================================================================
+   Section 14A: Properties of New Functions
+   ============================================================================= *)
+
+Theorem resolve_address_cache_hit : forall ctx target_ip mac current_time,
+  lookup_cache ctx.(earp_cache) target_ip = Some mac ->
+  resolve_address ctx target_ip current_time = (Some mac, ctx, None).
+Proof.
+  intros ctx target_ip mac current_time Hlookup.
+  unfold resolve_address.
+  rewrite Hlookup.
+  reflexivity.
+Qed.
+
+Theorem resolve_address_cache_miss : forall ctx target_ip current_time,
+  lookup_cache ctx.(earp_cache) target_ip = None ->
+  exists ctx' req,
+    resolve_address ctx target_ip current_time = (None, ctx', Some req) /\
+    req.(arp_op) = ARP_OP_REQUEST /\
+    req.(arp_tpa) = target_ip /\
+    req.(arp_sha) = ctx.(earp_my_mac) /\
+    req.(arp_spa) = ctx.(earp_my_ip).
+Proof.
+  intros ctx target_ip current_time Hlookup.
+  unfold resolve_address.
+  rewrite Hlookup.
+  eexists. eexists.
+  split.
+  - reflexivity.
+  - unfold make_arp_request. simpl.
+    split. reflexivity.
+    split. reflexivity.
+    split. reflexivity.
+    reflexivity.
+Qed.
+
+Theorem process_generic_arp_round_trip : forall packet,
+  process_generic_arp (convert_to_generic packet) = Some packet.
+Proof.
+  intros packet.
+  destruct packet as [op sha spa tha tpa].
+  destruct sha as [sha_bytes sha_valid].
+  destruct tha as [tha_bytes tha_valid].
+  destruct spa as [spa_a spa_b spa_c spa_d].
+  destruct tpa as [tpa_a tpa_b tpa_c tpa_d].
+  destruct sha_bytes as [|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]]; try discriminate sha_valid.
+  destruct tha_bytes as [|t1 [|t2 [|t3 [|t4 [|t5 [|t6 [|]]]]]]]; try discriminate tha_valid.
+  unfold process_generic_arp, convert_to_generic, is_supported_hw_proto.
+  simpl.
+  repeat rewrite N.eqb_refl.
+  simpl.
+  assert (Hsha_eq: {| mac_bytes := [s1; s2; s3; s4; s5; s6]; mac_valid := eq_refl |} =
+                   {| mac_bytes := [s1; s2; s3; s4; s5; s6]; mac_valid := sha_valid |}) by
+    (f_equal; apply UIP_dec; decide equality; decide equality; apply N.eq_dec).
+  assert (Htha_eq: {| mac_bytes := [t1; t2; t3; t4; t5; t6]; mac_valid := eq_refl |} =
+                   {| mac_bytes := [t1; t2; t3; t4; t5; t6]; mac_valid := tha_valid |}) by
+    (f_equal; apply UIP_dec; decide equality; decide equality; apply N.eq_dec).
+  congruence.
+Qed.
+
+Theorem generic_arp_validates_hw_proto : forall packet result,
+  process_generic_arp packet = Some result ->
+  packet.(ar_hrd) = ARP_HRD_ETHERNET /\
+  packet.(ar_pro) = ARP_PRO_IP.
+Proof.
+  intros packet result Hproc.
+  unfold process_generic_arp in Hproc.
+  unfold is_supported_hw_proto in Hproc.
+  destruct (N.eqb (ar_hrd packet) ARP_HRD_ETHERNET) eqn:Hhrd.
+  - destruct (N.eqb (ar_pro packet) ARP_PRO_IP) eqn:Hpro.
+    + apply N.eqb_eq in Hhrd.
+      apply N.eqb_eq in Hpro.
+      split; assumption.
+    + simpl in Hproc. discriminate.
+  - simpl in Hproc. discriminate.
+Qed.
+
+Theorem generic_arp_validates_lengths : forall packet result,
+  process_generic_arp packet = Some result ->
+  packet.(ar_hln) = ETHERNET_ADDR_LEN /\
+  packet.(ar_pln) = IPV4_ADDR_LEN.
+Proof.
+  intros packet result Hproc.
+  unfold process_generic_arp in Hproc.
+  destruct (is_supported_hw_proto (ar_hrd packet) (ar_pro packet)) eqn:Hsupp.
+  - destruct (N.eqb (ar_hln packet) ETHERNET_ADDR_LEN) eqn:Hhln.
+    + destruct (N.eqb (ar_pln packet) IPV4_ADDR_LEN) eqn:Hpln.
+      * apply N.eqb_eq in Hhln.
+        apply N.eqb_eq in Hpln.
+        split; assumption.
+      * simpl in Hproc. discriminate.
+    + simpl in Hproc. discriminate.
+  - discriminate.
+Qed.
+
+Lemma add_pending_request_preserves_mac : forall ctx target_ip current_time,
+  earp_my_mac (add_pending_request ctx target_ip current_time) = earp_my_mac ctx.
+Proof.
+  intros ctx target_ip current_time.
+  unfold add_pending_request.
+  destruct (earp_state_data ctx); simpl; reflexivity.
+Qed.
+
+Lemma add_pending_request_preserves_ip : forall ctx target_ip current_time,
+  earp_my_ip (add_pending_request ctx target_ip current_time) = earp_my_ip ctx.
+Proof.
+  intros ctx target_ip current_time.
+  unfold add_pending_request.
+  destruct (earp_state_data ctx); simpl; reflexivity.
+Qed.
+
+Theorem resolve_address_preserves_mac : forall ctx target_ip current_time,
+  (earp_my_mac ctx) =
+  (earp_my_mac (let '(_, ctx', _) := resolve_address ctx target_ip current_time in ctx')).
+Proof.
+  intros ctx target_ip current_time.
+  unfold resolve_address.
+  destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup; simpl.
+  - reflexivity.
+  - symmetry. apply add_pending_request_preserves_mac.
+Qed.
+
+Theorem resolve_address_preserves_ip : forall ctx target_ip current_time,
+  (earp_my_ip ctx) =
+  (earp_my_ip (let '(_, ctx', _) := resolve_address ctx target_ip current_time in ctx')).
+Proof.
+  intros ctx target_ip current_time.
+  unfold resolve_address.
+  destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup; simpl.
+  - reflexivity.
+  - symmetry. apply add_pending_request_preserves_ip.
+Qed.
+
+(* =============================================================================
    Section 15: Extraction
    ============================================================================= *)
 
@@ -1285,4 +1541,7 @@ Extraction "arp.ml"
   make_arp_request
   make_arp_reply
   lookup_cache
-  merge_cache_entry.
+  merge_cache_entry
+  resolve_address
+  process_generic_arp
+  convert_to_generic.
