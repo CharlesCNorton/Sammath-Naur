@@ -117,34 +117,39 @@ Proof.
   rewrite N.mod_small; lia.
 Qed.
 
-(* Hardware types from RFC 826 *)
+(* Hardware type constant: Ethernet (10Mbps and above) *)
 Definition ARP_HRD_ETHERNET : word16 := 1.
-Definition ARP_HRD_PACKET_RADIO : word16 := 2.  (* Experimental *)
+(* Hardware type constant: Experimental Packet Radio Network *)
+Definition ARP_HRD_PACKET_RADIO : word16 := 2.
 
-(* Protocol types (EtherType values) *)
-Definition ARP_PRO_IP : word16 := 2048.         (* IPv4, 0x0800 *)
+(* Protocol type constant: IPv4 (EtherType 0x0800) *)
+Definition ARP_PRO_IP : word16 := 2048.
 
-(* Operation codes *)
+(* ARP operation code: request (query for MAC address) *)
 Definition ARP_OP_REQUEST : word16 := 1.
+(* ARP operation code: reply (response with MAC address) *)
 Definition ARP_OP_REPLY : word16 := 2.
-Definition RARP_OP_REQUEST : word16 := 3.        (* RFC 903 extension *)
-Definition RARP_OP_REPLY : word16 := 4.          (* RFC 903 extension *)
+(* RARP operation code: reverse ARP request (RFC 903) *)
+Definition RARP_OP_REQUEST : word16 := 3.
+(* RARP operation code: reverse ARP reply (RFC 903) *)
+Definition RARP_OP_REPLY : word16 := 4.
 
-(* Standard lengths for Ethernet/IPv4 *)
+(* Standard Ethernet MAC address length in bytes *)
 Definition ETHERNET_ADDR_LEN : byte := 6.
+(* Standard IPv4 address length in bytes *)
 Definition IPV4_ADDR_LEN : byte := 4.
 
 (* =============================================================================
    Section 2: Address Types
    ============================================================================= *)
 
-(* MAC Address: 48 bits for Ethernet *)
+(* Ethernet MAC address: 48-bit hardware identifier with length constraint *)
 Record MACAddress := {
   mac_bytes : list byte;
   mac_valid : length mac_bytes = 6%nat
 }.
 
-(* IPv4 Address *)
+(* IPv4 address: 32-bit internet protocol address as four octets *)
 Record IPv4Address := {
   ipv4_a : byte;
   ipv4_b : byte;
@@ -152,28 +157,29 @@ Record IPv4Address := {
   ipv4_d : byte
 }.
 
-(* Broadcast addresses *)
+(* Ethernet broadcast address: FF:FF:FF:FF:FF:FF *)
 Definition MAC_BROADCAST : MACAddress.
   refine {| mac_bytes := [255; 255; 255; 255; 255; 255] |}.
   reflexivity.
 Defined.
 
-(* Zero MAC address for unknown target hardware in ARP requests *)
+(* Zero MAC address: 00:00:00:00:00:00 for unknown target in requests *)
 Definition MAC_ZERO : MACAddress.
   refine {| mac_bytes := [0; 0; 0; 0; 0; 0] |}.
   reflexivity.
 Defined.
 
+(* Checks if MAC address is broadcast (FF:FF:FF:FF:FF:FF) *)
 Definition is_broadcast_mac (m : MACAddress) : bool :=
   match m.(mac_bytes) with
   | [255; 255; 255; 255; 255; 255] => true
   | _ => false
   end.
 
-(* Check if MAC address is multicast (I/G bit = 1) *)
+(* Checks if MAC address is multicast via I/G bit (LSB of first octet) *)
 Definition is_multicast_mac (m : MACAddress) : bool :=
   match m.(mac_bytes) with
-  | b0 :: _ => N.testbit b0 0  (* Least significant bit of first byte *)
+  | b0 :: _ => N.testbit b0 0
   | _ => false
   end.
 
@@ -181,48 +187,51 @@ Definition is_multicast_mac (m : MACAddress) : bool :=
    Section 3: ARP Packet Structure (RFC 826 Format)
    ============================================================================= *)
 
+(* Generic ARP packet: variable-length addresses per RFC 826 *)
 Record ARPPacket := {
-  ar_hrd : word16;           (* Hardware address space *)
-  ar_pro : word16;           (* Protocol address space *)
-  ar_hln : byte;             (* Hardware address length *)
-  ar_pln : byte;             (* Protocol address length *)
-  ar_op  : word16;           (* Operation code *)
+  ar_hrd : word16;           (* Hardware address space (e.g., Ethernet) *)
+  ar_pro : word16;           (* Protocol address space (e.g., IPv4) *)
+  ar_hln : byte;             (* Byte length of hardware address *)
+  ar_pln : byte;             (* Byte length of protocol address *)
+  ar_op  : word16;           (* ARP operation code (request/reply) *)
   ar_sha : list byte;        (* Sender hardware address *)
   ar_spa : list byte;        (* Sender protocol address *)
   ar_tha : list byte;        (* Target hardware address *)
   ar_tpa : list byte         (* Target protocol address *)
 }.
 
-(* Specialized Ethernet/IPv4 ARP packet *)
+(* Ethernet/IPv4 ARP packet: fixed 48-bit MAC and 32-bit IP addresses *)
 Record ARPEthernetIPv4 := {
-  arp_op : word16;
-  arp_sha : MACAddress;      (* Sender MAC *)
-  arp_spa : IPv4Address;     (* Sender IP *)
-  arp_tha : MACAddress;      (* Target MAC *)
-  arp_tpa : IPv4Address      (* Target IP *)
+  arp_op : word16;           (* Operation: request (1) or reply (2) *)
+  arp_sha : MACAddress;      (* Sender 48-bit MAC address *)
+  arp_spa : IPv4Address;     (* Sender 32-bit IP address *)
+  arp_tha : MACAddress;      (* Target 48-bit MAC address *)
+  arp_tpa : IPv4Address      (* Target 32-bit IP address *)
 }.
 
 (* =============================================================================
    Section 4: ARP Cache Table
    ============================================================================= *)
 
+(* ARP cache entry: maps IP to MAC with TTL and mutability flag *)
 Record ARPCacheEntry := {
-  ace_ip : IPv4Address;
-  ace_mac : MACAddress;
-  ace_ttl : N;               (* Time to live in seconds *)
-  ace_static : bool          (* Static vs dynamic entry *)
+  ace_ip : IPv4Address;      (* Protocol address (lookup key) *)
+  ace_mac : MACAddress;      (* Hardware address (resolved value) *)
+  ace_ttl : N;               (* Time-to-live in seconds *)
+  ace_static : bool          (* True: permanent, False: expires *)
 }.
 
+(* ARP cache table: linear list of IP-to-MAC mappings *)
 Definition ARPCache := list ARPCacheEntry.
 
-(* Helper: IP equality check *)
+(* Structural equality for IPv4 addresses: compares all four octets *)
 Definition ip_eq (ip1 ip2 : IPv4Address) : bool :=
   (N.eqb ip1.(ipv4_a) ip2.(ipv4_a)) &&
   (N.eqb ip1.(ipv4_b) ip2.(ipv4_b)) &&
   (N.eqb ip1.(ipv4_c) ip2.(ipv4_c)) &&
   (N.eqb ip1.(ipv4_d) ip2.(ipv4_d)).
 
-(* Cache lookup *)
+(* Searches cache for IP address, returning associated MAC if found *)
 Definition lookup_cache (cache : ARPCache) (ip : IPv4Address) : option MACAddress :=
   let fix find (c : ARPCache) : option MACAddress :=
     match c with
@@ -234,7 +243,7 @@ Definition lookup_cache (cache : ARPCache) (ip : IPv4Address) : option MACAddres
     end
   in find cache.
 
-(* RFC 826 merge algorithm - update existing entry *)
+(* Updates existing cache entry, preserving static entries *)
 Definition update_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
                               (ttl : N) : ARPCache :=
   let entry := {| ace_ip := ip; ace_mac := mac; ace_ttl := ttl; ace_static := false |} in
@@ -251,7 +260,7 @@ Definition update_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAd
     end
   in update cache.
 
-(* Add new cache entry (only if not present) *)
+(* Adds new cache entry if IP not present, otherwise preserves existing *)
 Definition add_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
                           (ttl : N) : ARPCache :=
   let entry := {| ace_ip := ip; ace_mac := mac; ace_ttl := ttl; ace_static := false |} in
@@ -265,7 +274,7 @@ Definition add_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddre
     end
   in add cache.
 
-(* Combined merge: update if exists, insert if allowed *)
+(* Unconditional merge: updates existing or adds new entry *)
 Definition merge_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
                             (ttl : N) : ARPCache :=
   let entry := {| ace_ip := ip; ace_mac := mac; ace_ttl := ttl; ace_static := false |} in
@@ -282,7 +291,7 @@ Definition merge_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAdd
     end
   in update cache.
 
-(* RFC 826 compliant conditional merge *)
+(* RFC 826 compliant merge: updates if exists, adds only if target *)
 Definition rfc826_merge (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
                         (ttl : N) (i_am_target : bool) : ARPCache :=
   match lookup_cache cache ip with
@@ -296,6 +305,7 @@ Definition rfc826_merge (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
    Section 4A: Additional Cache Properties
    ============================================================================= *)
 
+(* Static cache entries remain in cache after update operations *)
 Theorem static_entries_preserved : forall cache ip mac ttl e,
   In e cache ->
   ace_static e = true ->
@@ -319,12 +329,14 @@ Proof.
       * right. apply IH. assumption.
 Qed.
 
+(* Looking up any IP in empty cache returns None *)
 Theorem lookup_empty : forall ip,
   lookup_cache [] ip = None.
 Proof.
   intros ip. unfold lookup_cache. simpl. reflexivity.
 Qed.
 
+(* RFC 826 merge with non-target and absent IP leaves cache unchanged *)
 Theorem rfc826_merge_not_target : forall cache ip mac ttl,
   lookup_cache cache ip = None ->
   rfc826_merge cache ip mac ttl false = cache.
@@ -337,6 +349,7 @@ Qed.
    Section 5: Packet Construction
    ============================================================================= *)
 
+(* Constructs ARP request packet: queries for MAC address of target IP *)
 Definition make_arp_request (my_mac : MACAddress) (my_ip : IPv4Address)
                            (target_ip : IPv4Address) : ARPEthernetIPv4 :=
   {| arp_op := ARP_OP_REQUEST;
@@ -345,8 +358,9 @@ Definition make_arp_request (my_mac : MACAddress) (my_ip : IPv4Address)
      arp_tha := MAC_ZERO;  (* Unknown target MAC, RFC 826 *)
      arp_tpa := target_ip |}.
 
+(* Constructs ARP reply packet: provides MAC address to requester *)
 Definition make_arp_reply (my_mac : MACAddress) (my_ip : IPv4Address)
-                         (requester_mac : MACAddress) (requester_ip : IPv4Address) 
+                         (requester_mac : MACAddress) (requester_ip : IPv4Address)
                          : ARPEthernetIPv4 :=
   {| arp_op := ARP_OP_REPLY;
      arp_sha := my_mac;
@@ -358,19 +372,22 @@ Definition make_arp_reply (my_mac : MACAddress) (my_ip : IPv4Address)
    Section 6: Packet Serialization
    ============================================================================= *)
 
+(* Serializes MAC address to 6-byte list *)
 Definition serialize_mac (m : MACAddress) : list byte := m.(mac_bytes).
 
+(* Serializes IPv4 address to 4-byte list in network order *)
 Definition serialize_ipv4 (ip : IPv4Address) : list byte :=
   [ip.(ipv4_a); ip.(ipv4_b); ip.(ipv4_c); ip.(ipv4_d)].
 
-(* Helper: split 16-bit value into 2 bytes (big-endian) *)
+(* Splits 16-bit word into high and low bytes (big-endian) *)
 Definition split_word16 (w : word16) : list byte :=
   [N.shiftr w 8; N.land w 255].
 
-(* Helper: combine 2 bytes into 16-bit value (big-endian) *)
+(* Combines two bytes into 16-bit word (big-endian) *)
 Definition combine_word16 (hi lo : byte) : word16 :=
   N.lor (N.shiftl hi 8) lo.
 
+(* Serializes ARP packet to 28-byte wire format per RFC 826 *)
 Definition serialize_arp_packet (p : ARPEthernetIPv4) : list byte :=
   split_word16 ARP_HRD_ETHERNET ++
   split_word16 ARP_PRO_IP ++
@@ -382,6 +399,7 @@ Definition serialize_arp_packet (p : ARPEthernetIPv4) : list byte :=
   serialize_mac p.(arp_tha) ++
   serialize_ipv4 p.(arp_tpa).
 
+(* Parses 28-byte wire format into typed ARP packet, validating structure *)
 Definition parse_arp_packet (data : list byte) : option ARPEthernetIPv4 :=
   match data with
   | hrd_hi :: hrd_lo :: pro_hi :: pro_lo :: hln :: pln ::
@@ -412,9 +430,11 @@ Definition parse_arp_packet (data : list byte) : option ARPEthernetIPv4 :=
    Section 6A: Generic Hardware/Protocol Type Processing
    ============================================================================= *)
 
+(* Checks if hardware/protocol combination is Ethernet/IPv4 *)
 Definition is_supported_hw_proto (hrd : word16) (pro : word16) : bool :=
   (N.eqb hrd ARP_HRD_ETHERNET && N.eqb pro ARP_PRO_IP).
 
+(* Converts generic ARP packet to Ethernet/IPv4 if types match *)
 Definition process_generic_arp (packet : ARPPacket)
   : option ARPEthernetIPv4 :=
   if is_supported_hw_proto packet.(ar_hrd) packet.(ar_pro) then
@@ -439,6 +459,7 @@ Definition process_generic_arp (packet : ARPPacket)
     else None
   else None.
 
+(* Converts Ethernet/IPv4 packet to generic ARP format *)
 Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
   {| ar_hrd := ARP_HRD_ETHERNET;
      ar_pro := ARP_PRO_IP;
@@ -454,28 +475,31 @@ Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
    Section 7: Protocol State Machine
    ============================================================================= *)
 
+(* ARP protocol states: idle, probing, announcing, or defending *)
 Inductive ARPState :=
-  | ARP_IDLE
-  | ARP_PROBE      (* Sending request, waiting for reply *)
-  | ARP_ANNOUNCE   (* Gratuitous ARP *)
-  | ARP_DEFEND.    (* Conflict detection *)
+  | ARP_IDLE       (* No active operation *)
+  | ARP_PROBE      (* Address conflict detection (RFC 5227) *)
+  | ARP_ANNOUNCE   (* Gratuitous ARP announcement *)
+  | ARP_DEFEND.    (* Defending against address conflict *)
 
+(* ARP protocol context: configuration, cache, and operational state *)
 Record ARPContext := {
-  arp_my_mac : MACAddress;
-  arp_my_ip : IPv4Address;
-  arp_cache : ARPCache;
-  arp_state : ARPState;
-  arp_pending : list IPv4Address;  (* IPs we're waiting to resolve *)
-  arp_retries : N
+  arp_my_mac : MACAddress;           (* This host's MAC address *)
+  arp_my_ip : IPv4Address;           (* This host's IP address *)
+  arp_cache : ARPCache;              (* IP-to-MAC resolution cache *)
+  arp_state : ARPState;              (* Current protocol state *)
+  arp_pending : list IPv4Address;    (* IPs awaiting resolution *)
+  arp_retries : N                    (* Retry counter for requests *)
 }.
 
 (* =============================================================================
    Section 8: RFC 826 Reception Algorithm
    ============================================================================= *)
 
+(* RFC 826 packet reception: validates, merges cache, generates reply if target *)
 Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
                              : ARPContext * option ARPEthernetIPv4 :=
-  (* RFC 826 Algorithm with validation: *)
+  (* RFC 826 Algorithm with broadcast validation: *)
 
   (* Step 0: Validate sender MAC (RFC 826: must not be broadcast) *)
   if is_broadcast_mac packet.(arp_sha)
