@@ -4932,6 +4932,68 @@ Qed.
 
 
 (* =============================================================================
+   Section 15A: Memory Exhaustion Bounds
+   ============================================================================= *)
+
+Lemma filter_length_le : forall {A} (f : A -> bool) (l : list A),
+  (length (filter f l) <= length l)%nat.
+Proof.
+  intros A f l.
+  induction l as [|x xs IH].
+  - simpl. lia.
+  - simpl. destruct (f x); simpl; lia.
+Qed.
+
+Lemma map_length : forall {A B} (f : A -> B) (l : list A),
+  length (map f l) = length l.
+Proof.
+  intros A B f l.
+  induction l; simpl; auto.
+Qed.
+
+Lemma age_cache_length_le : forall cache elapsed,
+  (length (age_cache cache elapsed) <= length cache)%nat.
+Proof.
+  intros cache elapsed.
+  unfold age_cache.
+  set (dec := fun e : ARPCacheEntry =>
+    if ace_static e
+    then e
+    else {| ace_ip := ace_ip e;
+            ace_mac := ace_mac e;
+            ace_ttl := ace_ttl e - elapsed;
+            ace_static := ace_static e |}).
+  apply Nat.le_trans with (m := length (map dec cache)).
+  - apply filter_length_le.
+  - rewrite map_length. lia.
+Qed.
+
+Definition MAX_PENDING_REQUESTS : nat := 256.
+Definition MAX_FLOOD_TABLE_SIZE : nat := 512.
+
+Definition cache_memory_bound (cache : ARPCache) : nat :=
+  (length cache * 38)%nat.
+
+Definition flood_table_memory_bound (table : FloodTable) : nat :=
+  (length table * 16)%nat.
+
+Definition pending_requests_memory_bound (reqs : list PendingRequest) : nat :=
+  (length reqs * 32)%nat.
+
+Definition total_memory_bound (ctx : EnhancedARPContext) : nat :=
+  match earp_state_data ctx with
+  | StatePending reqs =>
+      (cache_memory_bound (earp_cache ctx) +
+       flood_table_memory_bound (earp_flood_table ctx) +
+       pending_requests_memory_bound reqs)%nat
+  | _ =>
+      (cache_memory_bound (earp_cache ctx) +
+       flood_table_memory_bound (earp_flood_table ctx))%nat
+  end.
+
+
+
+(* =============================================================================
    Section 16: Extraction
    ============================================================================= *)
 
