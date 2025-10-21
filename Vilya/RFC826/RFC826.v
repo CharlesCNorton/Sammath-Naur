@@ -854,6 +854,214 @@ Definition process_rarp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
   process_rarp_client ctx packet.
 
 (* =============================================================================
+   Section 8B: RARP Correctness Properties
+   ============================================================================= *)
+
+(* Lookup determinism: same MAC always returns same IP *)
+Theorem lookup_rarp_table_deterministic : forall table mac ip1 ip2,
+  lookup_rarp_table table mac = Some ip1 ->
+  lookup_rarp_table table mac = Some ip2 ->
+  ip1 = ip2.
+Proof.
+  intros table mac ip1 ip2 H1 H2.
+  rewrite H1 in H2.
+  injection H2 as H.
+  assumption.
+Qed.
+
+(* Lookup completeness: if MAC exists in table, lookup finds it *)
+Theorem lookup_rarp_table_complete : forall table mac ip,
+  In {| rarp_mac := mac; rarp_ip := ip |} table ->
+  exists ip', lookup_rarp_table table mac = Some ip'.
+Proof.
+  intros table mac ip Hin.
+  unfold lookup_rarp_table.
+  induction table as [|entry rest IH].
+  - inversion Hin.
+  - simpl in Hin. simpl.
+    destruct (mac_eq (rarp_mac entry) mac) eqn:Heq.
+    + exists (rarp_ip entry). reflexivity.
+    + destruct Hin as [Heq_entry | Hin_rest].
+      * subst entry. simpl in Heq.
+        unfold mac_eq in Heq.
+        destruct (list_eq_dec N.eq_dec (mac_bytes mac) (mac_bytes mac)) eqn:Hdec.
+        { discriminate. }
+        { exfalso. apply n. reflexivity. }
+      * apply IH. assumption.
+Qed.
+
+(* Empty table lookup always fails *)
+Theorem lookup_rarp_table_empty : forall mac,
+  lookup_rarp_table [] mac = None.
+Proof.
+  intros mac.
+  unfold lookup_rarp_table.
+  simpl. reflexivity.
+Qed.
+
+(* Client/server validation mutual exclusivity *)
+Theorem rarp_client_server_exclusive : forall pkt my_mac,
+  validate_rarp_client pkt my_mac = true ->
+  validate_rarp_server pkt = false.
+Proof.
+  intros pkt my_mac Hclient.
+  unfold validate_rarp_client, validate_rarp_server in *.
+  destruct (N.eqb (arp_op pkt) RARP_OP_REPLY) eqn:Hop_reply.
+  - destruct (N.eqb (arp_op pkt) RARP_OP_REQUEST) eqn:Hop_req.
+    + apply N.eqb_eq in Hop_reply.
+      apply N.eqb_eq in Hop_req.
+      subst. unfold RARP_OP_REPLY, RARP_OP_REQUEST in *.
+      assert (4 = 3) by congruence. discriminate.
+    + reflexivity.
+  - simpl in Hclient. discriminate.
+Qed.
+
+(* Server validation excludes client validation *)
+Theorem rarp_server_client_exclusive : forall pkt my_mac,
+  validate_rarp_server pkt = true ->
+  validate_rarp_client pkt my_mac = false.
+Proof.
+  intros pkt my_mac Hserver.
+  unfold validate_rarp_server, validate_rarp_client in *.
+  destruct (N.eqb (arp_op pkt) RARP_OP_REQUEST) eqn:Hop_req.
+  - destruct (N.eqb (arp_op pkt) RARP_OP_REPLY) eqn:Hop_reply.
+    + apply N.eqb_eq in Hop_reply.
+      apply N.eqb_eq in Hop_req.
+      subst. unfold RARP_OP_REPLY, RARP_OP_REQUEST in *.
+      assert (4 = 3) by congruence. discriminate.
+    + reflexivity.
+  - simpl in Hserver. discriminate.
+Qed.
+
+(* RARP server generates valid reply structure *)
+Theorem rarp_server_reply_valid : forall ctx table pkt reply,
+  process_rarp_server ctx table pkt = (ctx, Some reply) ->
+  reply.(arp_op) = RARP_OP_REPLY.
+Proof.
+  intros ctx table pkt reply Hproc.
+  unfold process_rarp_server in Hproc.
+  destruct (validate_rarp_server pkt) eqn:Hvalid.
+  - destruct (lookup_rarp_table table (arp_tha pkt)) eqn:Hlookup.
+    + inversion Hproc. subst. simpl. reflexivity.
+    + discriminate.
+  - discriminate.
+Qed.
+
+(* RARP server reply preserves client MAC in THA *)
+Theorem rarp_server_reply_tha : forall ctx table pkt reply,
+  process_rarp_server ctx table pkt = (ctx, Some reply) ->
+  reply.(arp_tha) = pkt.(arp_tha).
+Proof.
+  intros ctx table pkt reply Hproc.
+  unfold process_rarp_server in Hproc.
+  destruct (validate_rarp_server pkt) eqn:Hvalid.
+  - destruct (lookup_rarp_table table (arp_tha pkt)) eqn:Hlookup.
+    + inversion Hproc. subst. simpl. reflexivity.
+    + discriminate.
+  - discriminate.
+Qed.
+
+(* RARP server reply contains looked-up IP *)
+Theorem rarp_server_reply_tpa : forall ctx table pkt reply assigned_ip,
+  lookup_rarp_table table pkt.(arp_tha) = Some assigned_ip ->
+  process_rarp_server ctx table pkt = (ctx, Some reply) ->
+  reply.(arp_tpa) = assigned_ip.
+Proof.
+  intros ctx table pkt reply assigned_ip Hlookup Hproc.
+  unfold process_rarp_server in Hproc.
+  destruct (validate_rarp_server pkt) eqn:Hvalid.
+  - rewrite Hlookup in Hproc.
+    inversion Hproc. subst. simpl. reflexivity.
+  - discriminate.
+Qed.
+
+(* RARP server reply uses server's MAC as SHA *)
+Theorem rarp_server_reply_sha : forall ctx table pkt reply,
+  process_rarp_server ctx table pkt = (ctx, Some reply) ->
+  reply.(arp_sha) = ctx.(arp_my_mac).
+Proof.
+  intros ctx table pkt reply Hproc.
+  unfold process_rarp_server in Hproc.
+  destruct (validate_rarp_server pkt) eqn:Hvalid.
+  - destruct (lookup_rarp_table table (arp_tha pkt)) eqn:Hlookup.
+    + inversion Hproc. subst. simpl. reflexivity.
+    + discriminate.
+  - discriminate.
+Qed.
+
+(* RARP client extracts correct IP from valid reply *)
+Theorem rarp_client_extracts_ip : forall ctx pkt ip_result,
+  validate_rarp_client pkt ctx.(arp_my_mac) = true ->
+  process_rarp_client ctx pkt = (ctx, Some ip_result) ->
+  ip_result = pkt.(arp_tpa).
+Proof.
+  intros ctx pkt ip_result Hvalid Hproc.
+  unfold process_rarp_client in Hproc.
+  rewrite Hvalid in Hproc.
+  inversion Hproc. reflexivity.
+Qed.
+
+(* MAC equality is reflexive *)
+Lemma mac_eq_refl : forall m, mac_eq m m = true.
+Proof.
+  intros m.
+  unfold mac_eq.
+  destruct (list_eq_dec N.eq_dec (mac_bytes m) (mac_bytes m)) eqn:Heq.
+  - reflexivity.
+  - exfalso. apply n. reflexivity.
+Qed.
+
+(* RARP server generates replies that validate as client packets *)
+Theorem rarp_server_reply_validates_client : forall ctx table pkt reply client_mac,
+  validate_rarp_server pkt = true ->
+  pkt.(arp_tha) = client_mac ->
+  negb (is_broadcast_mac ctx.(arp_my_mac)) = true ->
+  negb (is_multicast_mac ctx.(arp_my_mac)) = true ->
+  process_rarp_server ctx table pkt = (ctx, Some reply) ->
+  validate_rarp_client reply client_mac = true.
+Proof.
+  intros ctx table pkt reply client_mac Hvalid_server Htha Hnot_bcast Hnot_mcast Hproc.
+  unfold process_rarp_server in Hproc.
+  rewrite Hvalid_server in Hproc.
+  destruct (lookup_rarp_table table (arp_tha pkt)) eqn:Hlookup.
+  - assert (reply = {| arp_op := RARP_OP_REPLY;
+                      arp_sha := arp_my_mac ctx;
+                      arp_spa := arp_my_ip ctx;
+                      arp_tha := client_mac;
+                      arp_tpa := i |}) by (inversion Hproc; rewrite <- Htha; reflexivity).
+    rewrite H.
+    unfold validate_rarp_client. simpl.
+    repeat rewrite N.eqb_refl. simpl.
+    rewrite mac_eq_refl.
+    rewrite Hnot_bcast, Hnot_mcast. simpl. reflexivity.
+  - discriminate.
+Qed.
+
+(* RARP request-reply round-trip correctness *)
+Theorem rarp_roundtrip : forall ctx_server ctx_client table request reply client_mac assigned_ip,
+  validate_rarp_server request = true ->
+  request.(arp_tha) = client_mac ->
+  ctx_client.(arp_my_mac) = client_mac ->
+  negb (is_broadcast_mac ctx_server.(arp_my_mac)) = true ->
+  negb (is_multicast_mac ctx_server.(arp_my_mac)) = true ->
+  lookup_rarp_table table (request.(arp_tha)) = Some assigned_ip ->
+  process_rarp_server ctx_server table request = (ctx_server, Some reply) ->
+  process_rarp_client ctx_client reply = (ctx_client, Some assigned_ip).
+Proof.
+  intros ctx_server ctx_client table request reply client_mac assigned_ip
+         Hvalid_req Htha Hclient_mac Hnot_bcast Hnot_mcast Hlookup Hserver.
+  unfold process_rarp_server in Hserver.
+  rewrite Hvalid_req, Hlookup in Hserver.
+  inversion Hserver; clear Hserver; subst.
+  unfold process_rarp_client.
+  unfold validate_rarp_client.
+  assert (Heq: arp_my_mac ctx_client = arp_tha request) by congruence.
+  rewrite Heq.
+  unfold RARP_OP_REPLY. simpl.
+  rewrite mac_eq_refl, Hnot_bcast, Hnot_mcast. simpl. reflexivity.
+Qed.
+
+(* =============================================================================
    Section 9: Gratuitous ARP
    ============================================================================= *)
 
