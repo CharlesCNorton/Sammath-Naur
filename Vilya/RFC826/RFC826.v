@@ -327,7 +327,21 @@ Definition merge_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAdd
     end
   in update cache.
 
-(* RFC 826 compliant merge: updates if exists, adds only if target *)
+(* RFC 826 strict merge: updates if exists, adds ONLY if target.
+   Design choice: Conservative interpretation preventing cache pollution.
+
+   Behavior:
+     - If IP exists in cache: UPDATE the MAC (preserving static entries)
+     - If IP not in cache AND i_am_target=true: ADD new entry
+     - If IP not in cache AND i_am_target=false: IGNORE (no new entry)
+
+   Rationale: RFC 826 states "Merge if already in my table", which is ambiguous
+   about adding NEW entries when not the target. This implementation chooses
+   strict security: only learn mappings for traffic directed at us.
+
+   Alternative: Many production stacks use opportunistic learning (add on any
+   ARP seen) for faster convergence, trading security for performance.
+   See merge_cache_entry for unconditional merge variant. *)
 Definition rfc826_merge (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
                         (ttl : N) (i_am_target : bool) : ARPCache :=
   match lookup_cache cache ip with
@@ -596,7 +610,10 @@ Definition serialize_arp_packet (p : ARPEthernetIPv4) : list byte :=
   serialize_mac p.(arp_tha) ++
   serialize_ipv4 p.(arp_tpa).
 
-(* Parses 28-byte wire format into typed ARP packet, validating structure *)
+(* Parses 28-byte wire format into typed ARP packet, validating structure.
+   Note: Accepts any opcode value (including RARP op=3/4). Semantic validation
+   of opcode (ARP vs RARP) is enforced separately by validate_arp_packet or
+   validate_rarp_packet. This separation of concerns enables extensibility. *)
 Definition parse_arp_packet (data : list byte) : option ARPEthernetIPv4 :=
   match data with
   | hrd_hi :: hrd_lo :: pro_hi :: pro_lo :: hln :: pln ::
@@ -676,9 +693,11 @@ Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
 Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
   (* Validate opcode is ARP-only (not RARP) *)
   is_valid_arp_opcode packet.(arp_op) &&
-  (* RFC 826: Sender MAC must not be broadcast *)
+  (* RFC 826: Sender MAC must not be broadcast (FF:FF:FF:FF:FF:FF) *)
   negb (is_broadcast_mac packet.(arp_sha)) &&
-  (* Security: Sender MAC should not be multicast *)
+  (* Security: Sender MAC must not be multicast (I/G bit set).
+     Note: Broadcast is technically multicast, but checked separately for clarity.
+     This stricter-than-RFC policy prevents ARP spoofing via multicast MACs. *)
   negb (is_multicast_mac packet.(arp_sha)) &&
   (* RFC 5227: Allow zero source IP only for ARP probes or gratuitous ARP *)
   (if is_zero_ipv4 packet.(arp_spa)
