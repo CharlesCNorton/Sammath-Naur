@@ -139,6 +139,23 @@ Definition ETHERNET_ADDR_LEN : byte := 6.
 (* Standard IPv4 address length in bytes *)
 Definition IPV4_ADDR_LEN : byte := 4.
 
+(* RFC 826: Validate supported hardware type *)
+Definition is_supported_hardware (hrd : word16) : bool :=
+  N.eqb hrd ARP_HRD_ETHERNET.
+
+(* RFC 826: Validate supported protocol type *)
+Definition is_supported_protocol (pro : word16) : bool :=
+  N.eqb pro ARP_PRO_IP.
+
+(* RFC 826: Validate address length fields match expected values *)
+Definition are_lengths_valid (hln pln : byte) : bool :=
+  (N.eqb hln ETHERNET_ADDR_LEN) && (N.eqb pln IPV4_ADDR_LEN).
+
+(* RFC 826: Validate opcode is within known range *)
+Definition is_valid_opcode (op : word16) : bool :=
+  (N.eqb op ARP_OP_REQUEST) || (N.eqb op ARP_OP_REPLY) ||
+  (N.eqb op RARP_OP_REQUEST) || (N.eqb op RARP_OP_REPLY).
+
 (* =============================================================================
    Section 2: Address Types
    ============================================================================= *)
@@ -182,6 +199,17 @@ Definition is_multicast_mac (m : MACAddress) : bool :=
   | b0 :: _ => N.testbit b0 0
   | _ => false
   end.
+
+(* Checks if IPv4 address is all zeros (0.0.0.0) *)
+Definition is_zero_ipv4 (ip : IPv4Address) : bool :=
+  (N.eqb ip.(ipv4_a) 0) && (N.eqb ip.(ipv4_b) 0) &&
+  (N.eqb ip.(ipv4_c) 0) && (N.eqb ip.(ipv4_d) 0).
+
+(* Structural equality for MAC addresses *)
+Definition mac_eq (m1 m2 : MACAddress) : bool :=
+  if list_eq_dec N.eq_dec m1.(mac_bytes) m2.(mac_bytes)
+  then true
+  else false.
 
 (* =============================================================================
    Section 3: ARP Packet Structure (RFC 826 Format)
@@ -300,6 +328,36 @@ Definition rfc826_merge (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
            then add_cache_entry cache ip mac ttl   (* Target: add *)
            else cache                               (* Not target: ignore *)
   end.
+
+(* RFC 826 explicit merge flag algorithm: models the RFC's two-phase approach *)
+Definition rfc826_merge_explicit (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
+                                  (ttl : N) (i_am_target : bool) : bool * ARPCache :=
+  (* Step 1: Check if entry exists and set merge_flag *)
+  let merge_flag := match lookup_cache cache ip with
+                    | Some _ => true
+                    | None => false
+                    end in
+  (* Step 2: Update cache if entry exists *)
+  let cache' := if merge_flag
+                then update_cache_entry cache ip mac ttl
+                else cache in
+  (* Step 3: If target and merge_flag is false, add entry *)
+  let cache'' := if i_am_target && negb merge_flag
+                 then add_cache_entry cache' ip mac ttl
+                 else cache' in
+  (merge_flag, cache'').
+
+(* Theorem: Explicit merge flag produces same result as implicit version *)
+Theorem rfc826_merge_explicit_equiv : forall cache ip mac ttl target,
+  snd (rfc826_merge_explicit cache ip mac ttl target) =
+  rfc826_merge cache ip mac ttl target.
+Proof.
+  intros cache ip mac ttl target.
+  unfold rfc826_merge_explicit, rfc826_merge.
+  destruct (lookup_cache cache ip) eqn:Hlookup.
+  - simpl. destruct target; reflexivity.
+  - simpl. destruct target; simpl; reflexivity.
+Qed.
 
 (* =============================================================================
    Section 4A: Additional Cache Properties
@@ -472,6 +530,27 @@ Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
      ar_tpa := serialize_ipv4 packet.(arp_tpa) |}.
 
 (* =============================================================================
+   Section 6B: Packet Validation (RFC 826 Compliance)
+   ============================================================================= *)
+
+(* RFC 826: Comprehensive packet validation for Ethernet/IPv4 ARP *)
+Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
+  (* Validate opcode is known *)
+  is_valid_opcode packet.(arp_op) &&
+  (* RFC 826: Sender MAC must not be broadcast *)
+  negb (is_broadcast_mac packet.(arp_sha)) &&
+  (* Security: Sender MAC should not be multicast *)
+  negb (is_multicast_mac packet.(arp_sha)) &&
+  (* RFC 5227: Allow zero source IP only for ARP probes (op=REQUEST with SPA=0) *)
+  (if is_zero_ipv4 packet.(arp_spa)
+   then N.eqb packet.(arp_op) ARP_OP_REQUEST
+   else true) &&
+  (* Validate reply THA: if this is a reply, THA should be our MAC *)
+  (if N.eqb packet.(arp_op) ARP_OP_REPLY
+   then mac_eq packet.(arp_tha) my_mac
+   else true).
+
+(* =============================================================================
    Section 7: Protocol State Machine
    ============================================================================= *)
 
@@ -499,12 +578,11 @@ Record ARPContext := {
 (* RFC 826 packet reception: validates, merges cache, generates reply if target *)
 Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
                              : ARPContext * option ARPEthernetIPv4 :=
-  (* RFC 826 Algorithm with broadcast validation: *)
+  (* RFC 826 Algorithm with comprehensive validation: *)
 
-  (* Step 0: Validate sender MAC (RFC 826: must not be broadcast) *)
-  if is_broadcast_mac packet.(arp_sha)
-  then (ctx, None)  (* Drop packet with broadcast sender MAC *)
-  else
+  (* Step 0: Comprehensive packet validation *)
+  if validate_arp_packet packet ctx.(arp_my_mac)
+  then
     (* Step 1: Check if I am the target *)
     let i_am_target := ip_eq packet.(arp_tpa) ctx.(arp_my_ip) in
 
@@ -533,7 +611,42 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
       else
         (ctx', None)
     else
-      (ctx', None).
+      (ctx', None)
+  else
+    (ctx, None).  (* Drop invalid packets *)
+
+(* =============================================================================
+   Section 8A: RARP Processing (RFC 903)
+   ============================================================================= *)
+
+(* RFC 903: RARP validates that target MAC matches our MAC *)
+Definition validate_rarp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
+  (* RARP-specific validation *)
+  is_valid_opcode packet.(arp_op) &&
+  negb (is_broadcast_mac packet.(arp_sha)) &&
+  negb (is_multicast_mac packet.(arp_sha)) &&
+  (* RARP request: THA should be our MAC, SPA should be zero *)
+  (if N.eqb packet.(arp_op) RARP_OP_REQUEST
+   then mac_eq packet.(arp_tha) my_mac && is_zero_ipv4 packet.(arp_spa)
+   else true) &&
+  (* RARP reply: THA should be our MAC *)
+  (if N.eqb packet.(arp_op) RARP_OP_REPLY
+   then mac_eq packet.(arp_tha) my_mac
+   else true).
+
+Definition process_rarp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
+                               : ARPContext * option IPv4Address :=
+  if validate_rarp_packet packet ctx.(arp_my_mac)
+  then
+    if N.eqb packet.(arp_op) RARP_OP_REQUEST
+    then
+      if mac_eq packet.(arp_tha) ctx.(arp_my_mac)
+      then (ctx, Some ctx.(arp_my_ip))
+      else (ctx, None)
+    else if N.eqb packet.(arp_op) RARP_OP_REPLY
+    then (ctx, Some packet.(arp_tpa))
+    else (ctx, None)
+  else (ctx, None).
 
 (* =============================================================================
    Section 9: Gratuitous ARP
@@ -541,11 +654,28 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
 
 Definition make_gratuitous_arp (my_mac : MACAddress) (my_ip : IPv4Address)
                                : ARPEthernetIPv4 :=
-  {| arp_op := ARP_OP_REQUEST;  (* Request-form gratuitous ARP *)
+  {| arp_op := ARP_OP_REQUEST;
      arp_sha := my_mac;
      arp_spa := my_ip;
-     arp_tha := MAC_ZERO;  (* Unknown in payload, broadcast at L2 *)
-     arp_tpa := my_ip |}.  (* Target IP = Source IP for gratuitous *)
+     arp_tha := MAC_ZERO;
+     arp_tpa := my_ip |}.
+
+Definition is_gratuitous_arp (pkt : ARPEthernetIPv4) : bool :=
+  ip_eq pkt.(arp_spa) pkt.(arp_tpa).
+
+Theorem gratuitous_arp_no_reply : forall ctx pkt ctx' resp,
+  is_gratuitous_arp pkt = true ->
+  ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = false ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  resp = None.
+Proof.
+  intros ctx pkt ctx' resp Hgrat Hnot_target Hproc.
+  unfold process_arp_packet in Hproc.
+  destruct (validate_arp_packet pkt (arp_my_mac ctx)) eqn:Hvalid.
+  - rewrite Hnot_target in Hproc.
+    injection Hproc as _ Hresp. symmetry. assumption.
+  - injection Hproc as _ Hresp. symmetry. assumption.
+Qed.
 
 (* =============================================================================
    Section 10: Security Considerations
@@ -1635,8 +1765,7 @@ Theorem arp_reply_matches_request : forall ctx packet reply ctx',
 Proof.
   intros ctx packet reply ctx' Hproc Hreq Htarget.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbroadcast.
-  - discriminate.
+  destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - rewrite Htarget in Hproc.
     apply N.eqb_eq in Hreq.
     rewrite Hreq in Hproc.
@@ -1646,6 +1775,7 @@ Proof.
     simpl.
     split. reflexivity.
     split; reflexivity.
+  - discriminate.
 Qed.
 
 (* Helper lemma: merge always succeeds when no static entry blocks *)
@@ -1656,15 +1786,15 @@ Proof.
   intros. apply cache_lookup_after_merge_no_static. assumption.
 Qed.
 
-(* Property 3: RFC 826 Bidirectional learning - only when target and valid MAC *)
+(* Property 3: RFC 826 Bidirectional learning - only when target and valid packet *)
 Lemma process_arp_packet_preserves_identity : forall ctx pkt ctx' resp,
-  is_broadcast_mac pkt.(arp_sha) = false ->
+  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   process_arp_packet ctx pkt = (ctx', resp) ->
   arp_my_mac ctx' = arp_my_mac ctx /\ arp_my_ip ctx' = arp_my_ip ctx.
 Proof.
-  intros ctx pkt ctx' resp Hno_bcast Hproc.
+  intros ctx pkt ctx' resp Hvalid Hproc.
   unfold process_arp_packet in Hproc.
-  rewrite Hno_bcast in Hproc.
+  rewrite Hvalid in Hproc.
   destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx));
   destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST);
   injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
@@ -1673,14 +1803,14 @@ Qed.
 Theorem bidirectional_cache_update_when_target : forall ctx packet ctx' response,
   (forall e, In e ctx.(arp_cache) ->
    ip_eq (ace_ip e) packet.(arp_spa) = true -> ace_static e = false) ->
-  is_broadcast_mac packet.(arp_sha) = false ->
+  validate_arp_packet packet ctx.(arp_my_mac) = true ->
   ip_eq packet.(arp_tpa) ctx.(arp_my_ip) = true ->
   process_arp_packet ctx packet = (ctx', response) ->
   lookup_cache ctx'.(arp_cache) packet.(arp_spa) = Some packet.(arp_sha).
 Proof.
-  intros ctx packet ctx' response Hno_static Hvalid Htarget Hproc.
+  intros ctx packet ctx' response Hno_static Hvalid_pkt Htarget Hproc.
   unfold process_arp_packet in Hproc.
-  rewrite Hvalid in Hproc.
+  rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   destruct (N.eqb (arp_op packet) ARP_OP_REQUEST) eqn:Hop.
   - injection Hproc. intros. subst ctx'. simpl.
@@ -1698,11 +1828,11 @@ Theorem rfc826_no_cache_pollution : forall ctx packet ctx',
 Proof.
   intros ctx packet ctx' Hnot_target Hnot_in_cache Hproc.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbroadcast.
-  - injection Hproc as Hctx'. subst ctx'. simpl. assumption.
+  destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - rewrite Hnot_target in Hproc.
     injection Hproc as Hctx'. subst ctx'. simpl.
     unfold rfc826_merge. rewrite Hnot_in_cache. simpl. assumption.
+  - injection Hproc as Hctx'. subst ctx'. simpl. assumption.
 Qed.
 
 (* Property 4: Cache size bounds *)
@@ -1854,8 +1984,7 @@ Theorem cache_bounded_growth : forall ctx packet ctx' resp,
 Proof.
   intros ctx packet ctx' resp Hproc.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbroadcast.
-  - injection Hproc as Hctx' _. subst ctx'. simpl. unfold cache_size. lia.
+  destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - destruct (ip_eq (arp_tpa packet) (arp_my_ip ctx)) eqn:Htarget;
     destruct (N.eqb (arp_op packet) ARP_OP_REQUEST);
     injection Hproc as Hctx' _;
@@ -1863,21 +1992,22 @@ Proof.
     simpl;
     unfold cache_size;
     apply rfc826_merge_size_bound.
+  - injection Hproc as Hctx' _. subst ctx'. simpl. unfold cache_size. lia.
 Qed.
 
 (* Property 5: Gratuitous ARP updates when we're target *)
 Theorem gratuitous_arp_updates_cache_when_target : forall ctx grat ctx',
   (forall e, In e ctx.(arp_cache) ->
    ip_eq (ace_ip e) grat.(arp_spa) = true -> ace_static e = false) ->
-  is_broadcast_mac grat.(arp_sha) = false ->
+  validate_arp_packet grat ctx.(arp_my_mac) = true ->
   grat.(arp_spa) = grat.(arp_tpa) ->  (* Gratuitous ARP condition *)
   ip_eq grat.(arp_tpa) ctx.(arp_my_ip) = true ->  (* We are the target *)
   process_arp_packet ctx grat = (ctx', None) ->
   lookup_cache ctx'.(arp_cache) grat.(arp_spa) = Some grat.(arp_sha).
 Proof.
-  intros ctx grat ctx' Hno_static Hvalid Hgrat Htarget Hproc.
+  intros ctx grat ctx' Hno_static Hvalid_pkt Hgrat Htarget Hproc.
   unfold process_arp_packet in Hproc.
-  rewrite Hvalid in Hproc.
+  rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   destruct (N.eqb (arp_op grat) ARP_OP_REQUEST) eqn:Hop.
   - injection Hproc. intros H _. discriminate H.
@@ -1932,7 +2062,10 @@ Theorem broadcast_sender_rejected : forall ctx packet ctx' resp,
 Proof.
   intros ctx packet ctx' resp Hbroadcast Hproc.
   unfold process_arp_packet in Hproc.
-  rewrite Hbroadcast in Hproc.
+  assert (Hvalid: validate_arp_packet packet (arp_my_mac ctx) = false).
+  { unfold validate_arp_packet. rewrite Hbroadcast. simpl.
+    repeat rewrite andb_false_r. reflexivity. }
+  rewrite Hvalid in Hproc.
   injection Hproc as Hctx Hresp.
   split; [symmetry; exact Hctx | symmetry; exact Hresp].
 Qed.
@@ -1965,6 +2098,15 @@ Proof.
   reflexivity.
 Qed.
 
+Theorem no_response_when_broadcast_sender :
+  forall ctx pkt ctx' resp,
+    is_broadcast_mac pkt.(arp_sha) = true ->
+    process_arp_packet ctx pkt = (ctx', resp) ->
+    resp = None.
+Proof.
+  intros. eapply broadcast_sender_rejected in H0; eauto. tauto.
+Qed.
+
 (* =============================================================================
    Section 13B: Broadcast Reply Prevention
    ============================================================================= *)
@@ -1977,8 +2119,7 @@ Theorem reply_target_is_requester_mac : forall ctx packet ctx' reply,
 Proof.
   intros ctx packet ctx' reply Hproc Hreply_op.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbroadcast.
-  - discriminate.
+  destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - destruct (ip_eq (arp_tpa packet) (arp_my_ip ctx)) eqn:Htarget.
     + destruct (N.eqb (arp_op packet) ARP_OP_REQUEST) eqn:Hop.
       * injection Hproc as _ Hreply.
@@ -1987,6 +2128,7 @@ Proof.
         reflexivity.
       * discriminate.
     + discriminate.
+  - discriminate.
 Qed.
 
 (* Theorem: Replies are never sent to broadcast *)
@@ -2000,9 +2142,12 @@ Proof.
     (apply (reply_target_is_requester_mac ctx packet ctx' reply Hproc Hreply_op)).
   rewrite Heq.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbroadcast.
+  destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
+  - unfold validate_arp_packet in Hvalid.
+    destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbcast.
+    + simpl in Hvalid. repeat rewrite andb_false_r in Hvalid. discriminate.
+    + reflexivity.
   - discriminate.
-  - reflexivity.
 Qed.
 
 (* =============================================================================
@@ -2023,14 +2168,14 @@ Theorem unknown_opcode_no_response : forall ctx packet ctx' resp,
 Proof.
   intros ctx packet ctx' resp Hnot_req Hnot_reply Hproc.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha packet)) eqn:Hbroadcast.
-  - injection Hproc as _ Hresp. symmetry. assumption.
+  destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - destruct (ip_eq (arp_tpa packet) (arp_my_ip ctx)) eqn:Htarget.
     + rewrite Hnot_req in Hproc.
       injection Hproc as _ Hresp.
       symmetry. assumption.
     + injection Hproc as _ Hresp.
       symmetry. assumption.
+  - injection Hproc as _ Hresp. symmetry. assumption.
 Qed.
 
 (* Theorem: Parse validates packet structure *)
@@ -2514,7 +2659,7 @@ Proof.
 Qed.
 
 Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
-  is_broadcast_mac pkt.(arp_sha) = false ->
+  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   pkt.(arp_op) = ARP_OP_REQUEST ->
   ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
   (forall e, In e ctx.(arp_cache) ->
@@ -2530,9 +2675,9 @@ Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
     reply.(arp_tha) = pkt.(arp_sha) /\
     lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
 Proof.
-  intros ctx pkt resp ctx' Hno_bcast Hop Htarget Hno_static Hproc.
+  intros ctx pkt resp ctx' Hvalid_pkt Hop Htarget Hno_static Hproc.
   unfold process_arp_packet in Hproc.
-  rewrite Hno_bcast in Hproc.
+  rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   apply N.eqb_eq in Hop.
   rewrite Hop in Hproc.
@@ -2550,7 +2695,7 @@ Qed.
 
 (* RFC 826 algorithm completeness: proves reply generation, cache updates, and identity preservation *)
 Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
-  is_broadcast_mac pkt.(arp_sha) = false ->
+  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   process_arp_packet ctx pkt = (ctx', resp) ->
   (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
    pkt.(arp_op) = ARP_OP_REQUEST ->
@@ -2570,11 +2715,11 @@ Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
   (arp_my_mac ctx' = arp_my_mac ctx /\
    arp_my_ip ctx' = arp_my_ip ctx).
 Proof.
-  intros ctx pkt ctx' resp Hno_bcast Hproc.
+  intros ctx pkt ctx' resp Hvalid_pkt Hproc.
   repeat split.
   - intros Htarget Hreq.
     unfold process_arp_packet in Hproc.
-    rewrite Hno_bcast in Hproc.
+    rewrite Hvalid_pkt in Hproc.
     rewrite Htarget in Hproc.
     apply N.eqb_eq in Hreq.
     rewrite Hreq in Hproc.
@@ -2589,14 +2734,14 @@ Proof.
     unfold make_arp_reply. simpl. reflexivity.
   - intros Htarget.
     unfold process_arp_packet in Hproc.
-    rewrite Hno_bcast in Hproc.
+    rewrite Hvalid_pkt in Hproc.
     rewrite Htarget in Hproc.
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST);
     injection Hproc as Hctx _; subst ctx'; simpl;
     apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
   - intros Hnot_target Hnot_in_cache.
     unfold process_arp_packet in Hproc.
-    rewrite Hno_bcast in Hproc.
+    rewrite Hvalid_pkt in Hproc.
     rewrite Hnot_target in Hproc.
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
     + injection Hproc as Hctx _. subst ctx'. simpl.
@@ -2606,12 +2751,12 @@ Proof.
       rewrite rfc826_merge_not_target by assumption.
       assumption.
   - unfold process_arp_packet in Hproc.
-    rewrite Hno_bcast in Hproc.
+    rewrite Hvalid_pkt in Hproc.
     destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
     injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
   - unfold process_arp_packet in Hproc.
-    rewrite Hno_bcast in Hproc.
+    rewrite Hvalid_pkt in Hproc.
     destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
     injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
@@ -2638,8 +2783,7 @@ Theorem cache_monotonic_unrelated : forall ctx pkt ctx' resp ip mac,
 Proof.
   intros ctx pkt ctx' resp ip mac Hproc Hlook Hneq.
   unfold process_arp_packet in Hproc.
-  destruct (is_broadcast_mac (arp_sha pkt)) eqn:Hbcast.
-  - injection Hproc as Hctx Hresp. subst. simpl. assumption.
+  destruct (validate_arp_packet pkt (arp_my_mac ctx)) eqn:Hvalid.
   - destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq;
     injection Hproc as Hctx Hresp;
@@ -2649,11 +2793,12 @@ Proof.
     + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
     + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
     + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
+  - injection Hproc as Hctx Hresp. subst. simpl. assumption.
 Qed.
 
 (* Stronger RFC 826 completeness: full behavioral specification with IFF semantics, cache isolation, and complete immutability *)
 Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
-  is_broadcast_mac pkt.(arp_sha) = false ->
+  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   process_arp_packet ctx pkt = (ctx', resp) ->
   (* Part 1: Complete response characterization *)
   ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true /\ pkt.(arp_op) = ARP_OP_REQUEST) ->
@@ -2686,9 +2831,9 @@ Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
   (arp_pending ctx' = arp_pending ctx) /\
   (arp_retries ctx' = arp_retries ctx).
 Proof.
-  intros ctx pkt ctx' resp Hno_bcast Hproc.
+  intros ctx pkt ctx' resp Hvalid_pkt Hproc.
   unfold process_arp_packet in Hproc.
-  rewrite Hno_bcast in Hproc.
+  rewrite Hvalid_pkt in Hproc.
   destruct (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip)) eqn:Htgt;
   destruct (N.eqb pkt.(arp_op) ARP_OP_REQUEST) eqn:Hreq.
 
@@ -2800,6 +2945,64 @@ Proof.
         reflexivity. }
     simpl. repeat split; reflexivity.
 Qed.
+
+(* =============================================================================
+   Section 14A: Temporal Properties
+   ============================================================================= *)
+
+Definition CACHE_TIMEOUT : N := 300.
+
+Fixpoint age_n_times (cache : ARPCache) (n : nat) : ARPCache :=
+  match n with
+  | O => cache
+  | S n' => age_cache (age_n_times cache n') 1
+  end.
+
+(* =============================================================================
+   Section 14B: Network Model
+   ============================================================================= *)
+
+Inductive NetworkEvent :=
+  | SendPacket : ARPPacket -> NetworkEvent
+  | ReceivePacket : ARPPacket -> NetworkEvent
+  | Timeout : N -> NetworkEvent.
+
+Record NetworkNode := {
+  node_ctx : ARPContext;
+  node_time : N
+}.
+
+Definition NetworkState := list NetworkNode.
+
+Definition process_event (node : NetworkNode) (event : NetworkEvent) : NetworkNode :=
+  match event with
+  | ReceivePacket pkt =>
+      match process_generic_arp pkt with
+      | Some arp_pkt =>
+          let (ctx', _) := process_arp_packet node.(node_ctx) arp_pkt in
+          {| node_ctx := ctx'; node_time := node.(node_time) |}
+      | None => node
+      end
+  | Timeout elapsed =>
+      let aged_cache := age_cache node.(node_ctx).(arp_cache) elapsed in
+      {| node_ctx := {| arp_my_mac := node.(node_ctx).(arp_my_mac);
+                        arp_my_ip := node.(node_ctx).(arp_my_ip);
+                        arp_cache := aged_cache;
+                        arp_state := node.(node_ctx).(arp_state);
+                        arp_pending := node.(node_ctx).(arp_pending);
+                        arp_retries := node.(node_ctx).(arp_retries) |};
+         node_time := node.(node_time) + elapsed |}
+  | SendPacket _ => node
+  end.
+
+Definition apply_event_to_network (network : NetworkState) (node_id : nat)
+                                   (event : NetworkEvent) : NetworkState :=
+  match nth_error network node_id with
+  | Some node =>
+      let node' := process_event node event in
+      firstn node_id network ++ [node'] ++ skipn (S node_id) network
+  | None => network
+  end.
 
 (* =============================================================================
    Section 15: Extraction
