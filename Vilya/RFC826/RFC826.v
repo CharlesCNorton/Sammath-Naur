@@ -1036,7 +1036,10 @@ Definition update_flood_table (table : FloodTable) (ip : IPv4Address) (current_t
       let new_entry := {| fe_ip := ip; fe_last_request := current_time; fe_request_count := 1 |} in
       (new_entry :: table, true)
   | Some entry =>
-      let time_diff := current_time - entry.(fe_last_request) in
+      (* Guard against time going backwards: if current < last, treat as time_diff = 0 *)
+      let time_diff := if N.ltb current_time entry.(fe_last_request)
+                       then 0
+                       else current_time - entry.(fe_last_request) in
       if N.leb time_diff ARP_FLOOD_WINDOW
       then
         let new_count := entry.(fe_request_count) + 1 in
@@ -1064,7 +1067,10 @@ Definition update_flood_table (table : FloodTable) (ip : IPv4Address) (current_t
 
 Definition clean_flood_table (table : FloodTable) (current_time : N) : FloodTable :=
   filter (fun entry =>
-    N.ltb (current_time - entry.(fe_last_request)) (ARP_FLOOD_WINDOW * 10)) table.
+    (* Guard against time going backwards: if current < last, keep the entry *)
+    if N.ltb current_time entry.(fe_last_request)
+    then true  (* Time went backwards, conservatively keep entry *)
+    else N.ltb (current_time - entry.(fe_last_request)) (ARP_FLOOD_WINDOW * 10)) table.
 
 Lemma flood_table_allows_first_request : forall table ip current_time,
   lookup_flood_entry table ip = None ->
@@ -1078,13 +1084,15 @@ Qed.
 
 Lemma flood_table_rejects_excessive : forall table ip current_time entry,
   lookup_flood_entry table ip = Some entry ->
+  N.ltb current_time entry.(fe_last_request) = false ->
   N.leb (current_time - entry.(fe_last_request)) ARP_FLOOD_WINDOW = true ->
   N.leb (entry.(fe_request_count) + 1) ARP_FLOOD_THRESHOLD = false ->
   snd (update_flood_table table ip current_time) = false.
 Proof.
-  intros table ip current_time entry Hlookup Hwindow Hthreshold.
+  intros table ip current_time entry Hlookup Htime_ok Hwindow Hthreshold.
   unfold update_flood_table.
   rewrite Hlookup.
+  rewrite Htime_ok.
   rewrite Hwindow.
   rewrite Hthreshold.
   simpl. reflexivity.
@@ -1092,12 +1100,14 @@ Qed.
 
 Lemma flood_table_resets_after_window : forall table ip current_time entry,
   lookup_flood_entry table ip = Some entry ->
+  N.ltb current_time entry.(fe_last_request) = false ->
   N.leb (current_time - entry.(fe_last_request)) ARP_FLOOD_WINDOW = false ->
   snd (update_flood_table table ip current_time) = true.
 Proof.
-  intros table ip current_time entry Hlookup Hwindow.
+  intros table ip current_time entry Hlookup Htime_ok Hwindow.
   unfold update_flood_table.
   rewrite Hlookup.
+  rewrite Htime_ok.
   rewrite Hwindow.
   simpl. reflexivity.
 Qed.
@@ -1111,20 +1121,23 @@ Proof.
   unfold clean_flood_table.
   apply filter_In.
   split; auto.
-  apply N.ltb_lt.
-  assumption.
+  destruct (N.ltb current_time entry.(fe_last_request)) eqn:Htime.
+  - reflexivity.
+  - apply N.ltb_lt. assumption.
 Qed.
 
 Lemma clean_flood_table_removes_old : forall table current_time entry,
   In entry (clean_flood_table table current_time) ->
+  N.ltb current_time entry.(fe_last_request) = true \/
   current_time - entry.(fe_last_request) < ARP_FLOOD_WINDOW * 10.
 Proof.
   intros table current_time entry Hin.
   unfold clean_flood_table in Hin.
   apply filter_In in Hin.
   destruct Hin as [_ Hcond].
-  apply N.ltb_lt in Hcond.
-  assumption.
+  destruct (N.ltb current_time entry.(fe_last_request)) eqn:Htime.
+  - left. reflexivity.
+  - right. apply N.ltb_lt in Hcond. assumption.
 Qed.
 
 (* =============================================================================
@@ -1418,17 +1431,19 @@ Qed.
 
 Lemma send_arp_request_respects_flood_limit : forall ctx target_ip current_time entry ctx' pkt,
   lookup_flood_entry ctx.(earp_flood_table) target_ip = Some entry ->
+  N.ltb current_time entry.(fe_last_request) = false ->
   N.leb (current_time - entry.(fe_last_request)) ARP_FLOOD_WINDOW = true ->
   N.leb (entry.(fe_request_count) + 1) ARP_FLOOD_THRESHOLD = false ->
   send_arp_request_with_flood_check ctx target_ip current_time = (ctx', pkt) ->
   pkt = None.
 Proof.
-  intros ctx target_ip current_time entry ctx' pkt Hlookup Hwindow Hthreshold Hsend.
+  intros ctx target_ip current_time entry ctx' pkt Hlookup Htime_ok Hwindow Hthreshold Hsend.
   unfold send_arp_request_with_flood_check in Hsend.
   destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
   assert (Hallowed: allowed = false).
   { unfold update_flood_table in Hflood.
     rewrite Hlookup in Hflood.
+    rewrite Htime_ok in Hflood.
     rewrite Hwindow in Hflood.
     rewrite Hthreshold in Hflood.
     injection Hflood as Hflood_table Hflood_allowed.
@@ -1546,37 +1561,57 @@ Proof.
   intros table ip t Hallowed.
   unfold update_flood_table in *.
   destruct (lookup_flood_entry table ip) as [old_entry|] eqn:Hlookup.
-  - destruct (N.leb (t - fe_last_request old_entry) ARP_FLOOD_WINDOW) eqn:Hwindow.
-    + destruct (N.leb (fe_request_count old_entry + 1) ARP_FLOOD_THRESHOLD) eqn:Hthresh.
-      * exists {| fe_ip := ip; fe_last_request := t; fe_request_count := fe_request_count old_entry + 1 |}.
+  - destruct (N.ltb t (fe_last_request old_entry)) eqn:Htime.
+    + destruct (N.leb 0 ARP_FLOOD_WINDOW) eqn:Hwindow.
+      * destruct (N.leb (fe_request_count old_entry + 1) ARP_FLOOD_THRESHOLD) eqn:Hthresh.
+        { exists {| fe_ip := ip; fe_last_request := t; fe_request_count := fe_request_count old_entry + 1 |}.
+          remember (let fix replace (t0 : FloodTable) : FloodTable :=
+                      match t0 with
+                      | [] => [{| fe_ip := ip; fe_last_request := t;
+                                 fe_request_count := fe_request_count old_entry + 1 |}]
+                      | e :: rest =>
+                          if flood_eq (fe_ip e) ip
+                          then {| fe_ip := ip; fe_last_request := t;
+                                 fe_request_count := fe_request_count old_entry + 1 |} :: rest
+                          else e :: replace rest
+                      end
+                    in replace table) as new_table.
+          exists new_table. split.
+          - reflexivity.
+          - intro Hlookup'. assumption. }
+        { simpl in Hallowed. discriminate. }
+      * simpl in Hallowed. discriminate.
+    + destruct (N.leb (t - fe_last_request old_entry) ARP_FLOOD_WINDOW) eqn:Hwindow.
+      * destruct (N.leb (fe_request_count old_entry + 1) ARP_FLOOD_THRESHOLD) eqn:Hthresh.
+        { exists {| fe_ip := ip; fe_last_request := t; fe_request_count := fe_request_count old_entry + 1 |}.
+          remember (let fix replace (t0 : FloodTable) : FloodTable :=
+                      match t0 with
+                      | [] => [{| fe_ip := ip; fe_last_request := t;
+                                 fe_request_count := fe_request_count old_entry + 1 |}]
+                      | e :: rest =>
+                          if flood_eq (fe_ip e) ip
+                          then {| fe_ip := ip; fe_last_request := t;
+                                 fe_request_count := fe_request_count old_entry + 1 |} :: rest
+                          else e :: replace rest
+                      end
+                    in replace table) as new_table.
+          exists new_table. split.
+          - reflexivity.
+          - intro Hlookup'. assumption. }
+        { simpl in Hallowed. discriminate. }
+      * exists {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}.
         remember (let fix replace (t0 : FloodTable) : FloodTable :=
                     match t0 with
-                    | [] => [{| fe_ip := ip; fe_last_request := t;
-                               fe_request_count := fe_request_count old_entry + 1 |}]
+                    | [] => [{| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}]
                     | e :: rest =>
                         if flood_eq (fe_ip e) ip
-                        then {| fe_ip := ip; fe_last_request := t;
-                               fe_request_count := fe_request_count old_entry + 1 |} :: rest
+                        then {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |} :: rest
                         else e :: replace rest
                     end
                   in replace table) as new_table.
         exists new_table. split.
         { reflexivity. }
-        { intro Hlookup'. assumption. }
-      * simpl in Hallowed. discriminate.
-    + exists {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}.
-      remember (let fix replace (t0 : FloodTable) : FloodTable :=
-                  match t0 with
-                  | [] => [{| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}]
-                  | e :: rest =>
-                      if flood_eq (fe_ip e) ip
-                      then {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |} :: rest
-                      else e :: replace rest
-                  end
-                in replace table) as new_table.
-      exists new_table. split.
-      { reflexivity. }
-      { intro Hlookup'. unfold ARP_FLOOD_THRESHOLD. simpl. reflexivity. }
+        { intro Hlookup'. unfold ARP_FLOOD_THRESHOLD. simpl. reflexivity. }
   - exists {| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |}.
     exists ({| fe_ip := ip; fe_last_request := t; fe_request_count := 1 |} :: table).
     split.
