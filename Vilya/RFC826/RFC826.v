@@ -1777,6 +1777,7 @@ Definition ARP_ANNOUNCE_WAIT : N := 2000.    (* Wait after probe before announce
 Definition ARP_ANNOUNCE_NUM : N := 2.        (* Number of announcements *)
 Definition ARP_ANNOUNCE_INTERVAL : N := 2000. (* Delay between announcements *)
 Definition ARP_DEFEND_INTERVAL : N := 10000. (* Min time between defenses *)
+Definition ARP_CONFLICT_RECOVERY_WAIT : N := 10000. (* RFC 5227: wait before new IP *)
 
 Record ARPTimer := {
   timer_start : N;      (* Timestamp when timer started *)
@@ -1900,7 +1901,7 @@ Inductive ARPStateData :=
   | StateProbe : ProbeState -> ARPStateData
   | StateAnnounce : AnnounceState -> ARPStateData
   | StateDefend : DefendState -> ARPStateData
-  | StateConflict : IPv4Address -> ARPStateData.
+  | StateConflict : IPv4Address -> ARPTimer -> ARPStateData.
 
 Record NetworkInterface := {
   if_mac : MACAddress;
@@ -2282,8 +2283,20 @@ Definition make_defend_packet (ctx : EnhancedARPContext) : ARPEthernetIPv4 :=
 Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                             : EnhancedARPContext * option ARPEthernetIPv4 :=
   match ctx.(earp_state_data) with
-  | StateConflict conflicted_ip =>
-      (ctx, None)
+  | StateConflict conflicted_ip conflict_timer =>
+      if timer_expired conflict_timer current_time
+      then
+        let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
+                      earp_my_ip := ctx.(earp_my_ip);
+                      earp_cache := ctx.(earp_cache);
+                      earp_cache_ttl := ctx.(earp_cache_ttl);
+                      earp_state_data := StateIdle;
+                      earp_iface := ctx.(earp_iface);
+                      earp_flood_table := ctx.(earp_flood_table);
+                      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+        (ctx', None)
+      else
+        (ctx, None)
   | StateDefend defend =>
       if can_defend defend current_time
       then
@@ -2684,16 +2697,23 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
   if is_broadcast_mac packet.(arp_sha)
   then (ctx_aged, None)
   else
+  (* Security: Detect ARP spoofing attempts *)
+  if is_suspicious_arp ctx_aged.(earp_cache) packet
+  then
+    (* Suspicious MAC change detected - log but don't update cache *)
+    (ctx_aged, None)
+  else
   (* Check for conflicts in PROBE state *)
   match ctx_aged.(earp_state_data) with
   | StateProbe probe =>
       if detect_probe_conflict ctx_aged probe packet
       then
+        let conflict_timer := start_timer ARP_CONFLICT_RECOVERY_WAIT current_time in
         let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := ctx_aged.(earp_cache);
                       earp_cache_ttl := ctx_aged.(earp_cache_ttl);
-                      earp_state_data := StateConflict probe.(probe_ip);
+                      earp_state_data := StateConflict probe.(probe_ip) conflict_timer;
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
                       earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
@@ -3846,6 +3866,70 @@ Proof.
   apply orb_true_l.
 Qed.
 
+Lemma is_suspicious_false_when_not_in_cache : forall cache pkt,
+  lookup_cache cache (arp_spa pkt) = None ->
+  is_suspicious_arp cache pkt = false.
+Proof.
+  intros cache pkt Hnone.
+  unfold is_suspicious_arp.
+  rewrite Hnone.
+  reflexivity.
+Qed.
+
+Lemma process_enhanced_broadcast_rejected : forall ctx pkt t dt ctx' resp,
+  is_broadcast_mac (arp_sha pkt) = true ->
+  process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
+  resp = None /\ earp_cache ctx' = age_cache (earp_cache ctx) dt.
+Proof.
+  intros ctx pkt t dt ctx' resp Hbcast Hproc.
+  unfold process_arp_packet_enhanced in Hproc.
+  rewrite Hbcast in Hproc.
+  injection Hproc as Hc Hr. subst.
+  split; reflexivity.
+Qed.
+
+Lemma process_enhanced_suspicious_rejected : forall ctx pkt t dt ctx' resp,
+  is_broadcast_mac (arp_sha pkt) = false ->
+  is_suspicious_arp (age_cache (earp_cache ctx) dt) pkt = true ->
+  process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
+  resp = None /\ earp_cache ctx' = age_cache (earp_cache ctx) dt.
+Proof.
+  intros ctx pkt t dt ctx' resp Hnot_bcast Hsus Hproc.
+  unfold process_arp_packet_enhanced in Hproc.
+  cbv beta in Hproc. simpl in Hproc.
+  rewrite Hnot_bcast, Hsus in Hproc.
+  injection Hproc as Hc Hr. subst.
+  split; reflexivity.
+Qed.
+
+Lemma process_enhanced_probe_conflict_transitions : forall ctx pkt t dt probe ctx' resp,
+  is_broadcast_mac (arp_sha pkt) = false ->
+  is_suspicious_arp (age_cache (earp_cache ctx) dt) pkt = false ->
+  earp_state_data ctx = StateProbe probe ->
+  detect_probe_conflict
+    {| earp_my_mac := earp_my_mac ctx;
+       earp_my_ip := earp_my_ip ctx;
+       earp_cache := age_cache (earp_cache ctx) dt;
+       earp_cache_ttl := earp_cache_ttl ctx;
+       earp_state_data := StateProbe probe;
+       earp_iface := earp_iface ctx;
+       earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
+       earp_last_cache_cleanup := t |} probe pkt = true ->
+  process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
+  earp_cache ctx' = age_cache (earp_cache ctx) dt /\
+  (exists conflict_timer, earp_state_data ctx' = StateConflict (probe_ip probe) conflict_timer) /\
+  resp = None.
+Proof.
+  intros ctx pkt t dt probe ctx' resp Hnot_bcast Hnot_sus Hstate Hconf Hproc.
+  unfold process_arp_packet_enhanced in Hproc.
+  cbv beta in Hproc. simpl in Hproc.
+  rewrite Hnot_bcast, Hnot_sus, Hstate, Hconf in Hproc. simpl in Hproc.
+  injection Hproc as Hc Hr. subst. simpl.
+  split. reflexivity.
+  split. eexists. reflexivity.
+  reflexivity.
+Qed.
+
 Theorem dad_conflict_preempts_cache_update : forall ctx pkt t dt probe ctx' resp,
   earp_state_data ctx = StateProbe probe ->
   detect_probe_conflict
@@ -3858,23 +3942,16 @@ Theorem dad_conflict_preempts_cache_update : forall ctx pkt t dt probe ctx' resp
        earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
        earp_last_cache_cleanup := t |} probe pkt = true ->
   is_broadcast_mac (arp_sha pkt) = false ->
+  lookup_cache (age_cache (earp_cache ctx) dt) (arp_spa pkt) = None ->
   process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
   earp_cache ctx' = age_cache (earp_cache ctx) dt /\
-  earp_state_data ctx' = StateConflict (probe_ip probe) /\
+  (exists conflict_timer, earp_state_data ctx' = StateConflict (probe_ip probe) conflict_timer) /\
   resp = None.
 Proof.
-  intros ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hproc.
-  unfold process_arp_packet_enhanced in Hproc.
-  rewrite Hnot_bcast in Hproc.
-  rewrite Hstate in Hproc.
-  simpl in Hproc.
-  rewrite Hconflict in Hproc.
-  injection Hproc as Hctx Hresp.
-  subst ctx' resp.
-  simpl.
-  split. reflexivity.
-  split. reflexivity.
-  reflexivity.
+  intros ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hnot_in_cache Hproc.
+  assert (Hnot_suspicious: is_suspicious_arp (age_cache (earp_cache ctx) dt) pkt = false).
+  { apply is_suspicious_false_when_not_in_cache. assumption. }
+  apply (process_enhanced_probe_conflict_transitions ctx pkt t dt probe ctx' resp Hnot_bcast Hnot_suspicious Hstate Hconflict Hproc).
 Qed.
 
 Corollary dad_prevents_cache_poisoning : forall ctx pkt t dt probe ctx' resp poisoned_mac,
@@ -3882,11 +3959,12 @@ Corollary dad_prevents_cache_poisoning : forall ctx pkt t dt probe ctx' resp poi
   ip_eq (arp_spa pkt) (probe_ip probe) = true ->
   arp_sha pkt = poisoned_mac ->
   is_broadcast_mac poisoned_mac = false ->
+  lookup_cache (age_cache (earp_cache ctx) dt) (arp_spa pkt) = None ->
   process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
   lookup_cache (earp_cache ctx') (probe_ip probe) =
     lookup_cache (age_cache (earp_cache ctx) dt) (probe_ip probe).
 Proof.
-  intros ctx pkt t dt probe ctx' resp poisoned_mac Hstate Hspa_match Hsha_poison Hnot_bcast Hproc.
+  intros ctx pkt t dt probe ctx' resp poisoned_mac Hstate Hspa_match Hsha_poison Hnot_bcast Hnot_in_cache Hproc.
   assert (Hconflict: detect_probe_conflict
     {| earp_my_mac := earp_my_mac ctx;
        earp_my_ip := earp_my_ip ctx;
@@ -3898,7 +3976,7 @@ Proof.
        earp_last_cache_cleanup := t |} probe pkt = true).
   { unfold detect_probe_conflict. rewrite Hspa_match. apply orb_true_l. }
   rewrite <- Hsha_poison in Hnot_bcast.
-  assert (Hpreempt := dad_conflict_preempts_cache_update ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hproc).
+  assert (Hpreempt := dad_conflict_preempts_cache_update ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hnot_in_cache Hproc).
   destruct Hpreempt as [Hcache_eq _].
   rewrite Hcache_eq. reflexivity.
 Qed.
@@ -3967,7 +4045,9 @@ Proof.
   - destruct (can_defend d current_time) eqn:Hcan.
     + injection Hproc as Hctx _. subst. simpl. reflexivity.
     + injection Hproc as Hctx _. subst. reflexivity.
-  - injection Hproc as Hctx _. subst. reflexivity.
+  - destruct (timer_expired a current_time) eqn:Hexp.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+    + injection Hproc as Hctx _. subst. reflexivity.
 Qed.
 
 Theorem process_conflict_preserves_ip : forall ctx current_time ctx' pkt,
@@ -3984,13 +4064,16 @@ Proof.
   - destruct (can_defend d current_time) eqn:Hcan.
     + injection Hproc as Hctx _. subst. simpl. reflexivity.
     + injection Hproc as Hctx _. subst. reflexivity.
-  - injection Hproc as Hctx _. subst. reflexivity.
+  - destruct (timer_expired a current_time) eqn:Hexp.
+    + injection Hproc as Hctx _. subst. simpl. reflexivity.
+    + injection Hproc as Hctx _. subst. reflexivity.
 Qed.
 
-Theorem process_conflict_enters_defend_or_stays_conflict : forall ctx current_time ctx' pkt,
+Theorem process_conflict_enters_defend_or_stays_conflict_or_idles : forall ctx current_time ctx' pkt,
   process_conflict ctx current_time = (ctx', pkt) ->
   (exists defend, earp_state_data ctx' = StateDefend defend) \/
-  (exists conflicted_ip, earp_state_data ctx' = StateConflict conflicted_ip).
+  (exists conflicted_ip timer, earp_state_data ctx' = StateConflict conflicted_ip timer) \/
+  earp_state_data ctx' = StateIdle.
 Proof.
   intros ctx current_time ctx' pkt Hproc.
   unfold process_conflict in Hproc.
@@ -4008,8 +4091,24 @@ Proof.
       exists {| defend_last_time := current_time |}. reflexivity.
     + injection Hproc as Hctx _. subst ctx'. simpl. left.
       exists d. rewrite <- Hstate. reflexivity.
-  - injection Hproc as Hctx _. subst ctx'. right.
-    exists i. rewrite Hstate. reflexivity.
+  - destruct (timer_expired a current_time) eqn:Hexp.
+    + injection Hproc as Hctx _. subst ctx'. right. right. reflexivity.
+    + injection Hproc as Hctx _. subst ctx'. right. left.
+      exists i, a. assumption.
+Qed.
+
+Theorem conflict_recovery_after_timeout : forall ctx conflicted_ip conflict_timer current_time ctx' pkt,
+  earp_state_data ctx = StateConflict conflicted_ip conflict_timer ->
+  timer_expired conflict_timer current_time = true ->
+  process_conflict ctx current_time = (ctx', pkt) ->
+  earp_state_data ctx' = StateIdle /\ pkt = None.
+Proof.
+  intros ctx conflicted_ip conflict_timer current_time ctx' pkt Hstate Hexp Hproc.
+  unfold process_conflict in Hproc.
+  rewrite Hstate in Hproc.
+  rewrite Hexp in Hproc.
+  injection Hproc as Hc Hp. subst.
+  split; reflexivity.
 Qed.
 
 Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
