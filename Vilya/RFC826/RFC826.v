@@ -369,6 +369,83 @@ Definition rfc826_merge_explicit (cache : ARPCache) (ip : IPv4Address) (mac : MA
                  else cache' in
   (merge_flag, cache'').
 
+(* Static Entry Management API *)
+
+Definition add_static_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress) : ARPCache :=
+  let static_entry := {| ace_ip := ip; ace_mac := mac; ace_ttl := 0; ace_static := true |} in
+  let fix add_or_update (c : ARPCache) : ARPCache :=
+    match c with
+    | [] => [static_entry]
+    | e :: rest =>
+        if ip_eq e.(ace_ip) ip
+        then static_entry :: rest
+        else e :: add_or_update rest
+    end
+  in add_or_update cache.
+
+Definition remove_cache_entry (cache : ARPCache) (ip : IPv4Address) : ARPCache :=
+  let fix remove (c : ARPCache) : ARPCache :=
+    match c with
+    | [] => []
+    | e :: rest =>
+        if ip_eq e.(ace_ip) ip
+        then
+          if e.(ace_static)
+          then e :: rest
+          else rest
+        else e :: remove rest
+    end
+  in remove cache.
+
+Definition is_static_cache_entry (cache : ARPCache) (ip : IPv4Address) : bool :=
+  let fix check (c : ARPCache) : bool :=
+    match c with
+    | [] => false
+    | e :: rest =>
+        if ip_eq e.(ace_ip) ip
+        then e.(ace_static)
+        else check rest
+    end
+  in check cache.
+
+Definition list_static_entries (cache : ARPCache) : list ARPCacheEntry :=
+  filter (fun e => e.(ace_static)) cache.
+
+Definition count_static_entries (cache : ARPCache) : nat :=
+  length (list_static_entries cache).
+
+Theorem add_static_entry_creates_static : forall cache ip mac,
+  is_static_cache_entry (add_static_entry cache ip mac) ip = true.
+Proof.
+  intros cache ip mac.
+  unfold add_static_entry, is_static_cache_entry.
+  induction cache as [|e rest IH].
+  - simpl. unfold ip_eq. repeat rewrite N.eqb_refl. reflexivity.
+  - simpl. destruct (ip_eq (ace_ip e) ip) eqn:Heq; simpl.
+    + unfold ip_eq. repeat rewrite N.eqb_refl. reflexivity.
+    + rewrite Heq. apply IH.
+Qed.
+
+Theorem add_static_entry_lookup : forall cache ip mac,
+  lookup_cache (add_static_entry cache ip mac) ip = Some mac.
+Proof.
+  intros cache ip mac.
+  unfold add_static_entry, lookup_cache.
+  induction cache as [|e rest IH].
+  - simpl. unfold ip_eq. repeat rewrite N.eqb_refl. reflexivity.
+  - simpl. destruct (ip_eq (ace_ip e) ip) eqn:Heq; simpl.
+    + unfold ip_eq. repeat rewrite N.eqb_refl. reflexivity.
+    + rewrite Heq. apply IH.
+Qed.
+
+Lemma lookup_cache_cons_false : forall e rest ip,
+  ip_eq (ace_ip e) ip = false ->
+  lookup_cache (e :: rest) ip = lookup_cache rest ip.
+Proof.
+  intros e rest ip Hneq.
+  simpl. rewrite Hneq. reflexivity.
+Qed.
+
 (* Theorem: Explicit merge flag produces same result as implicit version *)
 Theorem rfc826_merge_explicit_equiv : forall cache ip mac ttl target,
   snd (rfc826_merge_explicit cache ip mac ttl target) =
