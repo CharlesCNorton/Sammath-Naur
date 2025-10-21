@@ -710,6 +710,31 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
   (negb (N.eqb packet.(arp_op) ARP_OP_REPLY) || mac_eq packet.(arp_tha) my_mac).
 
 (* =============================================================================
+   Section 6C: Refinement Types for Validated ARP Packets
+   ============================================================================= *)
+
+(* Refinement type: ARP packet that has passed validation *)
+Record ValidatedARPPacket (my_mac : MACAddress) := {
+  varp_packet : ARPEthernetIPv4;
+  varp_valid : validate_arp_packet varp_packet my_mac = true
+}.
+
+(* Extract the underlying packet from a validated packet *)
+Definition unwrap_validated_arp {my_mac : MACAddress}
+  (vp : ValidatedARPPacket my_mac) : ARPEthernetIPv4 :=
+  varp_packet my_mac vp.
+
+Coercion unwrap_validated_arp : ValidatedARPPacket >-> ARPEthernetIPv4.
+
+(* Smart constructor: attempts to create a validated packet *)
+Definition mk_validated_arp (my_mac : MACAddress) (packet : ARPEthernetIPv4)
+  : option (ValidatedARPPacket my_mac) :=
+  match Bool.bool_dec (validate_arp_packet packet my_mac) true with
+  | left H => Some {| varp_packet := packet; varp_valid := H |}
+  | right _ => None
+  end.
+
+(* =============================================================================
    Section 7: Protocol State Machine
    ============================================================================= *)
 
@@ -773,6 +798,206 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
       (ctx', None)
   else
     (ctx, None).  (* Drop invalid packets *)
+
+(* =============================================================================
+   Section 8_Refined: Type-Safe Processing with Validated Packets
+   ============================================================================= *)
+
+(* Type-safe ARP processing: validation guaranteed by type system.
+   No runtime validation check needed - the type ensures the packet is valid!
+
+   Compare with process_arp_packet above:
+   - Original: Takes raw ARPEthernetIPv4, must validate at runtime
+   - Refined: Takes ValidatedARPPacket, validation proved by type system
+
+   This eliminates an entire class of bugs where invalid packets could be processed. *)
+Definition process_validated_arp_packet
+  (ctx : ARPContext)
+  (vpacket : ValidatedARPPacket ctx.(arp_my_mac))
+  : ARPContext * option ARPEthernetIPv4 :=
+  let packet := varp_packet ctx.(arp_my_mac) vpacket in
+
+  (* Step 1: Check if I am the target *)
+  let i_am_target := ip_eq packet.(arp_tpa) ctx.(arp_my_ip) in
+
+  (* Step 2: RFC 826 compliant conditional merge *)
+  let cache' := rfc826_merge ctx.(arp_cache)
+                             packet.(arp_spa)
+                             packet.(arp_sha)
+                             ctx.(arp_cache_ttl)
+                             i_am_target in
+
+  let ctx' := {| arp_my_mac := ctx.(arp_my_mac);
+                 arp_my_ip := ctx.(arp_my_ip);
+                 arp_cache := cache';
+                 arp_cache_ttl := ctx.(arp_cache_ttl) |} in
+
+  (* Step 3: If I am the target and it's a request, send reply *)
+  if i_am_target
+  then
+    if N.eqb packet.(arp_op) ARP_OP_REQUEST
+    then
+      if is_gratuitous_arp packet
+      then (ctx', None)
+      else
+        let reply := make_arp_reply ctx.(arp_my_mac) ctx.(arp_my_ip)
+                                    packet.(arp_sha) packet.(arp_spa) in
+        (ctx', Some reply)
+    else
+      (ctx', None)
+  else
+    (ctx', None).
+
+(* Type-safe packet parsing: returns validated packet or None *)
+Definition parse_validated_arp_packet
+  (my_mac : MACAddress)
+  (data : list byte)
+  : option (ValidatedARPPacket my_mac) :=
+  match parse_arp_packet data with
+  | Some packet => mk_validated_arp my_mac packet
+  | None => None
+  end.
+
+(* Proof: Validated processing is equivalent to original when packet is valid *)
+Theorem validated_process_equiv : forall ctx packet,
+  validate_arp_packet packet ctx.(arp_my_mac) = true ->
+  forall vpacket,
+    varp_packet ctx.(arp_my_mac) vpacket = packet ->
+    process_validated_arp_packet ctx vpacket =
+    process_arp_packet ctx packet.
+Proof.
+  intros ctx packet Hvalid vpacket Heq.
+  unfold process_validated_arp_packet, process_arp_packet.
+  rewrite Heq.
+  rewrite Hvalid.
+  reflexivity.
+Qed.
+
+(* Proof: Smart constructor succeeds iff validation succeeds *)
+Theorem mk_validated_arp_correct : forall my_mac packet,
+  (exists vp, mk_validated_arp my_mac packet = Some vp) <->
+  validate_arp_packet packet my_mac = true.
+Proof.
+  intros my_mac packet.
+  split; intro H.
+  - destruct H as [vp Hvp].
+    unfold mk_validated_arp in Hvp.
+    destruct (Bool.bool_dec (validate_arp_packet packet my_mac) true); try discriminate.
+    assumption.
+  - exists {| varp_packet := packet; varp_valid := H |}.
+    unfold mk_validated_arp.
+    destruct (Bool.bool_dec (validate_arp_packet packet my_mac) true) as [Heq | Hneq].
+    + f_equal. f_equal. apply proof_irrelevance.
+    + contradiction.
+Qed.
+
+(* =============================================================================
+   Section 8_Refined_Properties: Benefits of Refinement Types
+   ============================================================================= *)
+
+(* Key Benefit #1: Type-level guarantee - validated packets are always valid *)
+Theorem validated_packet_always_valid : forall my_mac (vp : ValidatedARPPacket my_mac),
+  validate_arp_packet (varp_packet my_mac vp) my_mac = true.
+Proof.
+  intros my_mac vp.
+  destruct vp as [pkt Hvalid].
+  simpl. exact Hvalid.
+Qed.
+
+(* Key Benefit #2: Impossible to construct invalid validated packets *)
+Theorem no_invalid_validated_packets : forall my_mac packet,
+  validate_arp_packet packet my_mac = false ->
+  ~exists (vp : ValidatedARPPacket my_mac), varp_packet my_mac vp = packet.
+Proof.
+  intros my_mac packet Hinvalid [vp Heq].
+  pose proof (validated_packet_always_valid my_mac vp) as Hvalid.
+  rewrite Heq in Hvalid.
+  rewrite Hinvalid in Hvalid.
+  discriminate.
+Qed.
+
+(* Key Benefit #3: Broadcast sender packets cannot be validated *)
+Theorem broadcast_sender_cannot_validate : forall my_mac packet,
+  is_broadcast_mac (arp_sha packet) = true ->
+  mk_validated_arp my_mac packet = None.
+Proof.
+  intros my_mac packet Hbcast.
+  unfold mk_validated_arp.
+  destruct (Bool.bool_dec (validate_arp_packet packet my_mac) true) as [Hvalid | Hinvalid]; try reflexivity.
+  exfalso.
+  unfold validate_arp_packet in Hvalid.
+  rewrite Hbcast in Hvalid.
+  simpl in Hvalid.
+  repeat rewrite andb_false_r in Hvalid.
+  discriminate.
+Qed.
+
+(* Key Benefit #4: Multicast sender packets cannot be validated *)
+Theorem multicast_sender_cannot_validate : forall my_mac packet,
+  is_multicast_mac (arp_sha packet) = true ->
+  is_broadcast_mac (arp_sha packet) = false ->
+  mk_validated_arp my_mac packet = None.
+Proof.
+  intros my_mac packet Hmcast Hnot_bcast.
+  unfold mk_validated_arp.
+  destruct (Bool.bool_dec (validate_arp_packet packet my_mac) true) as [Hvalid | Hinvalid]; try reflexivity.
+  exfalso.
+  unfold validate_arp_packet in Hvalid.
+  rewrite Hnot_bcast, Hmcast in Hvalid.
+  simpl in Hvalid.
+  destruct (is_valid_arp_opcode (arp_op packet)); simpl in Hvalid; discriminate.
+Qed.
+
+(* Key Benefit #5: Type safety eliminates runtime validation overhead *)
+Theorem validated_process_no_validation_check : forall ctx vpacket,
+  exists result,
+    process_validated_arp_packet ctx vpacket = result /\
+    (* The function body never calls validate_arp_packet! *)
+    forall packet, varp_packet ctx.(arp_my_mac) vpacket = packet ->
+                   result = process_arp_packet ctx packet.
+Proof.
+  intros ctx vpacket.
+  exists (process_validated_arp_packet ctx vpacket).
+  split; [reflexivity|].
+  intros packet Heq.
+  pose proof (validated_packet_always_valid ctx.(arp_my_mac) vpacket) as Hvalid.
+  unfold process_validated_arp_packet, process_arp_packet.
+  rewrite Heq in *.
+  rewrite Hvalid.
+  reflexivity.
+Qed.
+
+(* Key Benefit #6: Parsing returns only valid packets *)
+Theorem parse_validated_only_valid : forall my_mac data vp,
+  parse_validated_arp_packet my_mac data = Some vp ->
+  validate_arp_packet (varp_packet my_mac vp) my_mac = true.
+Proof.
+  intros my_mac data vp Hparse.
+  unfold parse_validated_arp_packet in Hparse.
+  destruct (parse_arp_packet data) as [packet|] eqn:Hpkt; try discriminate.
+  unfold mk_validated_arp in Hparse.
+  destruct (Bool.bool_dec (validate_arp_packet packet my_mac) true) as [Hvalid | Hinvalid]; try discriminate.
+  injection Hparse as Hvp. subst vp.
+  simpl. exact Hvalid.
+Qed.
+
+(* Key Benefit #7: Refinement types compose - validated packets preserve validity *)
+Theorem validated_packet_extraction_preserves_validity : forall my_mac (vp : ValidatedARPPacket my_mac),
+  let packet := varp_packet my_mac vp in
+  validate_arp_packet packet my_mac = true.
+Proof.
+  intros my_mac vp packet.
+  apply validated_packet_always_valid.
+Qed.
+
+(* Key Benefit #8: Type-driven development - compiler enforces correctness *)
+Example type_enforced_correctness : forall my_mac bad_packet,
+  is_broadcast_mac (arp_sha bad_packet) = true ->
+  (* Cannot construct a ValidatedARPPacket from invalid data *)
+  mk_validated_arp my_mac bad_packet = None.
+Proof.
+  intros. apply broadcast_sender_cannot_validate. assumption.
+Qed.
 
 (* =============================================================================
    Section 8A: RARP Processing (RFC 903)
@@ -857,6 +1082,50 @@ Definition process_rarp_server (ctx : ARPContext) (table : RARPTable)
 Definition process_rarp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
                                : ARPContext * option IPv4Address :=
   process_rarp_client ctx packet.
+
+(* =============================================================================
+   Section 8A1: Refinement Types for Validated RARP Packets
+   ============================================================================= *)
+
+(* Refinement type: RARP client packet that has passed validation *)
+Record ValidatedRARPClient (my_mac : MACAddress) := {
+  vrarp_client_packet : ARPEthernetIPv4;
+  vrarp_client_valid : validate_rarp_client vrarp_client_packet my_mac = true
+}.
+
+(* Refinement type: RARP server packet that has passed validation *)
+Record ValidatedRARPServer := {
+  vrarp_server_packet : ARPEthernetIPv4;
+  vrarp_server_valid : validate_rarp_server vrarp_server_packet = true
+}.
+
+(* Extract underlying packet from validated RARP client packet *)
+Definition unwrap_validated_rarp_client {my_mac : MACAddress}
+  (vp : ValidatedRARPClient my_mac) : ARPEthernetIPv4 :=
+  vrarp_client_packet my_mac vp.
+
+(* Extract underlying packet from validated RARP server packet *)
+Definition unwrap_validated_rarp_server (vp : ValidatedRARPServer) : ARPEthernetIPv4 :=
+  vrarp_server_packet vp.
+
+Coercion unwrap_validated_rarp_client : ValidatedRARPClient >-> ARPEthernetIPv4.
+Coercion unwrap_validated_rarp_server : ValidatedRARPServer >-> ARPEthernetIPv4.
+
+(* Smart constructor for RARP client packets *)
+Definition mk_validated_rarp_client (my_mac : MACAddress) (packet : ARPEthernetIPv4)
+  : option (ValidatedRARPClient my_mac) :=
+  match Bool.bool_dec (validate_rarp_client packet my_mac) true with
+  | left H => Some {| vrarp_client_packet := packet; vrarp_client_valid := H |}
+  | right _ => None
+  end.
+
+(* Smart constructor for RARP server packets *)
+Definition mk_validated_rarp_server (packet : ARPEthernetIPv4)
+  : option ValidatedRARPServer :=
+  match Bool.bool_dec (validate_rarp_server packet) true with
+  | left H => Some {| vrarp_server_packet := packet; vrarp_server_valid := H |}
+  | right _ => None
+  end.
 
 (* =============================================================================
    Section 8B: RARP Correctness Properties
@@ -4050,6 +4319,13 @@ Extraction "arp.ml"
 
   (* Basic ARP protocol *)
   process_arp_packet
+
+  (* Refinement types and type-safe processing *)
+  mk_validated_arp
+  process_validated_arp_packet
+  parse_validated_arp_packet
+  mk_validated_rarp_client
+  mk_validated_rarp_server
 
   (* Enhanced ARP with state machine *)
   process_arp_packet_enhanced
