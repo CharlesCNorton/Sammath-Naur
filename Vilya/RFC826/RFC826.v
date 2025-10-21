@@ -713,11 +713,15 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
    Section 7: Protocol State Machine
    ============================================================================= *)
 
-(* ARP protocol context: RFC 826 basic model *)
+(* Default ARP cache entry TTL: 5 minutes (300 seconds) per RFC recommendations *)
+Definition DEFAULT_ARP_TTL : N := 300.
+
+(* ARP protocol context: RFC 826 basic model with configurable TTL *)
 Record ARPContext := {
   arp_my_mac : MACAddress;           (* This host's MAC address *)
   arp_my_ip : IPv4Address;           (* This host's IP address *)
-  arp_cache : ARPCache               (* IP-to-MAC resolution cache *)
+  arp_cache : ARPCache;              (* IP-to-MAC resolution cache *)
+  arp_cache_ttl : N                  (* Configurable cache entry TTL in seconds *)
 }.
 
 (* Checks if ARP packet is gratuitous (spa == tpa, used for announcements) *)
@@ -743,12 +747,13 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
     let cache' := rfc826_merge ctx.(arp_cache)
                                packet.(arp_spa)
                                packet.(arp_sha)
-                               300 (* 5 minute TTL *)
+                               ctx.(arp_cache_ttl)
                                i_am_target in
 
     let ctx' := {| arp_my_mac := ctx.(arp_my_mac);
                    arp_my_ip := ctx.(arp_my_ip);
-                   arp_cache := cache' |} in
+                   arp_cache := cache';
+                   arp_cache_ttl := ctx.(arp_cache_ttl) |} in
 
     (* Step 3: If I am the target and it's a request, send reply *)
     (* RFC 826: Never reply to gratuitous ARP (spa == tpa) *)
@@ -1350,6 +1355,7 @@ Record EnhancedARPContext := {
   earp_my_mac : MACAddress;
   earp_my_ip : IPv4Address;
   earp_cache : ARPCache;
+  earp_cache_ttl : N;
   earp_state_data : ARPStateData;
   earp_iface : NetworkInterface;
   earp_flood_table : FloodTable;
@@ -1501,6 +1507,7 @@ Definition add_pending_request (ctx : EnhancedARPContext) (target_ip : IPv4Addre
       {| earp_my_mac := ctx.(earp_my_mac);
          earp_my_ip := ctx.(earp_my_ip);
          earp_cache := ctx.(earp_cache);
+         earp_cache_ttl := ctx.(earp_cache_ttl);
          earp_state_data := StatePending (new_req :: reqs);
          earp_iface := ctx.(earp_iface);
          earp_flood_table := ctx.(earp_flood_table);
@@ -1512,6 +1519,7 @@ Definition add_pending_request (ctx : EnhancedARPContext) (target_ip : IPv4Addre
       {| earp_my_mac := ctx.(earp_my_mac);
          earp_my_ip := ctx.(earp_my_ip);
          earp_cache := ctx.(earp_cache);
+         earp_cache_ttl := ctx.(earp_cache_ttl);
          earp_state_data := StatePending [new_req];
          earp_iface := ctx.(earp_iface);
          earp_flood_table := ctx.(earp_flood_table);
@@ -1552,6 +1560,7 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
       ({| earp_my_mac := ctx.(earp_my_mac);
           earp_my_ip := ctx.(earp_my_ip);
           earp_cache := ctx.(earp_cache);
+          earp_cache_ttl := ctx.(earp_cache_ttl);
           earp_state_data := match new_reqs with
                              | [] => StateIdle
                              | _ => StatePending new_reqs
@@ -1577,6 +1586,7 @@ Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
         let ctx'' := {| earp_my_mac := ctx'.(earp_my_mac);
                        earp_my_ip := ctx'.(earp_my_ip);
                        earp_cache := ctx'.(earp_cache);
+                       earp_cache_ttl := ctx'.(earp_cache_ttl);
                        earp_state_data := ctx'.(earp_state_data);
                        earp_iface := ctx'.(earp_iface);
                        earp_flood_table := new_flood;
@@ -1596,6 +1606,7 @@ Definition start_dad_probe (ctx : EnhancedARPContext) (ip_to_probe : IPv4Address
   {| earp_my_mac := ctx.(earp_my_mac);
      earp_my_ip := ctx.(earp_my_ip);
      earp_cache := ctx.(earp_cache);
+     earp_cache_ttl := ctx.(earp_cache_ttl);
      earp_state_data := StateProbe {| probe_ip := ip_to_probe;
                                      probe_count := 0;
                                      probe_timer := start_timer ARP_PROBE_WAIT current_time |};
@@ -1624,6 +1635,7 @@ Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
+                    earp_cache_ttl := ctx.(earp_cache_ttl);
                     earp_state_data := StateProbe new_probe;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
@@ -1635,6 +1647,7 @@ Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                     earp_my_ip := probe.(probe_ip);
                     earp_cache := ctx.(earp_cache);
+                    earp_cache_ttl := ctx.(earp_cache_ttl);
                     earp_state_data := StateAnnounce announce;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
@@ -1664,6 +1677,7 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
+                    earp_cache_ttl := ctx.(earp_cache_ttl);
                     earp_state_data := StateAnnounce new_announce;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
@@ -1673,6 +1687,7 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
+                    earp_cache_ttl := ctx.(earp_cache_ttl);
                     earp_state_data := StateIdle;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
@@ -1710,6 +1725,7 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
         let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                       earp_my_ip := ctx.(earp_my_ip);
                       earp_cache := ctx.(earp_cache);
+                      earp_cache_ttl := ctx.(earp_cache_ttl);
                       earp_state_data := StateDefend new_defend;
                       earp_iface := ctx.(earp_iface);
                       earp_flood_table := ctx.(earp_flood_table);
@@ -1722,6 +1738,7 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                     earp_my_ip := ctx.(earp_my_ip);
                     earp_cache := ctx.(earp_cache);
+                    earp_cache_ttl := ctx.(earp_cache_ttl);
                     earp_state_data := StateDefend new_defend;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
@@ -1739,6 +1756,7 @@ Definition send_arp_request_with_flood_check (ctx : EnhancedARPContext)
     let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                   earp_my_ip := ctx.(earp_my_ip);
                   earp_cache := ctx.(earp_cache);
+                  earp_cache_ttl := ctx.(earp_cache_ttl);
                   earp_state_data := ctx.(earp_state_data);
                   earp_iface := ctx.(earp_iface);
                   earp_flood_table := new_flood_table;
@@ -1749,6 +1767,7 @@ Definition send_arp_request_with_flood_check (ctx : EnhancedARPContext)
     let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
                   earp_my_ip := ctx.(earp_my_ip);
                   earp_cache := ctx.(earp_cache);
+                  earp_cache_ttl := ctx.(earp_cache_ttl);
                   earp_state_data := ctx.(earp_state_data);
                   earp_iface := ctx.(earp_iface);
                   earp_flood_table := new_flood_table;
@@ -2089,6 +2108,7 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
   let ctx_aged := {| earp_my_mac := ctx.(earp_my_mac);
                      earp_my_ip := ctx.(earp_my_ip);
                      earp_cache := aged_cache;
+                     earp_cache_ttl := ctx.(earp_cache_ttl);
                      earp_state_data := ctx.(earp_state_data);
                      earp_iface := ctx.(earp_iface);
                      earp_flood_table := cleaned_flood;
@@ -2106,6 +2126,7 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
         let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := ctx_aged.(earp_cache);
+                      earp_cache_ttl := ctx_aged.(earp_cache_ttl);
                       earp_state_data := StateConflict probe.(probe_ip);
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
@@ -2115,10 +2136,11 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
         (* Continue with RFC 826 strict processing *)
         let i_am_target := ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip) in
         let cache' := rfc826_merge ctx_aged.(earp_cache)
-                                   packet.(arp_spa) packet.(arp_sha) 300 i_am_target in
+                                   packet.(arp_spa) packet.(arp_sha) ctx_aged.(earp_cache_ttl) i_am_target in
         let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := cache';
+                      earp_cache_ttl := ctx_aged.(earp_cache_ttl);
                       earp_state_data := ctx_aged.(earp_state_data);
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
@@ -2133,7 +2155,7 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
         (* RFC 826 strict processing *)
         let i_am_target := ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip) in
         let cache' := rfc826_merge ctx_aged.(earp_cache)
-                                   packet.(arp_spa) packet.(arp_sha) 300 i_am_target in
+                                   packet.(arp_spa) packet.(arp_sha) ctx_aged.(earp_cache_ttl) i_am_target in
 
         (* Remove from pending if this is a reply to our request *)
         let new_state :=
@@ -2148,6 +2170,7 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
         let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
                       earp_my_ip := ctx_aged.(earp_my_ip);
                       earp_cache := cache';
+                      earp_cache_ttl := ctx_aged.(earp_cache_ttl);
                       earp_state_data := new_state;
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
@@ -2423,6 +2446,9 @@ Qed.
 (* Property 4: Cache size bounds *)
 Definition cache_size (c : ARPCache) : nat := length c.
 
+(* RFC 826 Cache Size Limit: Maximum entries to prevent unbounded growth *)
+Definition MAX_CACHE_SIZE : nat := 1024.
+
 Lemma update_cache_entry_size : forall cache ip mac ttl,
   length (update_cache_entry cache ip mac ttl) = length cache.
 Proof.
@@ -2594,6 +2620,98 @@ Proof.
       unfold cache_size;
       apply rfc826_merge_size_bound.
   - injection Hproc as Hctx' _. subst ctx'. simpl. unfold cache_size. lia.
+Qed.
+
+(* Bounded cache operations: Enforce MAX_CACHE_SIZE limit *)
+Definition rfc826_merge_bounded (cache : ARPCache) (ip : IPv4Address)
+                                 (mac : MACAddress) (ttl : N) (i_am_target : bool)
+                                 : ARPCache :=
+  let result := rfc826_merge cache ip mac ttl i_am_target in
+  if Nat.leb (length result) MAX_CACHE_SIZE
+  then result
+  else cache.
+
+Definition add_cache_entry_bounded (cache : ARPCache) (ip : IPv4Address)
+                                    (mac : MACAddress) (ttl : N) : ARPCache :=
+  if Nat.ltb (length cache) MAX_CACHE_SIZE
+  then add_cache_entry cache ip mac ttl
+  else cache.
+
+Lemma rfc826_merge_bounded_respects_limit : forall cache ip mac ttl target,
+  (length cache <= MAX_CACHE_SIZE)%nat ->
+  (length (rfc826_merge_bounded cache ip mac ttl target) <= MAX_CACHE_SIZE)%nat.
+Proof.
+  intros cache ip mac ttl target Hbound.
+  unfold rfc826_merge_bounded.
+  destruct (Nat.leb (length (rfc826_merge cache ip mac ttl target)) MAX_CACHE_SIZE) eqn:Hcheck.
+  - apply Nat.leb_le in Hcheck. assumption.
+  - assumption.
+Qed.
+
+Lemma add_cache_entry_bounded_respects_limit : forall cache ip mac ttl,
+  (length cache <= MAX_CACHE_SIZE)%nat ->
+  (length (add_cache_entry_bounded cache ip mac ttl) <= MAX_CACHE_SIZE)%nat.
+Proof.
+  intros cache ip mac ttl Hbound.
+  unfold add_cache_entry_bounded.
+  destruct (Nat.ltb (length cache) MAX_CACHE_SIZE) eqn:Hcheck.
+  - apply Nat.ltb_lt in Hcheck.
+    assert (Hadd := add_cache_entry_size_bound cache ip mac ttl).
+    lia.
+  - assumption.
+Qed.
+
+Theorem cache_bounded : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (length (arp_cache ctx') <= MAX_CACHE_SIZE)%nat.
+Proof.
+  intros ctx pkt ctx' resp Hbound Hproc.
+  unfold process_arp_packet in Hproc.
+  destruct (validate_arp_packet pkt (arp_my_mac ctx)) eqn:Hvalid.
+  - destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htarget;
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+    + destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+      * injection Hproc as Hctx _; subst ctx'; simpl.
+        assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
+                                                   (arp_sha pkt) (arp_cache_ttl ctx) true).
+        lia.
+      * injection Hproc as Hctx _; subst ctx'; simpl.
+        assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
+                                                   (arp_sha pkt) (arp_cache_ttl ctx) true).
+        lia.
+    + injection Hproc as Hctx _; subst ctx'; simpl.
+      assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
+                                                 (arp_sha pkt) (arp_cache_ttl ctx) true).
+      lia.
+    + injection Hproc as Hctx _; subst ctx'; simpl.
+      assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
+                                                 (arp_sha pkt) (arp_cache_ttl ctx) false).
+      lia.
+    + injection Hproc as Hctx _; subst ctx'; simpl.
+      assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
+                                                 (arp_sha pkt) (arp_cache_ttl ctx) false).
+      lia.
+  - injection Hproc as Hctx _; subst ctx'; simpl. lia.
+Qed.
+
+Corollary cache_bounded_invariant : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (length (arp_cache ctx') <= MAX_CACHE_SIZE)%nat.
+Proof.
+  intros. eapply cache_bounded; eassumption.
+Qed.
+
+Theorem cache_strictly_bounded : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) <= MAX_CACHE_SIZE - 1)%nat ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (length (arp_cache ctx') <= MAX_CACHE_SIZE)%nat.
+Proof.
+  intros ctx pkt ctx' resp Hbound Hproc.
+  apply (cache_bounded ctx pkt ctx' resp).
+  - unfold MAX_CACHE_SIZE in *. lia.
+  - assumption.
 Qed.
 
 (* Property 5: Gratuitous ARP updates when we're target *)
@@ -3168,6 +3286,7 @@ Theorem dad_conflict_preempts_cache_update : forall ctx pkt t dt probe ctx' resp
     {| earp_my_mac := earp_my_mac ctx;
        earp_my_ip := earp_my_ip ctx;
        earp_cache := age_cache (earp_cache ctx) dt;
+       earp_cache_ttl := earp_cache_ttl ctx;
        earp_state_data := StateProbe probe;
        earp_iface := earp_iface ctx;
        earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
@@ -3206,6 +3325,7 @@ Proof.
     {| earp_my_mac := earp_my_mac ctx;
        earp_my_ip := earp_my_ip ctx;
        earp_cache := age_cache (earp_cache ctx) dt;
+       earp_cache_ttl := earp_cache_ttl ctx;
        earp_state_data := StateProbe probe;
        earp_iface := earp_iface ctx;
        earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
@@ -3689,7 +3809,8 @@ Definition process_event (node : NetworkNode) (event : NetworkEvent) : NetworkNo
       let aged_cache := age_cache node.(node_ctx).(arp_cache) elapsed in
       {| node_ctx := {| arp_my_mac := node.(node_ctx).(arp_my_mac);
                         arp_my_ip := node.(node_ctx).(arp_my_ip);
-                        arp_cache := aged_cache |};
+                        arp_cache := aged_cache;
+                        arp_cache_ttl := node.(node_ctx).(arp_cache_ttl) |};
          node_time := node.(node_time) + elapsed |}
   | SendPacket _ => node
   end.
@@ -3846,6 +3967,7 @@ Lemma enhanced_broadcast_case : forall ctx pkt ctx_aged,
   ctx_aged = {| earp_my_mac := earp_my_mac ctx;
                earp_my_ip := earp_my_ip ctx;
                earp_cache := age_cache (earp_cache ctx) 0;
+               earp_cache_ttl := earp_cache_ttl ctx;
                earp_state_data := earp_state_data ctx;
                earp_iface := earp_iface ctx;
                earp_flood_table := clean_flood_table (earp_flood_table ctx) 0;
@@ -3864,9 +3986,9 @@ Proof.
   destruct ctx_simple. simpl in *. subst. reflexivity.
 Qed.
 
-Lemma simple_ctx_construction : forall mac ip cache,
-  {| arp_my_mac := mac; arp_my_ip := ip; arp_cache := cache |} =
-  {| arp_my_mac := mac; arp_my_ip := ip; arp_cache := cache |}.
+Lemma simple_ctx_construction : forall mac ip cache ttl,
+  {| arp_my_mac := mac; arp_my_ip := ip; arp_cache := cache; arp_cache_ttl := ttl |} =
+  {| arp_my_mac := mac; arp_my_ip := ip; arp_cache := cache; arp_cache_ttl := ttl |}.
 Proof.
   intros. reflexivity.
 Qed.
