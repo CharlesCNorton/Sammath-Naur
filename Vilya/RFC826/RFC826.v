@@ -680,13 +680,17 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
   negb (is_broadcast_mac packet.(arp_sha)) &&
   (* Security: Sender MAC should not be multicast *)
   negb (is_multicast_mac packet.(arp_sha)) &&
-  (* RFC 5227: Allow zero source IP only for ARP probes (op=REQUEST with SPA=0) *)
+  (* RFC 5227: Allow zero source IP only for ARP probes or gratuitous ARP *)
   (if is_zero_ipv4 packet.(arp_spa)
-   then N.eqb packet.(arp_op) ARP_OP_REQUEST
+   then (N.eqb packet.(arp_op) ARP_OP_REQUEST) || (ip_eq packet.(arp_spa) packet.(arp_tpa))
    else true) &&
   (* Validate reply THA: if this is a reply, THA should be our MAC *)
   (if N.eqb packet.(arp_op) ARP_OP_REPLY
    then mac_eq packet.(arp_tha) my_mac
+   else true) &&
+  (* RFC 826: ARP requests should have THA = 00:00:00:00:00:00 *)
+  (if N.eqb packet.(arp_op) ARP_OP_REQUEST
+   then mac_eq packet.(arp_tha) MAC_ZERO
    else true).
 
 (* =============================================================================
