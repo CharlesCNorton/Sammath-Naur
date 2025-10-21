@@ -17,6 +17,7 @@ From Coq Require Import
   List
   NArith.NArith
   NArith.Ndigits
+  NArith.Ndiv_def
   Bool
   Arith
   Lia
@@ -3638,7 +3639,7 @@ Lemma div2_8times_eq_div256 : forall n,
 Proof.
   intros n.
   replace (2^8) with (2*2*2*2*2*2*2*2) by reflexivity.
-  repeat rewrite N.div_div by lia.
+  repeat rewrite N.Div0.div_div by lia.
   reflexivity.
 Qed.
 
@@ -4744,7 +4745,194 @@ Qed.
 
 
 (* =============================================================================
-   Section 15: Extraction
+   Section 15: Liveness Properties
+   ============================================================================= *)
+
+Inductive ExecutionTrace : Type :=
+  | TraceEnd : EnhancedARPContext -> ExecutionTrace
+  | TraceStep : EnhancedARPContext -> EnhancedEvent -> ExecutionTrace -> ExecutionTrace.
+
+Fixpoint trace_length (trace : ExecutionTrace) : nat :=
+  match trace with
+  | TraceEnd _ => 0
+  | TraceStep _ _ rest => S (trace_length rest)
+  end.
+
+Fixpoint trace_context_at (trace : ExecutionTrace) (n : nat) : option EnhancedARPContext :=
+  match trace, n with
+  | TraceEnd ctx, O => Some ctx
+  | TraceEnd _, S _ => None
+  | TraceStep ctx _ _, O => Some ctx
+  | TraceStep _ _ rest, S n' => trace_context_at rest n'
+  end.
+
+Definition trace_initial_context (trace : ExecutionTrace) : EnhancedARPContext :=
+  match trace with
+  | TraceEnd ctx => ctx
+  | TraceStep ctx _ _ => ctx
+  end.
+
+Fixpoint trace_events (trace : ExecutionTrace) : list EnhancedEvent :=
+  match trace with
+  | TraceEnd _ => []
+  | TraceStep _ evt rest => evt :: trace_events rest
+  end.
+
+Inductive EventuallyInTrace {P : EnhancedARPContext -> Prop} : ExecutionTrace -> Prop :=
+  | EventuallyNow : forall ctx evt rest,
+      P ctx ->
+      EventuallyInTrace (TraceStep ctx evt rest)
+  | EventuallyLater : forall ctx evt rest,
+      EventuallyInTrace rest ->
+      EventuallyInTrace (TraceStep ctx evt rest).
+
+Definition AlwaysInTrace (P : EnhancedARPContext -> Prop) (trace : ExecutionTrace) : Prop :=
+  forall n ctx, trace_context_at trace n = Some ctx -> P ctx.
+
+Definition timer_advances_in_trace (trace : ExecutionTrace) : Prop :=
+  forall n ctx1 ctx2,
+    trace_context_at trace n = Some ctx1 ->
+    trace_context_at trace (S n) = Some ctx2 ->
+    exists delta, delta > 0 /\ earp_last_cache_cleanup ctx2 >= earp_last_cache_cleanup ctx1.
+
+Fixpoint timer_ticks_in_trace (trace : ExecutionTrace) : nat :=
+  match trace with
+  | TraceEnd _ => 0
+  | TraceStep _ (ETimerTick _) rest => S (timer_ticks_in_trace rest)
+  | TraceStep _ _ rest => timer_ticks_in_trace rest
+  end.
+
+Definition request_in_pending (ctx : EnhancedARPContext) (target_ip : IPv4Address) : Prop :=
+  match earp_state_data ctx with
+  | StatePending reqs =>
+      exists req, In req reqs /\ preq_target_ip req = target_ip
+  | _ => False
+  end.
+
+Definition request_resolved (ctx : EnhancedARPContext) (target_ip : IPv4Address) : Prop :=
+  exists mac, lookup_cache (earp_cache ctx) target_ip = Some mac.
+
+Definition request_timeout_reached (ctx : EnhancedARPContext) (target_ip : IPv4Address)
+                                    (current_time : N) : Prop :=
+  match earp_state_data ctx with
+  | StatePending reqs =>
+      forall req, In req reqs ->
+        preq_target_ip req = target_ip ->
+        preq_retries req >= ARP_MAX_RETRIES
+  | _ => True
+  end.
+
+Theorem timer_expiration_is_decidable : forall timer current_time,
+  {timer_expired timer current_time = true} + {timer_expired timer current_time = false}.
+Proof.
+  intros timer current_time.
+  destruct (timer_expired timer current_time) eqn:Hexp.
+  - left. reflexivity.
+  - right. reflexivity.
+Qed.
+
+Lemma timer_eventually_expires : forall timer start_time duration,
+  timer = start_timer duration start_time ->
+  duration > 0 ->
+  forall time_now,
+    time_now >= start_time + duration ->
+    timer_expired timer time_now = true.
+Proof.
+  intros timer start_time duration Htimer Hdur Tnow Hge.
+  subst timer.
+  apply timer_expired_after_deadline.
+  apply N.ge_le.
+  exact Hge.
+Qed.
+
+Definition bounded_trace (trace : ExecutionTrace) (max_steps : nat) : Prop :=
+  (trace_length trace <= max_steps)%nat.
+
+Fixpoint trace_apply_events (ctx : EnhancedARPContext) (events : list EnhancedEvent)
+                             (time : N) : ExecutionTrace :=
+  match events with
+  | [] => TraceEnd ctx
+  | evt :: rest =>
+      let (ctx', _) := enhanced_process_event
+        {| enode_ctx := ctx; enode_time := time |} evt in
+      TraceStep ctx evt (trace_apply_events (enode_ctx ctx') rest (enode_time ctx'))
+  end.
+
+Theorem timeout_processing_terminates : forall ctx current_time,
+  exists ctx' pkts,
+    process_timeouts ctx current_time = (ctx', pkts).
+Proof.
+  intros ctx current_time.
+  exists (fst (process_timeouts ctx current_time)).
+  exists (snd (process_timeouts ctx current_time)).
+  destruct (process_timeouts ctx current_time) eqn:H.
+  simpl. reflexivity.
+Qed.
+
+Definition network_delivers_packets : Prop :=
+  forall ctx target_ip request,
+    request = make_arp_request (earp_my_mac ctx) (earp_my_ip ctx) target_ip ->
+    exists trace,
+      @EventuallyInTrace (fun ctx' => request_resolved ctx' target_ip) trace.
+
+Theorem request_resolved_after_cache_update : forall ctx target_ip mac,
+  lookup_cache (earp_cache ctx) target_ip = Some mac ->
+  request_resolved ctx target_ip.
+Proof.
+  intros ctx target_ip mac Hlookup.
+  unfold request_resolved.
+  exists mac.
+  exact Hlookup.
+Qed.
+
+Theorem request_resolved_is_decidable : forall ctx target_ip,
+  {request_resolved ctx target_ip} + {~ request_resolved ctx target_ip}.
+Proof.
+  intros ctx target_ip.
+  unfold request_resolved.
+  destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup.
+  - left. exists m. reflexivity.
+  - right. intros [mac Hmac]. congruence.
+Qed.
+
+Theorem retry_mechanism_ensures_progress : forall req current_time,
+  preq_retries req < ARP_MAX_RETRIES ->
+  timer_expired (preq_timer req) current_time = true ->
+  exists req',
+    req' = retry_pending_request req current_time /\
+    preq_retries req' = preq_retries req + 1.
+Proof.
+  intros req current_time Hretries Hexp.
+  exists (retry_pending_request req current_time).
+  split.
+  - reflexivity.
+  - unfold retry_pending_request. simpl. reflexivity.
+Qed.
+
+Theorem max_retries_bounded : forall n,
+  n >= ARP_MAX_RETRIES ->
+  N.ltb n ARP_MAX_RETRIES = false.
+Proof.
+  intros n Hge.
+  apply N.ltb_ge.
+  apply N.ge_le.
+  exact Hge.
+Qed.
+
+Theorem pending_request_list_has_length : forall ctx,
+  match earp_state_data ctx with
+  | StatePending reqs => exists n, length reqs = n
+  | _ => True
+  end.
+Proof.
+  intros ctx.
+  destruct (earp_state_data ctx); auto.
+  exists (length l). reflexivity.
+Qed.
+
+
+(* =============================================================================
+   Section 16: Extraction
    ============================================================================= *)
 
 Require Extraction.
