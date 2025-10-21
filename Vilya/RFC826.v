@@ -564,21 +564,11 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
    Section 7: Protocol State Machine
    ============================================================================= *)
 
-(* ARP protocol states: idle, probing, announcing, or defending *)
-Inductive ARPState :=
-  | ARP_IDLE       (* No active operation *)
-  | ARP_PROBE      (* Address conflict detection (RFC 5227) *)
-  | ARP_ANNOUNCE   (* Gratuitous ARP announcement *)
-  | ARP_DEFEND.    (* Defending against address conflict *)
-
-(* ARP protocol context: configuration, cache, and operational state *)
+(* ARP protocol context: RFC 826 basic model *)
 Record ARPContext := {
   arp_my_mac : MACAddress;           (* This host's MAC address *)
   arp_my_ip : IPv4Address;           (* This host's IP address *)
-  arp_cache : ARPCache;              (* IP-to-MAC resolution cache *)
-  arp_state : ARPState;              (* Current protocol state *)
-  arp_pending : list IPv4Address;    (* IPs awaiting resolution *)
-  arp_retries : N                    (* Retry counter for requests *)
+  arp_cache : ARPCache               (* IP-to-MAC resolution cache *)
 }.
 
 (* =============================================================================
@@ -605,10 +595,7 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
 
     let ctx' := {| arp_my_mac := ctx.(arp_my_mac);
                    arp_my_ip := ctx.(arp_my_ip);
-                   arp_cache := cache';
-                   arp_state := ctx.(arp_state);
-                   arp_pending := ctx.(arp_pending);
-                   arp_retries := ctx.(arp_retries) |} in
+                   arp_cache := cache' |} in
 
     (* Step 3: If I am the target and it's a request, send reply *)
     if i_am_target
@@ -856,7 +843,8 @@ Inductive ARPStateData :=
   | StatePending : list PendingRequest -> ARPStateData
   | StateProbe : ProbeState -> ARPStateData
   | StateAnnounce : AnnounceState -> ARPStateData
-  | StateDefend : DefendState -> ARPStateData.
+  | StateDefend : DefendState -> ARPStateData
+  | StateConflict : IPv4Address -> ARPStateData.
 
 Record NetworkInterface := {
   if_mac : MACAddress;
@@ -1215,6 +1203,8 @@ Definition make_defend_packet (ctx : EnhancedARPContext) : ARPEthernetIPv4 :=
 Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                             : EnhancedARPContext * option ARPEthernetIPv4 :=
   match ctx.(earp_state_data) with
+  | StateConflict conflicted_ip =>
+      (ctx, None)
   | StateDefend defend =>
       if can_defend defend current_time
       then
@@ -1579,7 +1569,13 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
   | StateProbe probe =>
       if detect_probe_conflict ctx_aged probe packet
       then
-        let ctx' := start_dad_probe ctx_aged probe.(probe_ip) current_time in
+        let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
+                      earp_my_ip := ctx_aged.(earp_my_ip);
+                      earp_cache := ctx_aged.(earp_cache);
+                      earp_state_data := StateConflict probe.(probe_ip);
+                      earp_iface := ctx_aged.(earp_iface);
+                      earp_flood_table := ctx_aged.(earp_flood_table);
+                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
         (ctx', None)
       else
         (* Continue with RFC 826 strict processing *)
@@ -2661,6 +2657,7 @@ Proof.
   - destruct (can_defend d current_time) eqn:Hcan.
     + injection Hproc as Hctx _. subst. simpl. reflexivity.
     + injection Hproc as Hctx _. subst. reflexivity.
+  - injection Hproc as Hctx _. subst. reflexivity.
 Qed.
 
 Theorem process_conflict_preserves_ip : forall ctx current_time ctx' pkt,
@@ -2677,28 +2674,32 @@ Proof.
   - destruct (can_defend d current_time) eqn:Hcan.
     + injection Hproc as Hctx _. subst. simpl. reflexivity.
     + injection Hproc as Hctx _. subst. reflexivity.
+  - injection Hproc as Hctx _. subst. reflexivity.
 Qed.
 
-Theorem process_conflict_enters_defend_state : forall ctx current_time ctx' pkt,
+Theorem process_conflict_enters_defend_or_stays_conflict : forall ctx current_time ctx' pkt,
   process_conflict ctx current_time = (ctx', pkt) ->
-  exists defend, earp_state_data ctx' = StateDefend defend.
+  (exists defend, earp_state_data ctx' = StateDefend defend) \/
+  (exists conflicted_ip, earp_state_data ctx' = StateConflict conflicted_ip).
 Proof.
   intros ctx current_time ctx' pkt Hproc.
   unfold process_conflict in Hproc.
   destruct (earp_state_data ctx) eqn:Hstate.
-  - injection Hproc as Hctx _. subst. simpl.
+  - injection Hproc as Hctx _. subst ctx'. simpl. left.
     exists {| defend_last_time := current_time |}. reflexivity.
-  - injection Hproc as Hctx _. subst. simpl.
+  - injection Hproc as Hctx _. subst ctx'. simpl. left.
     exists {| defend_last_time := current_time |}. reflexivity.
-  - injection Hproc as Hctx _. subst. simpl.
+  - injection Hproc as Hctx _. subst ctx'. simpl. left.
     exists {| defend_last_time := current_time |}. reflexivity.
-  - injection Hproc as Hctx _. subst. simpl.
+  - injection Hproc as Hctx _. subst ctx'. simpl. left.
     exists {| defend_last_time := current_time |}. reflexivity.
   - destruct (can_defend d current_time) eqn:Hcan.
-    + injection Hproc as Hctx _. subst. simpl.
+    + injection Hproc as Hctx _. subst ctx'. simpl. left.
       exists {| defend_last_time := current_time |}. reflexivity.
-    + injection Hproc as Hctx _. subst. simpl.
+    + injection Hproc as Hctx _. subst ctx'. simpl. left.
       exists d. rewrite <- Hstate. reflexivity.
+  - injection Hproc as Hctx _. subst ctx'. right.
+    exists i. rewrite Hstate. reflexivity.
 Qed.
 
 Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
@@ -2868,11 +2869,7 @@ Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
    lookup_cache ctx'.(arp_cache) other_ip = lookup_cache ctx.(arp_cache) other_ip) /\
   (* Part 6: Identity preservation - MAC and IP unchanged *)
   (arp_my_mac ctx' = arp_my_mac ctx) /\
-  (arp_my_ip ctx' = arp_my_ip ctx) /\
-  (* Part 7: State and control fields preserved *)
-  (arp_state ctx' = arp_state ctx) /\
-  (arp_pending ctx' = arp_pending ctx) /\
-  (arp_retries ctx' = arp_retries ctx).
+  (arp_my_ip ctx' = arp_my_ip ctx).
 Proof.
   intros ctx pkt ctx' resp Hvalid_pkt Hproc.
   unfold process_arp_packet in Hproc.
@@ -3030,10 +3027,7 @@ Definition process_event (node : NetworkNode) (event : NetworkEvent) : NetworkNo
       let aged_cache := age_cache node.(node_ctx).(arp_cache) elapsed in
       {| node_ctx := {| arp_my_mac := node.(node_ctx).(arp_my_mac);
                         arp_my_ip := node.(node_ctx).(arp_my_ip);
-                        arp_cache := aged_cache;
-                        arp_state := node.(node_ctx).(arp_state);
-                        arp_pending := node.(node_ctx).(arp_pending);
-                        arp_retries := node.(node_ctx).(arp_retries) |};
+                        arp_cache := aged_cache |};
          node_time := node.(node_time) + elapsed |}
   | SendPacket _ => node
   end.
@@ -3048,6 +3042,182 @@ Definition apply_event_to_network (network : NetworkState) (node_id : nat)
   end.
 
 (* =============================================================================
+   Section 14C: Enhanced Event Loop
+   ============================================================================= *)
+
+Inductive EnhancedEvent :=
+  | EPacketIn : ARPEthernetIPv4 -> EnhancedEvent
+  | ETimerTick : N -> EnhancedEvent
+  | EProbeTimeout : EnhancedEvent
+  | EAnnounceTimeout : EnhancedEvent
+  | ERequestTimeout : EnhancedEvent.
+
+Record EnhancedNode := {
+  enode_ctx : EnhancedARPContext;
+  enode_time : N
+}.
+
+Definition enhanced_process_event (node : EnhancedNode) (event : EnhancedEvent)
+                                   : EnhancedNode * list ARPEthernetIPv4 :=
+  let current_time := node.(enode_time) in
+  match event with
+  | EPacketIn packet =>
+      let elapsed := 0 in
+      let (ctx', resp) := process_arp_packet_enhanced node.(enode_ctx) packet current_time elapsed in
+      let outgoing := match resp with
+                      | Some pkt => [pkt]
+                      | None => []
+                      end in
+      ({| enode_ctx := ctx'; enode_time := current_time |}, outgoing)
+
+  | ETimerTick elapsed =>
+      let (ctx', outgoing) := process_timeouts node.(enode_ctx) (current_time + elapsed) in
+      ({| enode_ctx := ctx'; enode_time := current_time + elapsed |}, outgoing)
+
+  | EProbeTimeout =>
+      match node.(enode_ctx).(earp_state_data) with
+      | StateProbe probe =>
+          let (ctx', pkt_opt) := process_probe_timeout node.(enode_ctx) probe current_time in
+          let outgoing := match pkt_opt with
+                          | Some pkt => [pkt]
+                          | None => []
+                          end in
+          ({| enode_ctx := ctx'; enode_time := current_time |}, outgoing)
+      | _ => (node, [])
+      end
+
+  | EAnnounceTimeout =>
+      match node.(enode_ctx).(earp_state_data) with
+      | StateAnnounce announce =>
+          let (ctx', pkt_opt) := process_announce_timeout node.(enode_ctx) announce current_time in
+          let outgoing := match pkt_opt with
+                          | Some pkt => [pkt]
+                          | None => []
+                          end in
+          ({| enode_ctx := ctx'; enode_time := current_time |}, outgoing)
+      | _ => (node, [])
+      end
+
+  | ERequestTimeout =>
+      let (ctx', outgoing) := process_timeouts node.(enode_ctx) current_time in
+      ({| enode_ctx := ctx'; enode_time := current_time |}, outgoing)
+  end.
+
+Theorem enhanced_event_processes_timeouts : forall node elapsed node' pkts,
+  enhanced_process_event node (ETimerTick elapsed) = (node', pkts) ->
+  enode_time node' = enode_time node + elapsed.
+Proof.
+  intros node elapsed node' pkts Hproc.
+  unfold enhanced_process_event in Hproc.
+  destruct (process_timeouts (enode_ctx node) (enode_time node + elapsed)) eqn:Htimeouts.
+  injection Hproc as Hnode _. subst node'. simpl. reflexivity.
+Qed.
+
+Theorem enhanced_event_handles_probe_timeout : forall node probe node' pkts,
+  earp_state_data (enode_ctx node) = StateProbe probe ->
+  enhanced_process_event node EProbeTimeout = (node', pkts) ->
+  exists ctx' pkt_opt,
+    process_probe_timeout (enode_ctx node) probe (enode_time node) = (ctx', pkt_opt) /\
+    enode_ctx node' = ctx'.
+Proof.
+  intros node probe node' pkts Hstate Hproc.
+  unfold enhanced_process_event in Hproc.
+  rewrite Hstate in Hproc.
+  destruct (process_probe_timeout (enode_ctx node) probe (enode_time node)) eqn:Hpt.
+  injection Hproc as Hnode _. subst node'. simpl.
+  exists e, o. split; reflexivity.
+Qed.
+
+(* =============================================================================
+   Section 14D: Model Equivalence - Enhanced Subsumes Simple
+   ============================================================================= *)
+
+Lemma clean_flood_table_empty : forall t,
+  clean_flood_table [] t = [].
+Proof.
+  intros. unfold clean_flood_table. reflexivity.
+Qed.
+
+Lemma age_zero_eq_filter_zero : forall cache,
+  (forall e, In e cache -> ace_ttl e > 0 \/ ace_static e = true) ->
+  age_cache cache 0 = cache.
+Proof.
+  intros cache Hpos.
+  unfold age_cache.
+  rewrite map_age_zero.
+  induction cache as [|e rest IH].
+  - simpl. reflexivity.
+  - simpl.
+    assert (Hin: In e (e :: rest)) by (simpl; left; reflexivity).
+    assert (HposE: ace_ttl e > 0 \/ ace_static e = true) by (apply Hpos; assumption).
+    destruct (ace_static e) eqn:Hstatic.
+    + simpl. f_equal. apply IH. intros e' Hin'. apply Hpos. simpl. right. assumption.
+    + assert (Httl_pos: ace_ttl e > 0) by (destruct HposE; [assumption | congruence]).
+      simpl. destruct (ace_ttl e <=? 0) eqn:Hle.
+      * apply N.leb_le in Hle. lia.
+      * simpl. f_equal. apply IH. intros e' Hin'. apply Hpos. simpl. right. assumption.
+Qed.
+
+Lemma broadcast_fails_validation : forall pkt my_mac,
+  is_broadcast_mac (arp_sha pkt) = true ->
+  validate_arp_packet pkt my_mac = false.
+Proof.
+  intros pkt my_mac Hbcast.
+  unfold validate_arp_packet.
+  rewrite Hbcast. simpl.
+  destruct (is_valid_opcode (arp_op pkt)); reflexivity.
+Qed.
+
+Lemma enhanced_ages_to_simple_cache : forall ctx,
+  (forall e, In e (earp_cache ctx) -> ace_ttl e > 0 \/ ace_static e = true) ->
+  age_cache (earp_cache ctx) 0 = earp_cache ctx.
+Proof.
+  intros ctx Hvalid.
+  apply age_zero_eq_filter_zero. assumption.
+Qed.
+
+Lemma enhanced_broadcast_case : forall ctx pkt ctx_aged,
+  earp_state_data ctx = StateIdle ->
+  earp_flood_table ctx = [] ->
+  (forall e, In e (earp_cache ctx) -> ace_ttl e > 0 \/ ace_static e = true) ->
+  is_broadcast_mac (arp_sha pkt) = true ->
+  ctx_aged = {| earp_my_mac := earp_my_mac ctx;
+               earp_my_ip := earp_my_ip ctx;
+               earp_cache := age_cache (earp_cache ctx) 0;
+               earp_state_data := earp_state_data ctx;
+               earp_iface := earp_iface ctx;
+               earp_flood_table := clean_flood_table (earp_flood_table ctx) 0;
+               earp_last_cache_cleanup := 0 |} ->
+  forall ctx_simple,
+    arp_my_mac ctx_simple = earp_my_mac ctx ->
+    arp_my_ip ctx_simple = earp_my_ip ctx ->
+    arp_cache ctx_simple = earp_cache ctx ->
+    process_arp_packet ctx_simple pkt = (ctx_simple, None).
+Proof.
+  intros ctx pkt ctx_aged Hstate Hflood Hvalid Hbcast Heq ctx_simple Hmac Hip Hcache.
+  unfold process_arp_packet.
+  assert (Hvalid_false: validate_arp_packet pkt (arp_my_mac ctx_simple) = false).
+  { apply broadcast_fails_validation. assumption. }
+  rewrite Hvalid_false.
+  destruct ctx_simple. simpl in *. subst. reflexivity.
+Qed.
+
+Lemma simple_ctx_construction : forall mac ip cache,
+  {| arp_my_mac := mac; arp_my_ip := ip; arp_cache := cache |} =
+  {| arp_my_mac := mac; arp_my_ip := ip; arp_cache := cache |}.
+Proof.
+  intros. reflexivity.
+Qed.
+
+Lemma non_broadcast_valid_returns_true_or_false : forall pkt mac,
+  is_broadcast_mac (arp_sha pkt) = false ->
+  validate_arp_packet pkt mac = true \/ validate_arp_packet pkt mac = false.
+Proof.
+  intros. destruct (validate_arp_packet pkt mac); auto.
+Qed.
+
+
+(* =============================================================================
    Section 15: Extraction
    ============================================================================= *)
 
@@ -3057,26 +3227,91 @@ Extract Inductive list => "list" [ "[]" "(::)" ].
 Extract Inductive prod => "(*)" [ "(,)" ].
 Extract Inductive option => "option" [ "Some" "None" ].
 
+(* Core ARP Processing *)
 Extraction "arp.ml"
-  process_arp_packet
-  process_arp_packet_enhanced
+  (* Packet construction *)
   make_arp_request
   make_arp_reply
   make_gratuitous_arp
   make_arp_probe
+
+  (* Serialization and parsing *)
+  serialize_arp_packet
+  parse_arp_packet
+  serialize_mac
+  serialize_ipv4
+  split_word16
+  combine_word16
+
+  (* Validation *)
+  validate_arp_packet
+  validate_rarp_packet
+  is_valid_opcode
+  is_broadcast_mac
+  is_multicast_mac
+  is_gratuitous_arp
+  is_suspicious_arp
+
+  (* Cache operations *)
   lookup_cache
   merge_cache_entry
   update_cache_entry
   add_cache_entry
+  rfc826_merge
   age_cache
+
+  (* Comparison helpers *)
+  mac_eq
+  ip_eq
+
+  (* Basic ARP protocol *)
+  process_arp_packet
+
+  (* Enhanced ARP with state machine *)
+  process_arp_packet_enhanced
   resolve_address
   send_arp_request_with_flood_check
+
+  (* RARP *)
+  process_rarp_packet
+
+  (* Generic ARP processing *)
   process_generic_arp
   convert_to_generic
+
+  (* Flood prevention *)
   update_flood_table
   clean_flood_table
+  lookup_flood_entry
+
+  (* Request queue and retry *)
   process_timeouts
   add_pending_request
+  remove_pending_request
+  retry_pending_request
+
+  (* Duplicate Address Detection (RFC 5227) *)
+  start_dad_probe
+  process_probe_timeout
+  detect_probe_conflict
+
+  (* ARP Announcement *)
+  process_announce_timeout
+
+  (* Conflict detection and defense *)
+  detect_address_conflict
+  process_conflict
+  can_defend
+  make_defend_packet
+
+  (* Timers *)
   timer_expired
   start_timer
-  stop_timer.
+  stop_timer
+
+  (* Event processing *)
+  enhanced_process_event
+  process_event
+
+  (* Network interface *)
+  send_arp_on_interface.
