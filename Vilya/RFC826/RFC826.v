@@ -1062,6 +1062,78 @@ Proof.
 Qed.
 
 (* =============================================================================
+   Section 8C: Validation Logic Equivalence
+   ============================================================================= *)
+
+(* Old validation logic for zero-SPA (pre-advisor review):
+   (if is_zero_ipv4 spa then (op=REQUEST || spa=tpa) else true)
+
+   New validation logic (post-advisor review):
+   (¬is_zero_ipv4 spa || op=REQUEST)
+
+   IMPORTANT: These are NOT logically equivalent! The old logic allows the edge case:
+   - spa = tpa = 0.0.0.0 with op = REPLY
+
+   The new logic correctly rejects this invalid packet per RFC 5227.
+
+   This theorem proves they ARE equivalent for all VALID ARP packets (excluding
+   the pathological spa=tpa=0 case with op=REPLY). *)
+
+(* The validation logics are equivalent for non-pathological packets *)
+Theorem validate_arp_zero_spa_equivalence_for_valid_packets : forall packet,
+  is_valid_arp_opcode packet.(arp_op) = true ->
+  negb (is_broadcast_mac packet.(arp_sha)) = true ->
+  negb (is_multicast_mac packet.(arp_sha)) = true ->
+  (* Exclude the pathological case: if spa=0 and spa=tpa, then must be REQUEST *)
+  ~(is_zero_ipv4 packet.(arp_spa) = true /\
+    ip_eq packet.(arp_spa) packet.(arp_tpa) = true /\
+    N.eqb packet.(arp_op) ARP_OP_REQUEST = false) ->
+  (* Old logic *)
+  (if is_zero_ipv4 packet.(arp_spa)
+   then (N.eqb packet.(arp_op) ARP_OP_REQUEST) || (ip_eq packet.(arp_spa) packet.(arp_tpa))
+   else true) =
+  (* New logic *)
+  (negb (is_zero_ipv4 packet.(arp_spa)) || N.eqb packet.(arp_op) ARP_OP_REQUEST).
+Proof.
+  intros packet Hvalid_op Hnot_bcast Hnot_mcast Hexclude.
+  destruct (is_zero_ipv4 packet.(arp_spa)) eqn:Hzero.
+  - simpl.
+    destruct (N.eqb packet.(arp_op) ARP_OP_REQUEST) eqn:Hreq.
+    + simpl. reflexivity.
+    + simpl.
+      destruct (ip_eq packet.(arp_spa) packet.(arp_tpa)) eqn:Heq.
+      * exfalso. apply Hexclude. repeat split; assumption.
+      * reflexivity.
+  - simpl. reflexivity.
+Qed.
+
+(* Non-equivalence witness: the pathological case where they differ *)
+Example validate_arp_zero_spa_nonequivalence_witness :
+  exists packet,
+    is_valid_arp_opcode packet.(arp_op) = true /\
+    is_zero_ipv4 packet.(arp_spa) = true /\
+    ip_eq packet.(arp_spa) packet.(arp_tpa) = true /\
+    N.eqb packet.(arp_op) ARP_OP_REQUEST = false /\
+    (* Old logic accepts *)
+    (if is_zero_ipv4 packet.(arp_spa)
+     then (N.eqb packet.(arp_op) ARP_OP_REQUEST) || (ip_eq packet.(arp_spa) packet.(arp_tpa))
+     else true) = true /\
+    (* New logic rejects *)
+    (negb (is_zero_ipv4 packet.(arp_spa)) || N.eqb packet.(arp_op) ARP_OP_REQUEST) = false.
+Proof.
+  exists {| arp_op := ARP_OP_REPLY;
+           arp_sha := MAC_ZERO;
+           arp_spa := {| ipv4_a := 0; ipv4_b := 0; ipv4_c := 0; ipv4_d := 0 |};
+           arp_tha := MAC_ZERO;
+           arp_tpa := {| ipv4_a := 0; ipv4_b := 0; ipv4_c := 0; ipv4_d := 0 |} |}.
+  split. unfold is_valid_arp_opcode. unfold ARP_OP_REPLY. simpl. reflexivity.
+  split. unfold is_zero_ipv4. simpl. reflexivity.
+  split. unfold ip_eq. simpl. reflexivity.
+  split. unfold ARP_OP_REPLY, ARP_OP_REQUEST. simpl. reflexivity.
+  split; simpl; reflexivity.
+Qed.
+
+(* =============================================================================
    Section 9: Gratuitous ARP
    ============================================================================= *)
 
