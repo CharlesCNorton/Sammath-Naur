@@ -687,23 +687,6 @@ Proof.
   - injection Hproc as _ Hresp. symmetry. assumption.
 Qed.
 
-Theorem gratuitous_arp_updates_cache : forall ctx pkt ctx' resp,
-  is_gratuitous_arp pkt = true ->
-  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
-  ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
-  (forall e, In e ctx.(arp_cache) ->
-   ip_eq (ace_ip e) pkt.(arp_spa) = true -> ace_static e = false) ->
-  process_arp_packet ctx pkt = (ctx', resp) ->
-  lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
-Proof.
-  intros ctx pkt ctx' resp Hgrat Hvalid Htarget Hno_static Hproc.
-  unfold process_arp_packet in Hproc.
-  rewrite Hvalid, Htarget in Hproc.
-  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
-  injection Hproc as Hctx _; subst ctx'; simpl;
-  apply rfc826_merge_target; assumption.
-Qed.
-
 (* =============================================================================
    Section 10: Security Considerations
    ============================================================================= *)
@@ -1771,6 +1754,23 @@ Proof.
     + rewrite Hlookup. discriminate.
     + assumption.
   - apply add_cache_entry_not_exists. assumption.
+Qed.
+
+Theorem gratuitous_arp_updates_cache : forall ctx pkt ctx' resp,
+  is_gratuitous_arp pkt = true ->
+  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
+  ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+  (forall e, In e ctx.(arp_cache) ->
+   ip_eq (ace_ip e) pkt.(arp_spa) = true -> ace_static e = false) ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
+Proof.
+  intros ctx pkt ctx' resp Hgrat Hvalid Htarget Hno_static Hproc.
+  unfold process_arp_packet in Hproc.
+  rewrite Hvalid, Htarget in Hproc.
+  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
+  injection Hproc as Hctx _; subst ctx'; simpl;
+  apply rfc826_merge_target; assumption.
 Qed.
 
 (* Property 1: Cache coherence - if no static entry blocks, merge ensures lookup succeeds *)
