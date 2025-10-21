@@ -699,18 +699,15 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
      Note: Broadcast is technically multicast, but checked separately for clarity.
      This stricter-than-RFC policy prevents ARP spoofing via multicast MACs. *)
   negb (is_multicast_mac packet.(arp_sha)) &&
-  (* RFC 5227: Allow zero source IP only for ARP probes or gratuitous ARP *)
-  (if is_zero_ipv4 packet.(arp_spa)
-   then (N.eqb packet.(arp_op) ARP_OP_REQUEST) || (ip_eq packet.(arp_spa) packet.(arp_tpa))
-   else true) &&
-  (* Validate reply THA: if this is a reply, THA should be our MAC *)
-  (if N.eqb packet.(arp_op) ARP_OP_REPLY
-   then mac_eq packet.(arp_tha) my_mac
-   else true) &&
-  (* RFC 826: ARP requests should have THA = 00:00:00:00:00:00 *)
-  (if N.eqb packet.(arp_op) ARP_OP_REQUEST
-   then mac_eq packet.(arp_tha) MAC_ZERO
-   else true).
+  (* RFC 5227: ARP Probe uses SPA=0.0.0.0, which is only valid for REQUEST.
+     Implication: if SPA is zero, then opcode MUST be REQUEST. *)
+  (negb (is_zero_ipv4 packet.(arp_spa)) || N.eqb packet.(arp_op) ARP_OP_REQUEST) &&
+  (* RFC 826: ARP requests must have THA=00:00:00:00:00:00 (unknown target MAC).
+     Implication: if opcode is REQUEST, then THA MUST be zero. *)
+  (negb (N.eqb packet.(arp_op) ARP_OP_REQUEST) || mac_eq packet.(arp_tha) MAC_ZERO) &&
+  (* RFC 826: ARP replies must have THA=our MAC (directed response).
+     Implication: if opcode is REPLY, then THA MUST be our MAC. *)
+  (negb (N.eqb packet.(arp_op) ARP_OP_REPLY) || mac_eq packet.(arp_tha) my_mac).
 
 (* =============================================================================
    Section 7: Protocol State Machine
@@ -776,34 +773,85 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
    Section 8A: RARP Processing (RFC 903)
    ============================================================================= *)
 
-(* RFC 903: RARP validates that target MAC matches our MAC *)
-Definition validate_rarp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
-  (* RARP-specific validation *)
-  is_valid_opcode packet.(arp_op) &&
+(* RARP Protocol Clarification (RFC 903):
+   - RARP Request: Client broadcasts "What's my IP for MAC XX:XX:XX:XX:XX:XX?"
+     with THA=client's own MAC, SPA=0.0.0.0 (client doesn't know its IP yet)
+   - RARP Reply: Server unicasts response with THA=client's MAC, TPA=assigned IP
+
+   Key difference from ARP:
+   - ARP: "Who has IP X.X.X.X?" → lookup IP, return MAC
+   - RARP: "What's my IP?" → lookup MAC, return IP (reverse direction)
+
+   This implementation provides BOTH client and server functionality. *)
+
+(* RARP server mapping: MAC address to assigned IPv4 address *)
+Record RARPMapping := {
+  rarp_mac : MACAddress;
+  rarp_ip : IPv4Address
+}.
+
+(* RARP server table: list of MAC→IP mappings *)
+Definition RARPTable := list RARPMapping.
+
+(* Lookup IP address for given MAC in RARP server table *)
+Definition lookup_rarp_table (table : RARPTable) (mac : MACAddress) : option IPv4Address :=
+  let fix find (t : RARPTable) : option IPv4Address :=
+    match t with
+    | [] => None
+    | entry :: rest =>
+        if mac_eq entry.(rarp_mac) mac
+        then Some entry.(rarp_ip)
+        else find rest
+    end
+  in find table.
+
+(* RARP client validation: accepts only replies addressed to us *)
+Definition validate_rarp_client (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
+  (N.eqb packet.(arp_op) RARP_OP_REPLY) &&
+  mac_eq packet.(arp_tha) my_mac &&
+  negb (is_broadcast_mac packet.(arp_sha)) &&
+  negb (is_multicast_mac packet.(arp_sha)).
+
+(* RARP server validation: accepts requests with valid structure *)
+Definition validate_rarp_server (packet : ARPEthernetIPv4) : bool :=
+  (N.eqb packet.(arp_op) RARP_OP_REQUEST) &&
   negb (is_broadcast_mac packet.(arp_sha)) &&
   negb (is_multicast_mac packet.(arp_sha)) &&
-  (* RARP request: THA should be our MAC, SPA should be zero *)
-  (if N.eqb packet.(arp_op) RARP_OP_REQUEST
-   then mac_eq packet.(arp_tha) my_mac && is_zero_ipv4 packet.(arp_spa)
-   else true) &&
-  (* RARP reply: THA should be our MAC *)
-  (if N.eqb packet.(arp_op) RARP_OP_REPLY
-   then mac_eq packet.(arp_tha) my_mac
-   else true).
+  is_zero_ipv4 packet.(arp_spa).
 
+(* Legacy unified RARP validation for backward compatibility *)
+Definition validate_rarp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
+  validate_rarp_client packet my_mac || validate_rarp_server packet.
+
+(* RARP client processing: extract assigned IP from reply *)
+Definition process_rarp_client (ctx : ARPContext) (packet : ARPEthernetIPv4)
+                               : ARPContext * option IPv4Address :=
+  if validate_rarp_client packet ctx.(arp_my_mac)
+  then (ctx, Some packet.(arp_tpa))
+  else (ctx, None).
+
+(* RARP server processing: lookup MAC→IP and generate reply *)
+Definition process_rarp_server (ctx : ARPContext) (table : RARPTable)
+                               (packet : ARPEthernetIPv4)
+                               : ARPContext * option ARPEthernetIPv4 :=
+  if validate_rarp_server packet
+  then
+    match lookup_rarp_table table packet.(arp_tha) with
+    | Some assigned_ip =>
+        let reply := {| arp_op := RARP_OP_REPLY;
+                       arp_sha := ctx.(arp_my_mac);
+                       arp_spa := ctx.(arp_my_ip);
+                       arp_tha := packet.(arp_tha);
+                       arp_tpa := assigned_ip |} in
+        (ctx, Some reply)
+    | None => (ctx, None)
+    end
+  else (ctx, None).
+
+(* Legacy unified RARP processing (client mode only for backward compatibility) *)
 Definition process_rarp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
                                : ARPContext * option IPv4Address :=
-  if validate_rarp_packet packet ctx.(arp_my_mac)
-  then
-    if N.eqb packet.(arp_op) RARP_OP_REQUEST
-    then
-      if mac_eq packet.(arp_tha) ctx.(arp_my_mac)
-      then (ctx, Some ctx.(arp_my_ip))
-      else (ctx, None)
-    else if N.eqb packet.(arp_op) RARP_OP_REPLY
-    then (ctx, Some packet.(arp_tpa))
-    else (ctx, None)
-  else (ctx, None).
+  process_rarp_client ctx packet.
 
 (* =============================================================================
    Section 9: Gratuitous ARP
@@ -3607,6 +3655,12 @@ Extraction "arp.ml"
   send_arp_request_with_flood_check
 
   (* RARP *)
+  lookup_rarp_table
+  validate_rarp_client
+  validate_rarp_server
+  validate_rarp_packet
+  process_rarp_client
+  process_rarp_server
   process_rarp_packet
 
   (* Generic ARP processing *)
