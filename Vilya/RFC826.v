@@ -387,6 +387,16 @@ Proof.
       * right. apply IH. assumption.
 Qed.
 
+Theorem static_entries_never_overwritten : forall cache ip mac ttl e,
+  In e cache ->
+  ace_static e = true ->
+  ip_eq e.(ace_ip) ip = true ->
+  In e (update_cache_entry cache ip mac ttl).
+Proof.
+  intros cache ip mac ttl e Hin Hstatic Heq_ip.
+  apply static_entries_preserved; assumption.
+Qed.
+
 (* Looking up any IP in empty cache returns None *)
 Theorem lookup_empty : forall ip,
   lookup_cache [] ip = None.
@@ -677,6 +687,23 @@ Proof.
   - injection Hproc as _ Hresp. symmetry. assumption.
 Qed.
 
+Theorem gratuitous_arp_updates_cache : forall ctx pkt ctx' resp,
+  is_gratuitous_arp pkt = true ->
+  validate_arp_packet pkt ctx.(arp_my_mac) = true ->
+  ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+  (forall e, In e ctx.(arp_cache) ->
+   ip_eq (ace_ip e) pkt.(arp_spa) = true -> ace_static e = false) ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
+Proof.
+  intros ctx pkt ctx' resp Hgrat Hvalid Htarget Hno_static Hproc.
+  unfold process_arp_packet in Hproc.
+  rewrite Hvalid, Htarget in Hproc.
+  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
+  injection Hproc as Hctx _; subst ctx'; simpl;
+  apply rfc826_merge_target; assumption.
+Qed.
+
 (* =============================================================================
    Section 10: Security Considerations
    ============================================================================= *)
@@ -691,8 +718,24 @@ Definition is_suspicious_arp (cache : ARPCache) (packet : ARPEthernetIPv4) : boo
                      cached_mac.(mac_bytes)
                      packet.(arp_sha).(mac_bytes)
       then false  (* Same MAC, not suspicious *)
-      else true   (* Different MAC, suspicious *)
+      else true
   end.
+
+Theorem cache_detects_mac_conflict : forall cache ip mac1 mac2,
+  lookup_cache cache ip = Some mac1 ->
+  mac_eq mac1 mac2 = false ->
+  is_suspicious_arp cache {| arp_op := ARP_OP_REQUEST;
+                              arp_sha := mac2;
+                              arp_spa := ip;
+                              arp_tha := MAC_ZERO;
+                              arp_tpa := ip |} = true.
+Proof.
+  intros cache ip mac1 mac2 Hlookup Hneq.
+  unfold is_suspicious_arp. simpl. rewrite Hlookup.
+  destruct (list_eq_dec N.eq_dec (mac_bytes mac1) (mac_bytes mac2)) eqn:Heq.
+  - unfold mac_eq in Hneq. rewrite Heq in Hneq. discriminate.
+  - reflexivity.
+Qed.
 
 (* =============================================================================
    Section 10A: Timing and Timeouts
