@@ -151,10 +151,14 @@ Definition is_supported_protocol (pro : word16) : bool :=
 Definition are_lengths_valid (hln pln : byte) : bool :=
   (N.eqb hln ETHERNET_ADDR_LEN) && (N.eqb pln IPV4_ADDR_LEN).
 
-(* RFC 826: Validate opcode is within known range *)
+(* RFC 826: Validate opcode is within known range (ARP or RARP) *)
 Definition is_valid_opcode (op : word16) : bool :=
   (N.eqb op ARP_OP_REQUEST) || (N.eqb op ARP_OP_REPLY) ||
   (N.eqb op RARP_OP_REQUEST) || (N.eqb op RARP_OP_REPLY).
+
+(* RFC 826: Validate opcode is ARP-only (opcodes 1-2, not RARP 3-4) *)
+Definition is_valid_arp_opcode (op : word16) : bool :=
+  (N.eqb op ARP_OP_REQUEST) || (N.eqb op ARP_OP_REPLY).
 
 (* =============================================================================
    Section 2: Address Types
@@ -270,6 +274,10 @@ Definition lookup_cache (cache : ARPCache) (ip : IPv4Address) : option MACAddres
         else find rest
     end
   in find cache.
+
+(* Cache uniqueness invariant: no duplicate IP addresses *)
+Definition cache_unique (cache : ARPCache) : Prop :=
+  NoDup (map ace_ip cache).
 
 (* Updates existing cache entry, preserving static entries *)
 Definition update_cache_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
@@ -413,6 +421,127 @@ Proof.
   unfold rfc826_merge. rewrite Hnone. reflexivity.
 Qed.
 
+(* Cache uniqueness preservation theorems *)
+Lemma update_cache_preserves_ips : forall cache ip mac ttl x,
+  In x (update_cache_entry cache ip mac ttl) ->
+  In (ace_ip x) (map ace_ip cache).
+Proof.
+  intros cache ip mac ttl x Hin.
+  unfold update_cache_entry in Hin.
+  induction cache as [|e rest IH].
+  - simpl in Hin. contradiction.
+  - simpl in Hin. destruct (ip_eq (ace_ip e) ip) eqn:Heq.
+    + destruct (ace_static e) eqn:Hstatic.
+      * simpl in Hin. destruct Hin as [Hxe | Hxrest].
+        { left. subst. reflexivity. }
+        { right. apply in_map. assumption. }
+      * simpl in Hin. destruct Hin as [Hxe | Hxrest].
+        { left. subst. simpl.
+          unfold ip_eq in Heq.
+          apply andb_prop in Heq as [H123 H4].
+          apply andb_prop in H123 as [H12 H3].
+          apply andb_prop in H12 as [H1 H2].
+          apply N.eqb_eq in H1. apply N.eqb_eq in H2.
+          apply N.eqb_eq in H3. apply N.eqb_eq in H4.
+          destruct (ace_ip e) as [a b c d], ip as [a' b' c' d'];
+          simpl in *; subst; reflexivity. }
+        { right. apply in_map. assumption. }
+    + simpl in Hin. destruct Hin as [Hxe | Hxrest].
+      * left. subst. reflexivity.
+      * right. apply IH. assumption.
+Qed.
+
+Theorem update_cache_preserves_unique : forall cache ip mac ttl,
+  cache_unique cache ->
+  cache_unique (update_cache_entry cache ip mac ttl).
+Proof.
+  intros cache ip mac ttl Huniq.
+  unfold cache_unique in *.
+  unfold update_cache_entry.
+  induction cache as [|e rest IH].
+  - simpl. constructor.
+  - simpl. destruct (ip_eq (ace_ip e) ip) eqn:Heq.
+    + destruct (ace_static e) eqn:Hstatic; simpl.
+      * inversion Huniq; subst. constructor; assumption.
+      * inversion Huniq; subst. constructor.
+        { intro Hin. apply H1.
+          apply in_map_iff in Hin. destruct Hin as [x [Hxip Hxin]].
+          apply in_map_iff. exists x. split; [|assumption].
+          unfold ip_eq in Heq. apply andb_prop in Heq as [H123 H4x].
+          apply andb_prop in H123 as [H12 H3x]. apply andb_prop in H12 as [H1x H2x].
+          apply N.eqb_eq in H1x. apply N.eqb_eq in H2x.
+          apply N.eqb_eq in H3x. apply N.eqb_eq in H4x.
+          destruct (ace_ip e), (ace_ip x); simpl in *; subst; reflexivity. }
+        { assumption. }
+    + simpl. inversion Huniq; subst. constructor.
+      * intro Hin. apply H1. apply in_map_iff in Hin.
+        destruct Hin as [x [Hx_ip Hx_in]].
+        rewrite <- Hx_ip. apply (update_cache_preserves_ips rest ip mac ttl x). exact Hx_in.
+      * apply IH. assumption.
+Qed.
+
+Lemma add_cache_preserves_ips : forall cache ip mac ttl x,
+  In x (add_cache_entry cache ip mac ttl) ->
+  ace_ip x = ip \/ In (ace_ip x) (map ace_ip cache).
+Proof.
+  intros cache ip mac ttl x Hin.
+  unfold add_cache_entry in Hin.
+  induction cache as [|e rest IH].
+  - simpl in Hin. destruct Hin as [Hxe | Hcontra].
+    + left. subst. reflexivity.
+    + contradiction.
+  - simpl in Hin. destruct (ip_eq (ace_ip e) ip) eqn:Heq.
+    + right. simpl. destruct Hin as [Hxe | Hxrest].
+      * left. subst. reflexivity.
+      * right. apply in_map. assumption.
+    + simpl. destruct Hin as [Hxe | Hxrest].
+      * right. left. subst. reflexivity.
+      * apply IH in Hxrest. destruct Hxrest as [Heq_ip | Hin_rest].
+        { left. assumption. }
+        { right. right. assumption. }
+Qed.
+
+Theorem add_cache_preserves_unique : forall cache ip mac ttl,
+  cache_unique cache ->
+  lookup_cache cache ip = None ->
+  cache_unique (add_cache_entry cache ip mac ttl).
+Proof.
+  intros cache ip mac ttl Huniq Hnone.
+  unfold cache_unique, add_cache_entry.
+  induction cache as [|x xs IHxs]; simpl.
+  - constructor. intro. inversion H. constructor.
+  - unfold lookup_cache in Hnone. simpl in Hnone.
+    destruct (ip_eq (ace_ip x) ip) eqn:Heq; simpl.
+    + discriminate.
+    + constructor.
+      * intro Hin. inversion Huniq; subst.
+        apply H1. apply in_map_iff in Hin.
+        destruct Hin as [e [He_ip He_in]].
+        rewrite <- He_ip.
+        apply add_cache_preserves_ips in He_in.
+        destruct He_in as [Heq_ip | Hin_rest].
+        { rewrite Heq_ip in He_ip. rewrite <- He_ip in Heq.
+          assert (ip_eq ip ip = true).
+          { unfold ip_eq.
+            repeat rewrite N.eqb_refl. reflexivity. }
+          congruence. }
+        { assumption. }
+      * apply IHxs. inversion Huniq. assumption. assumption.
+Qed.
+
+Theorem rfc826_merge_preserves_unique : forall cache ip mac ttl target,
+  cache_unique cache ->
+  cache_unique (rfc826_merge cache ip mac ttl target).
+Proof.
+  intros cache ip mac ttl target Huniq.
+  unfold rfc826_merge.
+  destruct (lookup_cache cache ip) eqn:Hlook.
+  - apply update_cache_preserves_unique. assumption.
+  - destruct target.
+    + apply add_cache_preserves_unique; assumption.
+    + assumption.
+Qed.
+
 (* =============================================================================
    Section 5: Packet Construction
    ============================================================================= *)
@@ -545,8 +674,8 @@ Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
 
 (* RFC 826: Comprehensive packet validation for Ethernet/IPv4 ARP *)
 Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) : bool :=
-  (* Validate opcode is known *)
-  is_valid_opcode packet.(arp_op) &&
+  (* Validate opcode is ARP-only (not RARP) *)
+  is_valid_arp_opcode packet.(arp_op) &&
   (* RFC 826: Sender MAC must not be broadcast *)
   negb (is_broadcast_mac packet.(arp_sha)) &&
   (* Security: Sender MAC should not be multicast *)
@@ -570,6 +699,10 @@ Record ARPContext := {
   arp_my_ip : IPv4Address;           (* This host's IP address *)
   arp_cache : ARPCache               (* IP-to-MAC resolution cache *)
 }.
+
+(* Checks if ARP packet is gratuitous (spa == tpa, used for announcements) *)
+Definition is_gratuitous_arp (pkt : ARPEthernetIPv4) : bool :=
+  ip_eq pkt.(arp_spa) pkt.(arp_tpa).
 
 (* =============================================================================
    Section 8: RFC 826 Reception Algorithm
@@ -598,13 +731,17 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
                    arp_cache := cache' |} in
 
     (* Step 3: If I am the target and it's a request, send reply *)
+    (* RFC 826: Never reply to gratuitous ARP (spa == tpa) *)
     if i_am_target
     then
       if N.eqb packet.(arp_op) ARP_OP_REQUEST
       then
-        let reply := make_arp_reply ctx.(arp_my_mac) ctx.(arp_my_ip)
-                                    packet.(arp_sha) packet.(arp_spa) in
-        (ctx', Some reply)
+        if is_gratuitous_arp packet
+        then (ctx', None)  (* GARP: no reply *)
+        else
+          let reply := make_arp_reply ctx.(arp_my_mac) ctx.(arp_my_ip)
+                                      packet.(arp_sha) packet.(arp_spa) in
+          (ctx', Some reply)
       else
         (ctx', None)
     else
@@ -656,9 +793,6 @@ Definition make_gratuitous_arp (my_mac : MACAddress) (my_ip : IPv4Address)
      arp_spa := my_ip;
      arp_tha := MAC_ZERO;
      arp_tpa := my_ip |}.
-
-Definition is_gratuitous_arp (pkt : ARPEthernetIPv4) : bool :=
-  ip_eq pkt.(arp_spa) pkt.(arp_tpa).
 
 Theorem gratuitous_arp_no_reply : forall ctx pkt ctx' resp,
   is_gratuitous_arp pkt = true ->
@@ -1367,7 +1501,21 @@ Proof.
       intros. apply Hnonzero. right. assumption. assumption.
 Qed.
 
-
+(* Explicit aging semantics invariant: non-static entries have strictly positive TTL or are removed *)
+Theorem age_cache_invariant : forall cache elapsed,
+  forall e, In e (age_cache cache elapsed) ->
+    ace_static e = true \/ ace_ttl e > 0.
+Proof.
+  intros cache elapsed e Hin.
+  unfold age_cache in Hin.
+  apply filter_In in Hin. destruct Hin as [Hin_map Hfilter].
+  destruct (ace_static e) eqn:Hstatic; simpl in Hfilter.
+  - left. reflexivity.
+  - right.
+    destruct (N.leb (ace_ttl e) 0) eqn:Hleb; simpl in Hfilter.
+    + discriminate.
+    + apply N.leb_nle in Hleb. lia.
+Qed.
 
 Theorem cache_aging_preserves_lookup_static : forall cache ip mac elapsed,
   In {| ace_ip := ip; ace_mac := mac; ace_ttl := 100; ace_static := true |} cache ->
@@ -1764,9 +1912,12 @@ Proof.
   intros ctx pkt ctx' resp Hgrat Hvalid Htarget Hno_static Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid, Htarget in Hproc.
-  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
-  injection Hproc as Hctx _; subst ctx'; simpl;
-  apply rfc826_merge_target; assumption.
+  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
+  - rewrite Hgrat in Hproc.
+    injection Hproc as Hctx _; subst ctx'; simpl.
+    apply rfc826_merge_target; assumption.
+  - injection Hproc as Hctx _; subst ctx'; simpl.
+    apply rfc826_merge_target; assumption.
 Qed.
 
 (* Property 1: Cache coherence - if no static entry blocks, merge ensures lookup succeeds *)
@@ -1808,12 +1959,14 @@ Proof.
   - rewrite Htarget in Hproc.
     apply N.eqb_eq in Hreq.
     rewrite Hreq in Hproc.
-    injection Hproc as Hctx' Hreply.
-    inversion Hreply. subst.
-    unfold make_arp_reply.
-    simpl.
-    split. reflexivity.
-    split; reflexivity.
+    destruct (is_gratuitous_arp packet) eqn:Hgrat.
+    + discriminate.
+    + injection Hproc as Hctx' Hreply.
+      inversion Hreply. subst.
+      unfold make_arp_reply.
+      simpl.
+      split. reflexivity.
+      split; reflexivity.
   - discriminate.
 Qed.
 
@@ -1834,9 +1987,13 @@ Proof.
   intros ctx pkt ctx' resp Hvalid Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid in Hproc.
-  destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx));
-  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST);
-  injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
+  destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
+  destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+  - destruct (is_gratuitous_arp pkt);
+    injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
+  - injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
+  - injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
+  - injection Hproc as Hctx _; subst ctx'; simpl; split; reflexivity.
 Qed.
 
 Theorem bidirectional_cache_update_when_target : forall ctx packet ctx' response,
@@ -1852,8 +2009,11 @@ Proof.
   rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   destruct (N.eqb (arp_op packet) ARP_OP_REQUEST) eqn:Hop.
-  - injection Hproc. intros. subst ctx'. simpl.
-    apply rfc826_merge_target. assumption.
+  - destruct (is_gratuitous_arp packet) eqn:Hgrat.
+    + injection Hproc. intros. subst ctx'. simpl.
+      apply rfc826_merge_target. assumption.
+    + injection Hproc. intros. subst ctx'. simpl.
+      apply rfc826_merge_target. assumption.
   - injection Hproc. intros. subst ctx'. simpl.
     apply rfc826_merge_target. assumption.
 Qed.
@@ -2025,12 +2185,28 @@ Proof.
   unfold process_arp_packet in Hproc.
   destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - destruct (ip_eq (arp_tpa packet) (arp_my_ip ctx)) eqn:Htarget;
-    destruct (N.eqb (arp_op packet) ARP_OP_REQUEST);
-    injection Hproc as Hctx' _;
-    subst ctx';
-    simpl;
-    unfold cache_size;
-    apply rfc826_merge_size_bound.
+    destruct (N.eqb (arp_op packet) ARP_OP_REQUEST) eqn:Hreq.
+    + destruct (is_gratuitous_arp packet);
+      injection Hproc as Hctx' _;
+      subst ctx';
+      simpl;
+      unfold cache_size;
+      apply rfc826_merge_size_bound.
+    + injection Hproc as Hctx' _;
+      subst ctx';
+      simpl;
+      unfold cache_size;
+      apply rfc826_merge_size_bound.
+    + injection Hproc as Hctx' _;
+      subst ctx';
+      simpl;
+      unfold cache_size;
+      apply rfc826_merge_size_bound.
+    + injection Hproc as Hctx' _;
+      subst ctx';
+      simpl;
+      unfold cache_size;
+      apply rfc826_merge_size_bound.
   - injection Hproc as Hctx' _. subst ctx'. simpl. unfold cache_size. lia.
 Qed.
 
@@ -2049,7 +2225,12 @@ Proof.
   rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   destruct (N.eqb (arp_op grat) ARP_OP_REQUEST) eqn:Hop.
-  - injection Hproc. intros H _. discriminate H.
+  - assert (Hgrat_bool: is_gratuitous_arp grat = true).
+    { unfold is_gratuitous_arp. destruct grat as [op sha spa tha tpa]. simpl in *.
+      subst spa. apply ip_eq_refl. }
+    rewrite Hgrat_bool in Hproc.
+    injection Hproc. intros. subst ctx'. simpl.
+    apply rfc826_merge_target. assumption.
   - injection Hproc. intros. subst ctx'. simpl.
     apply rfc826_merge_target. assumption.
 Qed.
@@ -2161,10 +2342,12 @@ Proof.
   destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - destruct (ip_eq (arp_tpa packet) (arp_my_ip ctx)) eqn:Htarget.
     + destruct (N.eqb (arp_op packet) ARP_OP_REQUEST) eqn:Hop.
-      * injection Hproc as _ Hreply.
-        subst reply.
-        unfold make_arp_reply. simpl.
-        reflexivity.
+      * destruct (is_gratuitous_arp packet) eqn:Hgrat.
+        { discriminate. }
+        { injection Hproc as _ Hreply.
+          subst reply.
+          unfold make_arp_reply. simpl.
+          reflexivity. }
       * discriminate.
     + discriminate.
   - discriminate.
@@ -2706,6 +2889,7 @@ Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
   validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   pkt.(arp_op) = ARP_OP_REQUEST ->
   ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
+  is_gratuitous_arp pkt = false ->  (* Not a gratuitous ARP *)
   (forall e, In e ctx.(arp_cache) ->
    ip_eq (ace_ip e) pkt.(arp_spa) = true ->
    ace_static e = false) ->
@@ -2719,12 +2903,13 @@ Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
     reply.(arp_tha) = pkt.(arp_sha) /\
     lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
 Proof.
-  intros ctx pkt resp ctx' Hvalid_pkt Hop Htarget Hno_static Hproc.
+  intros ctx pkt resp ctx' Hvalid_pkt Hop Htarget Hnot_grat Hno_static Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   apply N.eqb_eq in Hop.
   rewrite Hop in Hproc.
+  rewrite Hnot_grat in Hproc.
   injection Hproc as Hctx Hresp.
   subst ctx' resp.
   exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
@@ -2743,6 +2928,7 @@ Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
   process_arp_packet ctx pkt = (ctx', resp) ->
   (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
    pkt.(arp_op) = ARP_OP_REQUEST ->
+   is_gratuitous_arp pkt = false ->  (* Not a GARP *)
    exists reply,
      resp = Some reply /\
      reply.(arp_op) = ARP_OP_REPLY /\
@@ -2767,22 +2953,29 @@ Proof.
     rewrite Htarget in Hproc.
     apply N.eqb_eq in Hreq.
     rewrite Hreq in Hproc.
-    injection Hproc as Hctx Hresp.
-    subst ctx' resp.
-    exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
-    split. reflexivity.
-    split. unfold make_arp_reply. simpl. reflexivity.
-    split. unfold make_arp_reply. simpl. reflexivity.
-    split. unfold make_arp_reply. simpl. reflexivity.
-    split. unfold make_arp_reply. simpl. reflexivity.
-    unfold make_arp_reply. simpl. reflexivity.
+    destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+    + discriminate.
+    + injection Hproc as Hctx Hresp.
+      subst ctx' resp.
+      exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
+      split. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      split. unfold make_arp_reply. simpl. reflexivity.
+      unfold make_arp_reply. simpl. reflexivity.
   - intros Htarget.
     unfold process_arp_packet in Hproc.
     rewrite Hvalid_pkt in Hproc.
     rewrite Htarget in Hproc.
-    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST);
-    injection Hproc as Hctx _; subst ctx'; simpl;
-    apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+    + destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+      * injection Hproc as Hctx _; subst ctx'; simpl.
+        apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+      * injection Hproc as Hctx _; subst ctx'; simpl.
+        apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+    + injection Hproc as Hctx _; subst ctx'; simpl.
+      apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
   - intros Hnot_target Hnot_in_cache.
     unfold process_arp_packet in Hproc.
     rewrite Hvalid_pkt in Hproc.
@@ -2797,13 +2990,21 @@ Proof.
   - unfold process_arp_packet in Hproc.
     rewrite Hvalid_pkt in Hproc.
     destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
-    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
-    injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
+    + destruct (is_gratuitous_arp pkt);
+      injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    + injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    + injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    + injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
   - unfold process_arp_packet in Hproc.
     rewrite Hvalid_pkt in Hproc.
     destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
-    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop;
-    injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
+    + destruct (is_gratuitous_arp pkt);
+      injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    + injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    + injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
+    + injection Hproc as H1 H2; rewrite <- H1; simpl; reflexivity.
 Qed.
 
 (* ARP packet processing is deterministic: same input always produces same output *)
@@ -2828,15 +3029,20 @@ Proof.
   intros ctx pkt ctx' resp ip mac Hproc Hlook Hneq.
   unfold process_arp_packet in Hproc.
   destruct (validate_arp_packet pkt (arp_my_mac ctx)) eqn:Hvalid.
-  - destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt;
-    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq;
-    injection Hproc as Hctx Hresp;
-    subst ctx';
-    simpl.
-    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
-    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
-    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
-    + erewrite rfc826_merge_preserves_other_ips. exact Hlook. assumption.
+  - destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htgt.
+    + destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+      * destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+        { injection Hproc as Hctx Hresp; subst ctx'; simpl;
+          erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption]. }
+        { injection Hproc as Hctx Hresp; subst ctx'; simpl;
+          erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption]. }
+      * injection Hproc as Hctx Hresp; subst ctx'; simpl;
+        erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption].
+    + destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+      * injection Hproc as Hctx Hresp; subst ctx'; simpl;
+        erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption].
+      * injection Hproc as Hctx Hresp; subst ctx'; simpl;
+        erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption].
   - injection Hproc as Hctx Hresp. subst. simpl. assumption.
 Qed.
 
@@ -2844,8 +3050,8 @@ Qed.
 Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
   validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   process_arp_packet ctx pkt = (ctx', resp) ->
-  (* Part 1: Complete response characterization *)
-  ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true /\ pkt.(arp_op) = ARP_OP_REQUEST) ->
+  (* Part 1: Complete response characterization (excluding GARP) *)
+  ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true /\ pkt.(arp_op) = ARP_OP_REQUEST /\ is_gratuitous_arp pkt = false) ->
    exists reply,
      resp = Some reply /\
      reply.(arp_op) = ARP_OP_REPLY /\
@@ -2853,8 +3059,8 @@ Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
      reply.(arp_tpa) = pkt.(arp_spa) /\
      reply.(arp_sha) = ctx.(arp_my_mac) /\
      reply.(arp_tha) = pkt.(arp_sha)) /\
-  (* Part 2: No response in all other cases *)
-  ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = false \/ pkt.(arp_op) <> ARP_OP_REQUEST) ->
+  (* Part 2: No response in all other cases (including GARP) *)
+  ((ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = false \/ pkt.(arp_op) <> ARP_OP_REQUEST \/ is_gratuitous_arp pkt = true) ->
    resp = None) /\
   (* Part 3: Cache updated when target (exact MAC if no static entry blocks) *)
   (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
@@ -2878,21 +3084,36 @@ Proof.
   destruct (N.eqb pkt.(arp_op) ARP_OP_REQUEST) eqn:Hreq.
 
   (* Case 1: Target is me, operation is REQUEST *)
-  - injection Hproc as Hctx Hresp.
-    subst ctx' resp.
+  - destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+    (* Case 1a: GARP - no reply *)
+    + injection Hproc as Hctx Hresp. subst ctx' resp.
+      split.
+      { intros [_ [_ H]]. congruence. }
+      split.
+      { intros [H | [H | H]]; try reflexivity; try congruence. }
+      split.
+      { intros _. simpl. apply rfc826_merge_updates_or_adds with (target := true). reflexivity. }
+      split.
+      { intros H. congruence. }
+      split.
+      { intros. simpl. apply rfc826_merge_preserves_other_ips. assumption. }
+      split; reflexivity.
+    (* Case 1b: Normal REQUEST - send reply *)
+    + injection Hproc as Hctx Hresp. subst ctx' resp.
+      split.
+      { intros [_ [_ H]].
+        exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
+        split. reflexivity.
+        split. unfold make_arp_reply. simpl. reflexivity.
+        split. unfold make_arp_reply. simpl. reflexivity.
+        split. unfold make_arp_reply. simpl. reflexivity.
+        split. unfold make_arp_reply. simpl. reflexivity.
+        unfold make_arp_reply. simpl. reflexivity. }
     split.
-    { intros [_ H].
-      exists (make_arp_reply (arp_my_mac ctx) (arp_my_ip ctx) (arp_sha pkt) (arp_spa pkt)).
-      split. reflexivity.
-      split. unfold make_arp_reply. simpl. reflexivity.
-      split. unfold make_arp_reply. simpl. reflexivity.
-      split. unfold make_arp_reply. simpl. reflexivity.
-      split. unfold make_arp_reply. simpl. reflexivity.
-      unfold make_arp_reply. simpl. reflexivity. }
-    split.
-    { intros [H | H].
+    { intros [H | [H | H]].
       * congruence.
-      * apply N.eqb_eq in Hreq. contradiction. }
+      * apply N.eqb_eq in Hreq. congruence.
+      * congruence. }
     split.
     { intros _.
       simpl.
@@ -2912,9 +3133,9 @@ Proof.
   - injection Hproc as Hctx Hresp.
     subst ctx' resp.
     split.
-    { intros [_ H].
+    { intros [_ [H _]].
       apply N.eqb_neq in Hreq.
-      contradiction. }
+      congruence. }
     split.
     { intros _.
       reflexivity. }
@@ -3165,7 +3386,7 @@ Proof.
   intros pkt my_mac Hbcast.
   unfold validate_arp_packet.
   rewrite Hbcast. simpl.
-  destruct (is_valid_opcode (arp_op pkt)); reflexivity.
+  destruct (is_valid_arp_opcode (arp_op pkt)); reflexivity.
 Qed.
 
 Lemma enhanced_ages_to_simple_cache : forall ctx,
