@@ -1467,7 +1467,304 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 10A: Timing and Timeouts
+   Section 10A: Formal Time Model
+   ============================================================================= *)
+
+(* Physical time units: connection between abstract N and real time *)
+Module TimeUnits.
+  (* Base unit: 1 millisecond *)
+  Definition millisecond : N := 1.
+  Definition second : N := 1000 * millisecond.
+  Definition minute : N := 60 * second.
+
+  (* Conversion functions with proofs *)
+  Definition ms_to_seconds (ms : N) : N := N.div ms second.
+  Definition seconds_to_ms (s : N) : N := s * second.
+
+  (* Proof: conversion round-trip preserves order of magnitude *)
+  Theorem seconds_to_ms_positive : forall s,
+    s > 0 -> seconds_to_ms s >= second.
+  Proof.
+    intros s Hs.
+    unfold seconds_to_ms, second, millisecond.
+    simpl. lia.
+  Qed.
+End TimeUnits.
+
+(* Monotonic time: time values that only increase *)
+Record MonotonicTime := {
+  time_value : N;  (* Time in milliseconds since epoch *)
+}.
+
+(* Time ordering: defines when one time is before another *)
+Definition time_le (t1 t2 : MonotonicTime) : Prop :=
+  time_value t1 <= time_value t2.
+
+Definition time_lt (t1 t2 : MonotonicTime) : Prop :=
+  time_value t1 < time_value t2.
+
+Notation "t1 ≤ₜ t2" := (time_le t1 t2) (at level 70).
+Notation "t1 <ₜ t2" := (time_lt t1 t2) (at level 70).
+
+(* Time difference: always non-negative for monotonic times *)
+Definition time_diff (t_now t_past : MonotonicTime) : N :=
+  if N.leb (time_value t_past) (time_value t_now)
+  then time_value t_now - time_value t_past
+  else 0.  (* Guard against time going backwards *)
+
+(* Time progression: moving forward in time *)
+Definition time_advance (t : MonotonicTime) (delta : N) : MonotonicTime :=
+  {| time_value := time_value t + delta |}.
+
+(* =============================================================================
+   Section 10A1: Time Monotonicity Proofs
+   ============================================================================= *)
+
+(* Fundamental property: time is reflexive *)
+Theorem time_le_refl : forall t,
+  t ≤ₜ t.
+Proof.
+  intros t. unfold time_le. lia.
+Qed.
+
+(* Time ordering is transitive *)
+Theorem time_le_trans : forall t1 t2 t3,
+  t1 ≤ₜ t2 -> t2 ≤ₜ t3 -> t1 ≤ₜ t3.
+Proof.
+  intros t1 t2 t3 H12 H23.
+  unfold time_le in *. lia.
+Qed.
+
+(* Time ordering is antisymmetric *)
+Theorem time_le_antisym : forall t1 t2,
+  t1 ≤ₜ t2 -> t2 ≤ₜ t1 -> t1 = t2.
+Proof.
+  intros t1 t2 H12 H21.
+  unfold time_le in *.
+  destruct t1, t2. simpl in *.
+  assert (time_value0 = time_value1) by lia.
+  subst. reflexivity.
+Qed.
+
+(* Advancing time preserves monotonicity *)
+Theorem time_advance_monotonic : forall t delta,
+  t ≤ₜ time_advance t delta.
+Proof.
+  intros t delta.
+  unfold time_le, time_advance. simpl. lia.
+Qed.
+
+(* Advancing time preserves strict ordering *)
+Theorem time_advance_strict : forall t delta,
+  delta > 0 -> t <ₜ time_advance t delta.
+Proof.
+  intros t delta Hdelta.
+  unfold time_lt, time_advance. simpl. lia.
+Qed.
+
+(* Time difference is always non-negative *)
+Theorem time_diff_nonneg : forall t_now t_past,
+  time_diff t_now t_past >= 0.
+Proof.
+  intros. unfold time_diff.
+  destruct (N.leb (time_value t_past) (time_value t_now)); lia.
+Qed.
+
+(* Time difference is zero when times are equal *)
+Theorem time_diff_zero_iff_eq : forall t1 t2,
+  t1 ≤ₜ t2 -> time_diff t2 t1 = 0 <-> t1 = t2.
+Proof.
+  intros t1 t2 Hle.
+  unfold time_diff, time_le in *.
+  split; intro H.
+  - destruct t1 as [v1], t2 as [v2]. simpl in *.
+    destruct (N.leb v1 v2) eqn:Hleb.
+    + apply N.leb_le in Hleb.
+      assert (Heq: v1 = v2) by lia.
+      subst. reflexivity.
+    + apply N.leb_gt in Hleb. lia.
+  - subst. destruct t2 as [v]. simpl.
+    rewrite N.leb_refl. lia.
+Qed.
+
+(* Time difference respects ordering *)
+Theorem time_diff_respects_order : forall t1 t2 t3,
+  t1 ≤ₜ t2 -> t2 ≤ₜ t3 ->
+  time_diff t3 t1 >= time_diff t2 t1.
+Proof.
+  intros t1 t2 t3 H12 H23.
+  unfold time_diff, time_le in *.
+  destruct (N.leb (time_value t1) (time_value t3)) eqn:H13;
+  destruct (N.leb (time_value t1) (time_value t2)) eqn:H12'.
+  - apply N.leb_le in H13, H12'. lia.
+  - apply N.leb_le in H13.
+    apply N.leb_gt in H12'. lia.
+  - apply N.leb_gt in H13. lia.
+  - lia.
+Qed.
+
+(* Advancing time increases difference *)
+Theorem time_advance_increases_diff : forall t_past t_now delta,
+  t_past ≤ₜ t_now ->
+  time_diff (time_advance t_now delta) t_past = time_diff t_now t_past + delta.
+Proof.
+  intros t_past t_now delta Hle.
+  unfold time_diff, time_advance, time_le in *. simpl.
+  destruct (N.leb (time_value t_past) (time_value t_now)) eqn:Hnow;
+  destruct (N.leb (time_value t_past) (time_value t_now + delta)) eqn:Hadv.
+  - apply N.leb_le in Hnow, Hadv. lia.
+  - apply N.leb_le in Hnow.
+    apply N.leb_gt in Hadv. lia.
+  - apply N.leb_gt in Hnow. lia.
+  - apply N.leb_gt in Hnow, Hadv. lia.
+Qed.
+
+(* =============================================================================
+   Section 10A2: Physical Time Connection
+   ============================================================================= *)
+
+(* Convert abstract time to physical units *)
+Definition time_to_ms (t : MonotonicTime) : N := time_value t.
+Definition time_to_seconds (t : MonotonicTime) : N :=
+  TimeUnits.ms_to_seconds (time_value t).
+
+(* Create time from physical measurements *)
+Definition time_from_ms (ms : N) : MonotonicTime := {| time_value := ms |}.
+Definition time_from_seconds (s : N) : MonotonicTime :=
+  {| time_value := TimeUnits.seconds_to_ms s |}.
+
+(* Physical time preservation: connecting abstract time to real units *)
+Lemma time_from_ms_to_ms : forall ms,
+  time_to_ms (time_from_ms ms) = ms.
+Proof.
+  intros. unfold time_to_ms, time_from_ms. simpl. reflexivity.
+Qed.
+
+(* =============================================================================
+   Section 10A3: Round-Trip Conversion Proofs
+   ============================================================================= *)
+
+(* Helper: Simplify TimeUnits.second to concrete value *)
+Lemma second_eq_1000 : TimeUnits.second = 1000.
+Proof.
+  unfold TimeUnits.second, TimeUnits.millisecond.
+  lia.
+Qed.
+
+(* Helper: seconds_to_ms produces multiples of 1000 *)
+Lemma seconds_to_ms_mul_1000 : forall s,
+  TimeUnits.seconds_to_ms s = s * 1000.
+Proof.
+  intros s.
+  unfold TimeUnits.seconds_to_ms.
+  rewrite second_eq_1000.
+  lia.
+Qed.
+
+(* Helper: Division cancels multiplication *)
+Lemma div_mul_cancel : forall a b,
+  b <> 0 -> (a * b) / b = a.
+Proof.
+  intros a b Hb.
+  apply N.div_mul.
+  exact Hb.
+Qed.
+
+(* Helper: 1000 is non-zero *)
+Lemma thousand_nonzero : 1000 <> 0.
+Proof.
+  lia.
+Qed.
+
+(* Helper: ms_to_seconds definition simplified *)
+Lemma ms_to_seconds_div_1000 : forall ms,
+  TimeUnits.ms_to_seconds ms = ms / 1000.
+Proof.
+  intros ms.
+  unfold TimeUnits.ms_to_seconds.
+  rewrite second_eq_1000.
+  reflexivity.
+Qed.
+
+(* Main theorem: Round-trip conversion preserves seconds *)
+Theorem time_from_seconds_correct : forall s,
+  time_to_seconds (time_from_seconds s) = s.
+Proof.
+  intros s.
+  unfold time_to_seconds, time_from_seconds.
+  simpl.
+  rewrite ms_to_seconds_div_1000.
+  rewrite seconds_to_ms_mul_1000.
+  apply div_mul_cancel.
+  apply thousand_nonzero.
+Qed.
+
+(* Corollary: Round-trip preserves non-zero seconds *)
+Corollary time_seconds_nonzero_preserved : forall s,
+  s > 0 -> time_to_seconds (time_from_seconds s) > 0.
+Proof.
+  intros s Hs.
+  rewrite time_from_seconds_correct.
+  assumption.
+Qed.
+
+(* Corollary: Multiple round-trips are identity *)
+Corollary time_seconds_double_roundtrip : forall s,
+  time_to_seconds (time_from_seconds (time_to_seconds (time_from_seconds s))) = s.
+Proof.
+  intros s.
+  rewrite time_from_seconds_correct.
+  rewrite time_from_seconds_correct.
+  reflexivity.
+Qed.
+
+(* Theorem: Millisecond conversion is injective *)
+Theorem time_from_ms_injective : forall ms1 ms2,
+  time_from_ms ms1 = time_from_ms ms2 -> ms1 = ms2.
+Proof.
+  intros ms1 ms2 Heq.
+  unfold time_from_ms in Heq.
+  injection Heq as Heq.
+  assumption.
+Qed.
+
+(* Theorem: Second conversion is injective *)
+Theorem time_from_seconds_injective : forall s1 s2,
+  time_from_seconds s1 = time_from_seconds s2 -> s1 = s2.
+Proof.
+  intros s1 s2 Heq.
+  unfold time_from_seconds in Heq.
+  injection Heq as Heq.
+  rewrite seconds_to_ms_mul_1000 in Heq.
+  rewrite seconds_to_ms_mul_1000 in Heq.
+  apply N.mul_cancel_r in Heq; [assumption | apply thousand_nonzero].
+Qed.
+
+(* Theorem: Conversion respects ordering *)
+Theorem time_from_seconds_monotonic : forall s1 s2,
+  s1 <= s2 -> time_from_seconds s1 ≤ₜ time_from_seconds s2.
+Proof.
+  intros s1 s2 Hle.
+  unfold time_le, time_from_seconds. simpl.
+  rewrite seconds_to_ms_mul_1000.
+  rewrite seconds_to_ms_mul_1000.
+  apply N.mul_le_mono_r.
+  assumption.
+Qed.
+
+(* Theorem: Conversion preserves strict ordering *)
+Theorem time_from_seconds_strict_monotonic : forall s1 s2,
+  s1 < s2 -> time_from_seconds s1 <ₜ time_from_seconds s2.
+Proof.
+  intros s1 s2 Hlt.
+  unfold time_lt, time_from_seconds. simpl.
+  rewrite seconds_to_ms_mul_1000.
+  rewrite seconds_to_ms_mul_1000.
+  apply N.mul_lt_mono_pos_r; lia.
+Qed.
+
+(* =============================================================================
+   Section 10B: Timing Constants with Physical Units
    ============================================================================= *)
 
 Definition ARP_REQUEST_TIMEOUT : N := 1000.  (* 1 second in milliseconds *)
