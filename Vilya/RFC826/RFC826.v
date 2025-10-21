@@ -2776,6 +2776,61 @@ Proof.
   apply orb_true_l.
 Qed.
 
+Theorem dad_conflict_preempts_cache_update : forall ctx pkt t dt probe ctx' resp,
+  earp_state_data ctx = StateProbe probe ->
+  detect_probe_conflict
+    {| earp_my_mac := earp_my_mac ctx;
+       earp_my_ip := earp_my_ip ctx;
+       earp_cache := age_cache (earp_cache ctx) dt;
+       earp_state_data := StateProbe probe;
+       earp_iface := earp_iface ctx;
+       earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
+       earp_last_cache_cleanup := t |} probe pkt = true ->
+  is_broadcast_mac (arp_sha pkt) = false ->
+  process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
+  earp_cache ctx' = age_cache (earp_cache ctx) dt /\
+  earp_state_data ctx' = StateConflict (probe_ip probe) /\
+  resp = None.
+Proof.
+  intros ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hproc.
+  unfold process_arp_packet_enhanced in Hproc.
+  rewrite Hnot_bcast in Hproc.
+  rewrite Hstate in Hproc.
+  simpl in Hproc.
+  rewrite Hconflict in Hproc.
+  injection Hproc as Hctx Hresp.
+  subst ctx' resp.
+  simpl.
+  split. reflexivity.
+  split. reflexivity.
+  reflexivity.
+Qed.
+
+Corollary dad_prevents_cache_poisoning : forall ctx pkt t dt probe ctx' resp poisoned_mac,
+  earp_state_data ctx = StateProbe probe ->
+  ip_eq (arp_spa pkt) (probe_ip probe) = true ->
+  arp_sha pkt = poisoned_mac ->
+  is_broadcast_mac poisoned_mac = false ->
+  process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
+  lookup_cache (earp_cache ctx') (probe_ip probe) =
+    lookup_cache (age_cache (earp_cache ctx) dt) (probe_ip probe).
+Proof.
+  intros ctx pkt t dt probe ctx' resp poisoned_mac Hstate Hspa_match Hsha_poison Hnot_bcast Hproc.
+  assert (Hconflict: detect_probe_conflict
+    {| earp_my_mac := earp_my_mac ctx;
+       earp_my_ip := earp_my_ip ctx;
+       earp_cache := age_cache (earp_cache ctx) dt;
+       earp_state_data := StateProbe probe;
+       earp_iface := earp_iface ctx;
+       earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
+       earp_last_cache_cleanup := t |} probe pkt = true).
+  { unfold detect_probe_conflict. rewrite Hspa_match. apply orb_true_l. }
+  rewrite <- Hsha_poison in Hnot_bcast.
+  assert (Hpreempt := dad_conflict_preempts_cache_update ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hproc).
+  destruct Hpreempt as [Hcache_eq _].
+  rewrite Hcache_eq. reflexivity.
+Qed.
+
 Theorem process_announce_timeout_preserves_mac : forall ctx announce current_time ctx' pkt,
   process_announce_timeout ctx announce current_time = (ctx', pkt) ->
   earp_my_mac ctx' = earp_my_mac ctx.
