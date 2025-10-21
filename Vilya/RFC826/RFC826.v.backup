@@ -27,8 +27,8 @@ From Coq Require Import
 Import ListNotations.
 Open Scope N_scope.
 
-Definition starting_compilation : bool := true.
-Compute starting_compilation.
+Definition compiling_rfc826 : bool := true.
+Compute compiling_rfc826.
 
 (* =============================================================================
    Foundational Type System
@@ -165,11 +165,15 @@ Definition is_valid_arp_opcode (op : word16) : bool :=
   (N.eqb op ARP_OP_REQUEST) || (N.eqb op ARP_OP_REPLY).
 
 (* Compilation checkpoint *)
+Definition checkpoint_foundational_types : bool := true.
+Compute checkpoint_foundational_types.
 
 (* =============================================================================
    Network Address Abstractions
    ============================================================================= *)
 
+Definition compiling_address_abstractions : bool := true.
+Compute compiling_address_abstractions.
 
 (* Ethernet MAC address: 48-bit hardware identifier with length constraint *)
 Record MACAddress := {
@@ -223,6 +227,8 @@ Definition mac_eq (m1 m2 : MACAddress) : bool :=
   else false.
 
 (* Compilation checkpoint *)
+Definition checkpoint_address_abstractions : bool := true.
+Compute checkpoint_address_abstractions.
 
 (* =============================================================================
    Protocol Data Structures
@@ -251,6 +257,8 @@ Record ARPEthernetIPv4 := {
 }.
 
 (* Compilation checkpoint *)
+Definition checkpoint_protocol_structures : bool := true.
+Compute checkpoint_protocol_structures.
 
 (* =============================================================================
    Cache Coherence Theory
@@ -470,6 +478,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_cache_coherence : bool := true.
+Compute checkpoint_cache_coherence.
 
 (* =============================================================================
    Cache Invariant Preservation
@@ -647,6 +657,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_cache_invariants : bool := true.
+Compute checkpoint_cache_invariants.
 
 (* =============================================================================
    Packet Construction Primitives
@@ -672,6 +684,8 @@ Definition make_arp_reply (my_mac : MACAddress) (my_ip : IPv4Address)
      arp_tpa := requester_ip |}.
 
 (* Compilation checkpoint *)
+Definition checkpoint_packet_construction : bool := true.
+Compute checkpoint_packet_construction.
 
 (* =============================================================================
    Serialization and Wire Format
@@ -735,6 +749,8 @@ Definition parse_arp_packet (data : list byte) : option ARPEthernetIPv4 :=
   end.
 
 (* Compilation checkpoint *)
+Definition checkpoint_serialization : bool := true.
+Compute checkpoint_serialization.
 
 (* =============================================================================
    Generic Protocol Type Processing
@@ -782,6 +798,8 @@ Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
      ar_tpa := serialize_ipv4 packet.(arp_tpa) |}.
 
 (* Compilation checkpoint *)
+Definition checkpoint_generic_processing : bool := true.
+Compute checkpoint_generic_processing.
 
 (* =============================================================================
    Packet Validation Semantics
@@ -808,6 +826,8 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
   (negb (N.eqb packet.(arp_op) ARP_OP_REPLY) || mac_eq packet.(arp_tha) my_mac).
 
 (* Compilation checkpoint *)
+Definition checkpoint_validation : bool := true.
+Compute checkpoint_validation.
 
 (* =============================================================================
    Refinement Type Safety
@@ -835,6 +855,8 @@ Definition mk_validated_arp (my_mac : MACAddress) (packet : ARPEthernetIPv4)
   end.
 
 (* Compilation checkpoint *)
+Definition checkpoint_refinement_types : bool := true.
+Compute checkpoint_refinement_types.
 
 (* =============================================================================
    Protocol State Machine
@@ -856,6 +878,8 @@ Definition is_gratuitous_arp (pkt : ARPEthernetIPv4) : bool :=
   ip_eq pkt.(arp_spa) pkt.(arp_tpa).
 
 (* Compilation checkpoint *)
+Definition checkpoint_state_machine : bool := true.
+Compute checkpoint_state_machine.
 
 (* =============================================================================
    RFC 826 Reception Semantics
@@ -904,6 +928,8 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
     (ctx, None).  (* Drop invalid packets *)
 
 (* Compilation checkpoint *)
+Definition checkpoint_reception : bool := true.
+Compute checkpoint_reception.
 
 (* =============================================================================
    Type-Safe Protocol Processing
@@ -998,6 +1024,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_type_safe_processing : bool := true.
+Compute checkpoint_type_safe_processing.
 
 (* =============================================================================
    Refinement Type Benefits
@@ -1108,6 +1136,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_refinement_benefits : bool := true.
+Compute checkpoint_refinement_benefits.
 
 (* =============================================================================
    Reverse ARP Semantics
@@ -1194,6 +1224,8 @@ Definition process_rarp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
   process_rarp_client ctx packet.
 
 (* Compilation checkpoint *)
+Definition checkpoint_rarp : bool := true.
+Compute checkpoint_rarp.
 
 (* =============================================================================
    RARP Refinement Types
@@ -1240,6 +1272,8 @@ Definition mk_validated_rarp_server (packet : ARPEthernetIPv4)
   end.
 
 (* Compilation checkpoint *)
+Definition checkpoint_rarp_refinement : bool := true.
+Compute checkpoint_rarp_refinement.
 
 (* =============================================================================
    RARP Correctness Theory
@@ -1450,6 +1484,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_rarp_correctness : bool := true.
+Compute checkpoint_rarp_correctness.
 
 (* =============================================================================
    Validation Logic Equivalence
@@ -1524,6 +1560,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_validation_equivalence : bool := true.
+Compute checkpoint_validation_equivalence.
 
 (* =============================================================================
    Gratuitous ARP Theory
@@ -1552,6 +1590,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_gratuitous_arp : bool := true.
+Compute checkpoint_gratuitous_arp.
 
 (* =============================================================================
    Security Considerations
@@ -1587,6 +1627,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_security : bool := true.
+Compute checkpoint_security.
 
 (* =============================================================================
    Temporal Semantics Foundation
@@ -1639,6 +1681,8 @@ Definition time_advance (t : MonotonicTime) (delta : N) : MonotonicTime :=
   {| time_value := time_value t + delta |}.
 
 (* Compilation checkpoint *)
+Definition checkpoint_temporal_foundation : bool := true.
+Compute checkpoint_temporal_foundation.
 
 (* =============================================================================
    Time Monotonicity Theory
@@ -1744,6 +1788,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_time_monotonicity : bool := true.
+Compute checkpoint_time_monotonicity.
 
 (* =============================================================================
    Physical Time Correspondence
@@ -1767,6 +1813,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_physical_time : bool := true.
+Compute checkpoint_physical_time.
 
 (* =============================================================================
    Temporal Conversion Correctness
@@ -1892,6 +1940,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_temporal_conversion : bool := true.
+Compute checkpoint_temporal_conversion.
 
 (* =============================================================================
    Timing Infrastructure
@@ -2001,6 +2051,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_timing_infrastructure : bool := true.
+Compute checkpoint_timing_infrastructure.
 
 (* =============================================================================
    Enhanced State Machine Architecture
@@ -2062,6 +2114,8 @@ Record EnhancedARPContext := {
 }.
 
 (* Compilation checkpoint *)
+Definition checkpoint_state_machine_architecture : bool := true.
+Compute checkpoint_state_machine_architecture.
 
 (* =============================================================================
    Flood Prevention Theory
@@ -2195,6 +2249,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_flood_prevention : bool := true.
+Compute checkpoint_flood_prevention.
 
 (* =============================================================================
    Request Queue Semantics
@@ -2301,6 +2357,8 @@ Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
   end.
 
 (* Compilation checkpoint *)
+Definition checkpoint_request_queue : bool := true.
+Compute checkpoint_request_queue.
 
 (* =============================================================================
    Duplicate Address Detection
@@ -2367,6 +2425,8 @@ Definition detect_probe_conflict (ctx : EnhancedARPContext) (probe : ProbeState)
   ip_eq packet.(arp_tpa) probe.(probe_ip).
 
 (* Compilation checkpoint *)
+Definition checkpoint_duplicate_address_detection : bool := true.
+Compute checkpoint_duplicate_address_detection.
 
 (* =============================================================================
    Address Announcement Protocol
@@ -2404,6 +2464,8 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
     (ctx, None).
 
 (* Compilation checkpoint *)
+Definition checkpoint_announcement : bool := true.
+Compute checkpoint_announcement.
 
 (* =============================================================================
    Conflict Resolution Semantics
@@ -2541,6 +2603,8 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+Definition checkpoint_conflict_resolution : bool := true.
+Compute checkpoint_conflict_resolution.
 
 (* =============================================================================
    Integrated Packet Processing
@@ -2921,11 +2985,15 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
   end.
 
 (* Compilation checkpoint *)
+Definition checkpoint_integrated_processing : bool := true.
+Compute checkpoint_integrated_processing.
 
 (* =============================================================================
    Core Correctness Properties
    ============================================================================= *)
 
+Definition compiling_correctness_properties : bool := true.
+Compute compiling_correctness_properties.
 
 (* IPv4 equality is reflexive *)
 Lemma ip_eq_refl : forall ip, ip_eq ip ip = true.
@@ -3472,11 +3540,15 @@ Proof.
     apply rfc826_merge_target. assumption.
 Qed.
 
+Definition checkpoint_correctness_properties : bool := true.
+Compute checkpoint_correctness_properties.
 
 (* =============================================================================
    Cache Aging Semantics
    ============================================================================= *)
 
+Definition compiling_cache_aging : bool := true.
+Compute compiling_cache_aging.
 
 (* Note: age_cache is now defined in Section 10G for use in enhanced processing *)
 
@@ -3497,11 +3569,15 @@ Proof.
   - simpl. reflexivity.
 Qed.
 
+Definition checkpoint_cache_aging : bool := true.
+Compute checkpoint_cache_aging.
 
 (* =============================================================================
    Network Interface Abstraction
    ============================================================================= *)
 
+Definition compiling_network_interface : bool := true.
+Compute compiling_network_interface.
 
 (* Note: NetworkInterface is now defined in Section 10B for use in EnhancedARPContext *)
 
@@ -3511,11 +3587,15 @@ Definition send_arp_on_interface (iface : NetworkInterface)
   then true  (* Actually send to network driver *)
   else false.
 
+Definition checkpoint_network_interface : bool := true.
+Compute checkpoint_network_interface.
 
 (* =============================================================================
    Broadcast Validation Theory
    ============================================================================= *)
 
+Definition compiling_broadcast_validation : bool := true.
+Compute compiling_broadcast_validation.
 
 (* Theorem: Broadcast sender MAC packets are rejected *)
 Theorem broadcast_sender_rejected : forall ctx packet ctx' resp,
@@ -3570,11 +3650,15 @@ Proof.
   intros. eapply broadcast_sender_rejected in H0; eauto. tauto.
 Qed.
 
+Definition checkpoint_broadcast_validation : bool := true.
+Compute checkpoint_broadcast_validation.
 
 (* =============================================================================
    Broadcast Reply Safety
    ============================================================================= *)
 
+Definition compiling_broadcast_reply_safety : bool := true.
+Compute compiling_broadcast_reply_safety.
 
 (* Theorem: Replies copy the requester's MAC to target hardware address *)
 Theorem reply_target_is_requester_mac : forall ctx packet ctx' reply,
@@ -3617,11 +3701,15 @@ Proof.
   - discriminate.
 Qed.
 
+Definition checkpoint_broadcast_reply_safety : bool := true.
+Compute checkpoint_broadcast_reply_safety.
 
 (* =============================================================================
    Packet Validation Completeness
    ============================================================================= *)
 
+Definition compiling_validation_completeness : bool := true.
+Compute compiling_validation_completeness.
 
 (* Packet field validation *)
 Definition is_valid_arp_packet (p : ARPEthernetIPv4) : bool :=
@@ -3671,11 +3759,15 @@ Proof.
   split; reflexivity.
 Qed.
 
+Definition checkpoint_validation_completeness : bool := true.
+Compute checkpoint_validation_completeness.
 
 (* =============================================================================
    Serialization Round-Trip Properties
    ============================================================================= *)
 
+Definition compiling_serialization_roundtrip : bool := true.
+Compute compiling_serialization_roundtrip.
 
 (* Helper lemmas for bitwise operations *)
 Lemma land_high_low_disjoint : forall w,
@@ -3773,11 +3865,15 @@ Proof.
   congruence.
 Qed.
 
+Definition checkpoint_serialization_roundtrip : bool := true.
+Compute checkpoint_serialization_roundtrip.
 
 (* =============================================================================
    Function Correctness Properties
    ============================================================================= *)
 
+Definition compiling_function_correctness : bool := true.
+Compute compiling_function_correctness.
 
 Theorem resolve_address_cache_hit : forall ctx target_ip mac current_time,
   lookup_cache ctx.(earp_cache) target_ip = Some mac ->
@@ -4594,11 +4690,15 @@ Proof.
     simpl. repeat split; reflexivity.
 Qed.
 
+Definition checkpoint_function_correctness : bool := true.
+Compute checkpoint_function_correctness.
 
 (* =============================================================================
    Temporal Execution Properties
    ============================================================================= *)
 
+Definition compiling_temporal_execution : bool := true.
+Compute compiling_temporal_execution.
 
 Definition CACHE_TIMEOUT : N := 300.
 
@@ -4608,11 +4708,15 @@ Fixpoint age_n_times (cache : ARPCache) (n : nat) : ARPCache :=
   | S n' => age_cache (age_n_times cache n') 1
   end.
 
+Definition checkpoint_temporal_execution : bool := true.
+Compute checkpoint_temporal_execution.
 
 (* =============================================================================
    Network Execution Model
    ============================================================================= *)
 
+Definition compiling_network_model : bool := true.
+Compute compiling_network_model.
 
 Inductive NetworkEvent :=
   | SendPacket : ARPPacket -> NetworkEvent
@@ -4654,11 +4758,15 @@ Definition apply_event_to_network (network : NetworkState) (node_id : nat)
   | None => network
   end.
 
+Definition checkpoint_network_model : bool := true.
+Compute checkpoint_network_model.
 
 (* =============================================================================
    Enhanced Event Processing
    ============================================================================= *)
 
+Definition compiling_event_processing : bool := true.
+Compute compiling_event_processing.
 
 Inductive EnhancedEvent :=
   | EPacketIn : ARPEthernetIPv4 -> EnhancedEvent
@@ -4743,11 +4851,15 @@ Proof.
   exists e, o. split; reflexivity.
 Qed.
 
+Definition checkpoint_event_processing : bool := true.
+Compute checkpoint_event_processing.
 
 (* =============================================================================
    Model Equivalence Theory
    ============================================================================= *)
 
+Definition compiling_model_equivalence : bool := true.
+Compute compiling_model_equivalence.
 
 Lemma clean_flood_table_empty : forall t,
   clean_flood_table [] t = [].
@@ -4834,11 +4946,15 @@ Proof.
   intros. destruct (validate_arp_packet pkt mac); auto.
 Qed.
 
+Definition checkpoint_model_equivalence : bool := true.
+Compute checkpoint_model_equivalence.
 
 (* =============================================================================
    Liveness and Progress Properties
    ============================================================================= *)
 
+Definition compiling_liveness : bool := true.
+Compute compiling_liveness.
 
 Inductive ExecutionTrace : Type :=
   | TraceEnd : EnhancedARPContext -> ExecutionTrace
@@ -5022,11 +5138,15 @@ Proof.
   exists (length l). reflexivity.
 Qed.
 
+Definition checkpoint_liveness : bool := true.
+Compute checkpoint_liveness.
 
 (* =============================================================================
    Memory Exhaustion Bounds
    ============================================================================= *)
 
+Definition compiling_memory_bounds : bool := true.
+Compute compiling_memory_bounds.
 
 Lemma filter_length_le : forall {A} (f : A -> bool) (l : list A),
   (length (filter f l) <= length l)%nat.
@@ -5084,11 +5204,15 @@ Definition total_memory_bound (ctx : EnhancedARPContext) : nat :=
        flood_table_memory_bound (earp_flood_table ctx))%nat
   end.
 
+Definition checkpoint_memory_bounds : bool := true.
+Compute checkpoint_memory_bounds.
 
 (* =============================================================================
    OCaml Extraction
    ============================================================================= *)
 
+Definition compiling_extraction : bool := true.
+Compute compiling_extraction.
 
 Require Extraction.
 Extract Inductive bool => "bool" [ "true" "false" ].
@@ -5198,5 +5322,5 @@ Extraction "arp.ml"
   (* Network interface *)
   send_arp_on_interface.
 
-Definition compilation_successful : bool := true.
-Compute compilation_successful.
+Definition checkpoint_extraction : bool := true.
+Compute checkpoint_extraction.
