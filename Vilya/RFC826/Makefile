@@ -14,9 +14,8 @@ OCAMLOPTFLAGS = -g -w +A-4-40-42-44-45-48
 
 # Library paths
 # Using local SDK copy
-PCAP_SDK = npcap-sdk
-PCAP_INCLUDE = -I$(PCAP_SDK)/Include
-PCAP_LIB = -L$(PCAP_SDK)/Lib/x64 -lwpcap -lPacket -lws2_32 -liphlpapi
+PCAP_INCLUDE = -IInclude
+PCAP_LIB = Lib/x64/wpcap.lib Lib/x64/Packet.lib -lws2_32 -liphlpapi
 
 # Build targets
 SOURCES = pcap.ml arp.ml arp_daemon.ml
