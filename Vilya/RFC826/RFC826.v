@@ -784,6 +784,56 @@ Definition convert_to_generic (packet : ARPEthernetIPv4) : ARPPacket :=
 (* Compilation checkpoint *)
 
 (* =============================================================================
+   Error Reporting and Diagnostics
+   ============================================================================= *)
+
+(* Comprehensive error codes for ARP processing failures *)
+Inductive ARPError :=
+  | ErrInvalidOpcode : word16 -> ARPError              (* Unsupported or invalid opcode *)
+  | ErrBroadcastSender : ARPError                      (* Sender MAC is broadcast *)
+  | ErrMulticastSender : ARPError                      (* Sender MAC is multicast *)
+  | ErrZeroSPANonRequest : ARPError                    (* SPA=0 but not REQUEST (RFC 5227) *)
+  | ErrReplyWrongTHA : MACAddress -> MACAddress -> ARPError  (* Reply THA≠my_mac *)
+  | ErrCacheFull : nat -> ARPError                     (* Cache at max size *)
+  | ErrFloodLimitExceeded : IPv4Address -> N -> ARPError  (* Too many requests for IP *)
+  | ErrStaticEntryConflict : IPv4Address -> ARPError   (* Attempt to modify static entry *)
+  | ErrDuplicateIP : IPv4Address -> MACAddress -> ARPError  (* DAD conflict detected *)
+  | ErrInvalidPacketLength : nat -> ARPError           (* Wrong packet size *)
+  | ErrUnsupportedHardware : word16 -> ARPError        (* Non-Ethernet hardware type *)
+  | ErrUnsupportedProtocol : word16 -> ARPError.       (* Non-IPv4 protocol type *)
+
+(* Result type with error diagnostics *)
+Inductive ARPResult (A : Type) :=
+  | ARPSuccess : A -> ARPResult A
+  | ARPFailure : ARPError -> ARPResult A.
+
+Arguments ARPSuccess {A}.
+Arguments ARPFailure {A}.
+
+(* Helper to extract successful result *)
+Definition result_is_success {A} (r : ARPResult A) : bool :=
+  match r with
+  | ARPSuccess _ => true
+  | ARPFailure _ => false
+  end.
+
+(* Helper to extract error *)
+Definition result_error {A} (r : ARPResult A) : option ARPError :=
+  match r with
+  | ARPSuccess _ => None
+  | ARPFailure e => Some e
+  end.
+
+(* Monadic bind for ARPResult *)
+Definition bind_result {A B} (r : ARPResult A) (f : A -> ARPResult B) : ARPResult B :=
+  match r with
+  | ARPSuccess a => f a
+  | ARPFailure e => ARPFailure e
+  end.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
    Packet Validation Semantics
    ============================================================================= *)
 
@@ -800,12 +850,37 @@ Definition validate_arp_packet (packet : ARPEthernetIPv4) (my_mac : MACAddress) 
   (* RFC 5227: ARP Probe uses SPA=0.0.0.0, which is only valid for REQUEST.
      Implication: if SPA is zero, then opcode MUST be REQUEST. *)
   (negb (is_zero_ipv4 packet.(arp_spa)) || N.eqb packet.(arp_op) ARP_OP_REQUEST) &&
-  (* RFC 826: ARP requests must have THA=00:00:00:00:00:00 (unknown target MAC).
-     Implication: if opcode is REQUEST, then THA MUST be zero. *)
-  (negb (N.eqb packet.(arp_op) ARP_OP_REQUEST) || mac_eq packet.(arp_tha) MAC_ZERO) &&
   (* RFC 826: ARP replies must have THA=our MAC (directed response).
      Implication: if opcode is REPLY, then THA MUST be our MAC. *)
   (negb (N.eqb packet.(arp_op) ARP_OP_REPLY) || mac_eq packet.(arp_tha) my_mac).
+
+(* Detailed validation with error diagnostics *)
+Definition validate_arp_packet_detailed (packet : ARPEthernetIPv4) (my_mac : MACAddress)
+  : ARPResult unit :=
+  (* Validate opcode *)
+  if negb (is_valid_arp_opcode packet.(arp_op))
+  then ARPFailure (ErrInvalidOpcode packet.(arp_op))
+  else
+  (* Check sender MAC not broadcast *)
+  if is_broadcast_mac packet.(arp_sha)
+  then ARPFailure ErrBroadcastSender
+  else
+  (* Check sender MAC not multicast *)
+  if is_multicast_mac packet.(arp_sha)
+  then ARPFailure ErrMulticastSender
+  else
+  (* RFC 5227: Zero SPA only valid for REQUEST *)
+  if is_zero_ipv4 packet.(arp_spa)
+  then if negb (N.eqb packet.(arp_op) ARP_OP_REQUEST)
+       then ARPFailure ErrZeroSPANonRequest
+       else ARPSuccess tt
+  else
+  (* RFC 826: Replies must have THA=our MAC *)
+  if N.eqb packet.(arp_op) ARP_OP_REPLY
+  then if negb (mac_eq packet.(arp_tha) my_mac)
+       then ARPFailure (ErrReplyWrongTHA packet.(arp_tha) my_mac)
+       else ARPSuccess tt
+  else ARPSuccess tt.
 
 (* Compilation checkpoint *)
 
@@ -851,9 +926,96 @@ Record ARPContext := {
   arp_cache_ttl : N                  (* Configurable cache entry TTL in seconds *)
 }.
 
+(* Gratuitous ARP type classification *)
+Inductive GratuitousARPType :=
+  | NotGratuitous
+  | GratuitousRequest    (* SPA=TPA, op=REQUEST, THA=00:00:00:00:00:00 - for announcement/detection *)
+  | GratuitousReply.     (* SPA=TPA, op=REPLY - for cache update, more aggressive *)
+
 (* Checks if ARP packet is gratuitous (spa == tpa, used for announcements) *)
 Definition is_gratuitous_arp (pkt : ARPEthernetIPv4) : bool :=
   ip_eq pkt.(arp_spa) pkt.(arp_tpa).
+
+(* Classify gratuitous ARP type for differential handling *)
+Definition classify_gratuitous_arp (pkt : ARPEthernetIPv4) : GratuitousARPType :=
+  if ip_eq pkt.(arp_spa) pkt.(arp_tpa)
+  then
+    if N.eqb pkt.(arp_op) ARP_OP_REQUEST
+    then GratuitousRequest
+    else if N.eqb pkt.(arp_op) ARP_OP_REPLY
+    then GratuitousReply
+    else NotGratuitous
+  else NotGratuitous.
+
+(* Check if packet is gratuitous request specifically *)
+Definition is_gratuitous_request (pkt : ARPEthernetIPv4) : bool :=
+  match classify_gratuitous_arp pkt with
+  | GratuitousRequest => true
+  | _ => false
+  end.
+
+(* Check if packet is gratuitous reply specifically *)
+Definition is_gratuitous_reply (pkt : ARPEthernetIPv4) : bool :=
+  match classify_gratuitous_arp pkt with
+  | GratuitousReply => true
+  | _ => false
+  end.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
+   Configuration API
+   ============================================================================= *)
+
+(* Configuration operations for runtime cache management *)
+
+(* Flush entire cache (returns empty cache) *)
+Definition flush_cache : ARPCache := [].
+
+(* Flush all dynamic entries, preserving static entries *)
+Definition flush_dynamic_entries (cache : ARPCache) : ARPCache :=
+  filter (fun e => e.(ace_static)) cache.
+
+(* Update cache TTL for all dynamic entries *)
+Definition update_cache_ttl (cache : ARPCache) (new_ttl : N) : ARPCache :=
+  map (fun e =>
+    if e.(ace_static)
+    then e
+    else {| ace_ip := e.(ace_ip);
+            ace_mac := e.(ace_mac);
+            ace_ttl := new_ttl;
+            ace_static := e.(ace_static) |}) cache.
+
+(* Update context TTL (affects future cache entries) *)
+Definition set_context_ttl (ctx : ARPContext) (new_ttl : N) : ARPContext :=
+  {| arp_my_mac := ctx.(arp_my_mac);
+     arp_my_ip := ctx.(arp_my_ip);
+     arp_cache := ctx.(arp_cache);
+     arp_cache_ttl := new_ttl |}.
+
+(* Flush cache in context *)
+Definition flush_context_cache (ctx : ARPContext) : ARPContext :=
+  {| arp_my_mac := ctx.(arp_my_mac);
+     arp_my_ip := ctx.(arp_my_ip);
+     arp_cache := flush_cache;
+     arp_cache_ttl := ctx.(arp_cache_ttl) |}.
+
+(* Flush dynamic entries in context *)
+Definition flush_context_dynamic (ctx : ARPContext) : ARPContext :=
+  {| arp_my_mac := ctx.(arp_my_mac);
+     arp_my_ip := ctx.(arp_my_ip);
+     arp_cache := flush_dynamic_entries ctx.(arp_cache);
+     arp_cache_ttl := ctx.(arp_cache_ttl) |}.
+
+(* Query cache size *)
+Definition get_cache_size (cache : ARPCache) : nat := length cache.
+
+(* Query static entry count *)
+Definition get_static_count (cache : ARPCache) : nat := count_static_entries cache.
+
+(* Query dynamic entry count *)
+Definition get_dynamic_count (cache : ARPCache) : nat :=
+  length (filter (fun e => negb e.(ace_static)) cache).
 
 (* Compilation checkpoint *)
 
@@ -2060,6 +2222,57 @@ Record EnhancedARPContext := {
   earp_flood_table : FloodTable;
   earp_last_cache_cleanup : N
 }.
+
+(* Enhanced context configuration API *)
+Definition set_enhanced_context_ttl (ctx : EnhancedARPContext) (new_ttl : N) : EnhancedARPContext :=
+  {| earp_my_mac := ctx.(earp_my_mac);
+     earp_my_ip := ctx.(earp_my_ip);
+     earp_cache := ctx.(earp_cache);
+     earp_cache_ttl := new_ttl;
+     earp_state_data := ctx.(earp_state_data);
+     earp_iface := ctx.(earp_iface);
+     earp_flood_table := ctx.(earp_flood_table);
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+
+Definition flush_enhanced_cache (ctx : EnhancedARPContext) : EnhancedARPContext :=
+  {| earp_my_mac := ctx.(earp_my_mac);
+     earp_my_ip := ctx.(earp_my_ip);
+     earp_cache := flush_cache;
+     earp_cache_ttl := ctx.(earp_cache_ttl);
+     earp_state_data := ctx.(earp_state_data);
+     earp_iface := ctx.(earp_iface);
+     earp_flood_table := ctx.(earp_flood_table);
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+
+Definition flush_enhanced_dynamic (ctx : EnhancedARPContext) : EnhancedARPContext :=
+  {| earp_my_mac := ctx.(earp_my_mac);
+     earp_my_ip := ctx.(earp_my_ip);
+     earp_cache := flush_dynamic_entries ctx.(earp_cache);
+     earp_cache_ttl := ctx.(earp_cache_ttl);
+     earp_state_data := ctx.(earp_state_data);
+     earp_iface := ctx.(earp_iface);
+     earp_flood_table := ctx.(earp_flood_table);
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+
+Definition disable_dad (ctx : EnhancedARPContext) : EnhancedARPContext :=
+  {| earp_my_mac := ctx.(earp_my_mac);
+     earp_my_ip := ctx.(earp_my_ip);
+     earp_cache := ctx.(earp_cache);
+     earp_cache_ttl := ctx.(earp_cache_ttl);
+     earp_state_data := StateIdle;
+     earp_iface := ctx.(earp_iface);
+     earp_flood_table := ctx.(earp_flood_table);
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+
+Definition reset_flood_table (ctx : EnhancedARPContext) : EnhancedARPContext :=
+  {| earp_my_mac := ctx.(earp_my_mac);
+     earp_my_ip := ctx.(earp_my_ip);
+     earp_cache := ctx.(earp_cache);
+     earp_cache_ttl := ctx.(earp_cache_ttl);
+     earp_state_data := ctx.(earp_state_data);
+     earp_iface := ctx.(earp_iface);
+     earp_flood_table := [];
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
 
 (* Compilation checkpoint *)
 
@@ -5114,11 +5327,15 @@ Extraction "arp.ml"
 
   (* Validation *)
   validate_arp_packet
+  validate_arp_packet_detailed
   validate_rarp_packet
   is_valid_opcode
   is_broadcast_mac
   is_multicast_mac
   is_gratuitous_arp
+  is_gratuitous_request
+  is_gratuitous_reply
+  classify_gratuitous_arp
   is_suspicious_arp
 
   (* Cache operations *)
@@ -5196,7 +5413,23 @@ Extraction "arp.ml"
   process_event
 
   (* Network interface *)
-  send_arp_on_interface.
+  send_arp_on_interface
+
+  (* Configuration API *)
+  flush_cache
+  flush_dynamic_entries
+  update_cache_ttl
+  set_context_ttl
+  flush_context_cache
+  flush_context_dynamic
+  get_cache_size
+  get_static_count
+  get_dynamic_count
+  set_enhanced_context_ttl
+  flush_enhanced_cache
+  flush_enhanced_dynamic
+  disable_dad
+  reset_flood_table.
 
 Definition compilation_successful : bool := true.
 Compute compilation_successful.
