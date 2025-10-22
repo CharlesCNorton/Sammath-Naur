@@ -1,0 +1,9 @@
+*.aux
+*.glob
+*.vo
+*.vok
+*.vos
+.*.aux
+.lia.cache
+arp.ml
+arp.mli
