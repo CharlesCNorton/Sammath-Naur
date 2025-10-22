@@ -6192,3 +6192,453 @@ Qed.
 
 Definition compilation_successful : bool := true.
 Compute compilation_successful.
+
+(* =============================================================================
+   Narrative Verification Thread: Complete ARP Transaction
+
+   This section demonstrates a complete ARP transaction from start to finish,
+   building persistent elements that thread through each verification stage.
+   Each element compiles independently to avoid edit debt accumulation.
+   ============================================================================= *)
+
+Definition alice_mac : MACAddress.
+  refine {| mac_bytes := [170; 187; 204; 221; 238; 255] |}.
+  reflexivity.
+Defined.
+
+Definition alice_ip : IPv4Address :=
+  {| ipv4_a := 192; ipv4_b := 168; ipv4_c := 1; ipv4_d := 100 |}.
+
+Definition bob_mac : MACAddress.
+  refine {| mac_bytes := [18; 52; 86; 120; 154; 188] |}.
+  reflexivity.
+Defined.
+
+Definition bob_ip : IPv4Address :=
+  {| ipv4_a := 192; ipv4_b := 168; ipv4_c := 1; ipv4_d := 200 |}.
+
+Lemma alice_bob_different_ips : alice_ip <> bob_ip.
+Proof.
+  intro H.
+  inversion H.
+Qed.
+
+Lemma alice_bob_different_macs : alice_mac <> bob_mac.
+Proof.
+  intro H.
+  inversion H.
+Qed.
+
+Definition alice_initial : ARPContext :=
+  {| arp_my_mac := alice_mac;
+     arp_my_ip := alice_ip;
+     arp_cache := [];
+     arp_cache_ttl := DEFAULT_ARP_TTL |}.
+
+Definition bob_initial : ARPContext :=
+  {| arp_my_mac := bob_mac;
+     arp_my_ip := bob_ip;
+     arp_cache := [];
+     arp_cache_ttl := DEFAULT_ARP_TTL |}.
+
+Lemma alice_initial_cache_empty : alice_initial.(arp_cache) = [].
+Proof.
+  reflexivity.
+Qed.
+
+Lemma bob_initial_cache_empty : bob_initial.(arp_cache) = [].
+Proof.
+  reflexivity.
+Qed.
+
+Lemma alice_cannot_resolve_bob_initially :
+  lookup_cache alice_initial.(arp_cache) bob_ip = None.
+Proof.
+  unfold alice_initial.
+  simpl.
+  reflexivity.
+Qed.
+
+Definition request_alice_to_bob : ARPEthernetIPv4 :=
+  make_arp_request alice_mac alice_ip bob_ip.
+
+Theorem request_has_correct_opcode :
+  request_alice_to_bob.(arp_op) = ARP_OP_REQUEST.
+Proof.
+  unfold request_alice_to_bob, make_arp_request.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem request_has_alice_as_sender :
+  request_alice_to_bob.(arp_sha) = alice_mac /\
+  request_alice_to_bob.(arp_spa) = alice_ip.
+Proof.
+  unfold request_alice_to_bob, make_arp_request.
+  simpl.
+  split; reflexivity.
+Qed.
+
+Theorem request_has_bob_as_target_ip :
+  request_alice_to_bob.(arp_tpa) = bob_ip.
+Proof.
+  unfold request_alice_to_bob, make_arp_request.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem request_has_broadcast_target_mac :
+  request_alice_to_bob.(arp_tha) = MAC_ZERO.
+Proof.
+  unfold request_alice_to_bob, make_arp_request.
+  simpl.
+  reflexivity.
+Qed.
+
+Definition request_serialized : list N :=
+  serialize_arp_packet request_alice_to_bob.
+
+Theorem serialization_produces_28_bytes :
+  length request_serialized = 28%nat.
+Proof.
+  unfold request_serialized.
+  unfold serialize_arp_packet.
+  unfold request_alice_to_bob, make_arp_request.
+  unfold serialize_mac, serialize_ipv4, split_word16.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem serialization_roundtrip :
+  parse_arp_packet request_serialized = Some request_alice_to_bob.
+Proof.
+  unfold request_serialized.
+  apply serialize_parse_identity.
+Qed.
+
+Definition bob_after_request : ARPContext * option ARPEthernetIPv4 :=
+  process_arp_packet bob_initial request_alice_to_bob.
+
+Definition bob_ctx_after := fst bob_after_request.
+Definition bob_reply := snd bob_after_request.
+
+Theorem bob_validates_request :
+  validate_arp_packet request_alice_to_bob bob_mac = true.
+Proof.
+  unfold validate_arp_packet, request_alice_to_bob, make_arp_request.
+  simpl.
+  unfold is_broadcast_mac, MAC_ZERO.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem bob_is_target_of_request :
+  ip_eq request_alice_to_bob.(arp_tpa) bob_ip = true.
+Proof.
+  unfold request_alice_to_bob, make_arp_request.
+  simpl.
+  unfold ip_eq.
+  simpl.
+  repeat rewrite N.eqb_refl.
+  reflexivity.
+Qed.
+
+Theorem bob_generates_reply :
+  exists reply,
+    bob_reply = Some reply /\
+    reply.(arp_op) = ARP_OP_REPLY.
+Proof.
+  unfold bob_reply, bob_after_request.
+  unfold process_arp_packet, bob_initial, request_alice_to_bob, make_arp_request.
+  simpl.
+  eexists.
+  split.
+  reflexivity.
+  simpl.
+  reflexivity.
+Qed.
+
+Definition reply_bob_to_alice : ARPEthernetIPv4 :=
+  make_arp_reply bob_mac bob_ip alice_mac alice_ip.
+
+Theorem bob_reply_equals_expected :
+  bob_reply = Some reply_bob_to_alice.
+Proof.
+  unfold bob_reply, bob_after_request.
+  unfold process_arp_packet, bob_initial, request_alice_to_bob, make_arp_request, reply_bob_to_alice, make_arp_reply.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem reply_has_bob_as_sender :
+  reply_bob_to_alice.(arp_sha) = bob_mac /\
+  reply_bob_to_alice.(arp_spa) = bob_ip.
+Proof.
+  unfold reply_bob_to_alice, make_arp_reply.
+  simpl.
+  split; reflexivity.
+Qed.
+
+Theorem reply_targets_alice :
+  reply_bob_to_alice.(arp_tha) = alice_mac /\
+  reply_bob_to_alice.(arp_tpa) = alice_ip.
+Proof.
+  unfold reply_bob_to_alice, make_arp_reply.
+  simpl.
+  split; reflexivity.
+Qed.
+
+Definition alice_after_reply : ARPContext * option ARPEthernetIPv4 :=
+  process_arp_packet alice_initial reply_bob_to_alice.
+
+Definition alice_ctx_final := fst alice_after_reply.
+Definition alice_no_response := snd alice_after_reply.
+
+Theorem alice_validates_reply :
+  validate_arp_packet reply_bob_to_alice alice_mac = true.
+Proof.
+  unfold validate_arp_packet, reply_bob_to_alice, make_arp_reply.
+  simpl.
+  unfold is_broadcast_mac.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem alice_does_not_reply_to_reply :
+  alice_no_response = None.
+Proof.
+  unfold alice_no_response, alice_after_reply.
+  unfold process_arp_packet, alice_initial, reply_bob_to_alice, make_arp_reply.
+  simpl.
+  reflexivity.
+Qed.
+
+Theorem alice_learns_bob_mac :
+  lookup_cache alice_ctx_final.(arp_cache) bob_ip = Some bob_mac.
+Proof.
+  unfold alice_ctx_final, alice_after_reply.
+  unfold process_arp_packet, alice_initial, reply_bob_to_alice, make_arp_reply.
+  simpl.
+  unfold rfc826_merge_bounded, rfc826_merge.
+  simpl.
+  unfold add_cache_entry.
+  simpl.
+  unfold ip_eq.
+  simpl.
+  repeat rewrite N.eqb_refl.
+  reflexivity.
+Qed.
+
+Theorem bob_learns_alice_mac :
+  lookup_cache bob_ctx_after.(arp_cache) alice_ip = Some alice_mac.
+Proof.
+  unfold bob_ctx_after, bob_after_request.
+  unfold process_arp_packet, bob_initial, request_alice_to_bob, make_arp_request.
+  simpl.
+  unfold rfc826_merge_bounded, rfc826_merge.
+  simpl.
+  unfold add_cache_entry.
+  simpl.
+  unfold ip_eq.
+  simpl.
+  repeat rewrite N.eqb_refl.
+  reflexivity.
+Qed.
+
+Theorem bidirectional_cache_population :
+  lookup_cache alice_ctx_final.(arp_cache) bob_ip = Some bob_mac /\
+  lookup_cache bob_ctx_after.(arp_cache) alice_ip = Some alice_mac.
+Proof.
+  split.
+  apply alice_learns_bob_mac.
+  apply bob_learns_alice_mac.
+Qed.
+
+Theorem complete_arp_transaction_narrative :
+  alice_initial.(arp_cache) = [] /\
+  bob_initial.(arp_cache) = [] /\
+  request_alice_to_bob.(arp_op) = ARP_OP_REQUEST /\
+  bob_reply = Some reply_bob_to_alice /\
+  reply_bob_to_alice.(arp_op) = ARP_OP_REPLY /\
+  alice_no_response = None /\
+  lookup_cache alice_ctx_final.(arp_cache) bob_ip = Some bob_mac /\
+  lookup_cache bob_ctx_after.(arp_cache) alice_ip = Some alice_mac /\
+  alice_mac <> bob_mac /\
+  alice_ip <> bob_ip.
+Proof.
+  split. reflexivity.
+  split. reflexivity.
+  split. apply request_has_correct_opcode.
+  split. apply bob_reply_equals_expected.
+  split. unfold reply_bob_to_alice, make_arp_reply. simpl. reflexivity.
+  split. apply alice_does_not_reply_to_reply.
+  split. apply alice_learns_bob_mac.
+  split. apply bob_learns_alice_mac.
+  split. apply alice_bob_different_macs.
+  apply alice_bob_different_ips.
+Qed.
+
+Definition narrative_verification_complete : bool := true.
+Compute narrative_verification_complete.
+
+Definition execute_arp_transaction
+  (sender_mac target_mac : MACAddress)
+  (sender_ip target_ip : IPv4Address)
+  : ARPContext * ARPContext * ARPEthernetIPv4 * option ARPEthernetIPv4 :=
+  let sender_ctx := {| arp_my_mac := sender_mac;
+                       arp_my_ip := sender_ip;
+                       arp_cache := [];
+                       arp_cache_ttl := DEFAULT_ARP_TTL |} in
+  let target_ctx := {| arp_my_mac := target_mac;
+                       arp_my_ip := target_ip;
+                       arp_cache := [];
+                       arp_cache_ttl := DEFAULT_ARP_TTL |} in
+  let request := make_arp_request sender_mac sender_ip target_ip in
+  let (target_ctx', reply_opt) := process_arp_packet target_ctx request in
+  match reply_opt with
+  | None => (sender_ctx, target_ctx', request, None)
+  | Some reply =>
+      let (sender_ctx', _) := process_arp_packet sender_ctx reply in
+      (sender_ctx', target_ctx', request, reply_opt)
+  end.
+
+Compute execute_arp_transaction alice_mac bob_mac alice_ip bob_ip.
+
+Theorem arp_transaction_alice_bob_constructive :
+  let result := execute_arp_transaction alice_mac bob_mac alice_ip bob_ip in
+  let alice_final := fst (fst (fst result)) in
+  let bob_final := snd (fst (fst result)) in
+  let reply_opt := snd result in
+  exists reply,
+    reply_opt = Some reply /\
+    reply.(arp_op) = ARP_OP_REPLY /\
+    reply.(arp_sha) = bob_mac /\
+    reply.(arp_spa) = bob_ip /\
+    reply.(arp_tha) = alice_mac /\
+    reply.(arp_tpa) = alice_ip /\
+    lookup_cache bob_final.(arp_cache) alice_ip = Some alice_mac /\
+    lookup_cache alice_final.(arp_cache) bob_ip = Some bob_mac.
+Proof.
+  exists (make_arp_reply bob_mac bob_ip alice_mac alice_ip).
+  vm_compute.
+  repeat split.
+Qed.
+
+Definition constructive_verification_complete : bool := true.
+Compute constructive_verification_complete.
+
+Definition attacker_mac : MACAddress := MAC_BROADCAST.
+
+Definition malicious_arp_with_broadcast_sender : ARPEthernetIPv4 :=
+  {| arp_op := ARP_OP_REQUEST;
+     arp_sha := MAC_BROADCAST;
+     arp_spa := alice_ip;
+     arp_tha := MAC_ZERO;
+     arp_tpa := bob_ip |}.
+
+Theorem broadcast_sender_attack_rejected :
+  forall ctx,
+  let (ctx', resp) := process_arp_packet ctx malicious_arp_with_broadcast_sender in
+  ctx'.(arp_cache) = ctx.(arp_cache) /\
+  resp = None.
+Proof.
+  intro ctx.
+  unfold malicious_arp_with_broadcast_sender.
+  unfold process_arp_packet.
+  unfold validate_arp_packet.
+  unfold is_broadcast_mac, MAC_BROADCAST.
+  simpl.
+  split; reflexivity.
+Qed.
+
+Definition evil_mac : MACAddress.
+  refine {| mac_bytes := [222; 173; 190; 239; 222; 173] |}.
+  reflexivity.
+Defined.
+
+Definition gateway_ip : IPv4Address :=
+  {| ipv4_a := 192; ipv4_b := 168; ipv4_c := 1; ipv4_d := 1 |}.
+
+Definition legitimate_gateway_mac : MACAddress.
+  refine {| mac_bytes := [0; 1; 2; 3; 4; 5] |}.
+  reflexivity.
+Defined.
+
+Definition ctx_with_static_gateway : ARPContext :=
+  {| arp_my_mac := alice_mac;
+     arp_my_ip := alice_ip;
+     arp_cache := [{| ace_ip := gateway_ip;
+                      ace_mac := legitimate_gateway_mac;
+                      ace_ttl := 1000;
+                      ace_static := true |}];
+     arp_cache_ttl := DEFAULT_ARP_TTL |}.
+
+Definition poisoning_attempt : ARPEthernetIPv4 :=
+  make_arp_reply evil_mac gateway_ip alice_mac alice_ip.
+
+Theorem static_entry_resists_poisoning :
+  let (ctx', resp) := process_arp_packet ctx_with_static_gateway poisoning_attempt in
+  lookup_cache ctx'.(arp_cache) gateway_ip = Some legitimate_gateway_mac.
+Proof.
+  unfold process_arp_packet, poisoning_attempt, make_arp_reply, ctx_with_static_gateway.
+  simpl.
+  unfold rfc826_merge_bounded, rfc826_merge.
+  simpl.
+  unfold update_cache_entry.
+  simpl.
+  unfold ip_eq.
+  simpl.
+  repeat rewrite N.eqb_refl.
+  simpl.
+  unfold lookup_cache.
+  simpl.
+  unfold ip_eq.
+  simpl.
+  repeat rewrite N.eqb_refl.
+  reflexivity.
+Qed.
+
+Definition victim_ip : IPv4Address :=
+  {| ipv4_a := 10; ipv4_b := 0; ipv4_c := 0; ipv4_d := 100 |}.
+
+Fixpoint flood_attack (n : nat) (target_ip : IPv4Address) (time_base : N) : list (ARPEthernetIPv4 * N) :=
+  match n with
+  | O => []
+  | S n' => (make_arp_request evil_mac gateway_ip target_ip, time_base) :: flood_attack n' target_ip time_base
+  end.
+
+Definition enhanced_ctx_with_gateway : EnhancedARPContext :=
+  {| earp_my_mac := alice_mac;
+     earp_my_ip := alice_ip;
+     earp_cache := [{| ace_ip := gateway_ip;
+                       ace_mac := legitimate_gateway_mac;
+                       ace_ttl := 1000;
+                       ace_static := true |}];
+     earp_cache_ttl := DEFAULT_ARP_TTL;
+     earp_state_data := StateIdle;
+     earp_iface := {| if_mac := alice_mac; if_ip := alice_ip; if_mtu := 1500; if_up := true |};
+     earp_flood_table := [];
+     earp_last_cache_cleanup := 0 |}.
+
+Theorem composite_adversarial_resilience_ultimate :
+  let honest_reply := make_arp_reply bob_mac bob_ip alice_mac alice_ip in
+  let (alice_after_honest, _) := process_arp_packet alice_initial honest_reply in
+  let attack1_result := process_arp_packet alice_after_honest malicious_arp_with_broadcast_sender in
+  let alice_after_attack1 := fst attack1_result in
+  let (alice_after_poison, _) := process_arp_packet ctx_with_static_gateway poisoning_attempt in
+  (forall ctx, let (ctx', resp) := process_arp_packet ctx malicious_arp_with_broadcast_sender in
+    ctx'.(arp_cache) = ctx.(arp_cache) /\ resp = None) /\
+  lookup_cache alice_after_attack1.(arp_cache) bob_ip = Some bob_mac /\
+  lookup_cache alice_after_poison.(arp_cache) gateway_ip = Some legitimate_gateway_mac.
+Proof.
+  split.
+  - apply broadcast_sender_attack_rejected.
+  - split.
+    + vm_compute.
+      reflexivity.
+    + apply static_entry_resists_poisoning.
+Qed.
+
+Definition adversarial_test_suite_complete : bool := true.
+Compute adversarial_test_suite_complete.
+
