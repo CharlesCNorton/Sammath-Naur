@@ -1,0 +1,8 @@
+*.cmi
+*.cmo
+*.cmx
+*.o
+*.exe
+*.byte
+_build/
+.depend
