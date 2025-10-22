@@ -380,6 +380,24 @@ Definition rfc826_merge_explicit (cache : ARPCache) (ip : IPv4Address) (mac : MA
                  else cache' in
   (merge_flag, cache'').
 
+(* RFC 826 Cache Size Limit: Maximum entries to prevent unbounded growth *)
+Definition MAX_CACHE_SIZE : nat := 1024.
+
+(* Bounded cache operations: Enforce MAX_CACHE_SIZE limit *)
+Definition rfc826_merge_bounded (cache : ARPCache) (ip : IPv4Address)
+                                 (mac : MACAddress) (ttl : N) (i_am_target : bool)
+                                 : ARPCache :=
+  let result := rfc826_merge cache ip mac ttl i_am_target in
+  if Nat.leb (length result) MAX_CACHE_SIZE
+  then result
+  else cache.
+
+Definition add_cache_entry_bounded (cache : ARPCache) (ip : IPv4Address)
+                                    (mac : MACAddress) (ttl : N) : ARPCache :=
+  if Nat.ltb (length cache) MAX_CACHE_SIZE
+  then add_cache_entry cache ip mac ttl
+  else cache.
+
 (* Static Entry Management API *)
 
 Definition add_static_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress) : ARPCache :=
@@ -533,6 +551,16 @@ Theorem rfc826_merge_not_target : forall cache ip mac ttl,
 Proof.
   intros cache ip mac ttl Hnone.
   unfold rfc826_merge. rewrite Hnone. reflexivity.
+Qed.
+
+Theorem rfc826_merge_bounded_not_target : forall cache ip mac ttl,
+  lookup_cache cache ip = None ->
+  rfc826_merge_bounded cache ip mac ttl false = cache.
+Proof.
+  intros cache ip mac ttl Hnone.
+  unfold rfc826_merge_bounded.
+  rewrite rfc826_merge_not_target by assumption.
+  destruct (Nat.leb (length cache) MAX_CACHE_SIZE); reflexivity.
 Qed.
 
 (* Cache uniqueness preservation theorems *)
@@ -1044,8 +1072,8 @@ Definition process_arp_packet (ctx : ARPContext) (packet : ARPEthernetIPv4)
     (* Step 1: Check if I am the target *)
     let i_am_target := ip_eq packet.(arp_tpa) ctx.(arp_my_ip) in
 
-    (* Step 2: RFC 826 compliant conditional merge *)
-    let cache' := rfc826_merge ctx.(arp_cache)
+    (* Step 2: RFC 826 compliant conditional merge with size enforcement *)
+    let cache' := rfc826_merge_bounded ctx.(arp_cache)
                                packet.(arp_spa)
                                packet.(arp_sha)
                                ctx.(arp_cache_ttl)
@@ -1098,8 +1126,8 @@ Definition process_validated_arp_packet
   (* Step 1: Check if I am the target *)
   let i_am_target := ip_eq packet.(arp_tpa) ctx.(arp_my_ip) in
 
-  (* Step 2: RFC 826 compliant conditional merge *)
-  let cache' := rfc826_merge ctx.(arp_cache)
+  (* Step 2: RFC 826 compliant conditional merge with size enforcement *)
+  let cache' := rfc826_merge_bounded ctx.(arp_cache)
                              packet.(arp_spa)
                              packet.(arp_sha)
                              ctx.(arp_cache_ttl)
@@ -3524,9 +3552,9 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                       earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
         (ctx', None)
       else
-        (* Continue with RFC 826 strict processing *)
+        (* Continue with RFC 826 strict processing with size enforcement *)
         let i_am_target := ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip) in
-        let cache' := rfc826_merge ctx_aged.(earp_cache)
+        let cache' := rfc826_merge_bounded ctx_aged.(earp_cache)
                                    packet.(arp_spa) packet.(arp_sha) ctx_aged.(earp_cache_ttl) i_am_target in
         let ctx' := {| earp_my_mac := ctx_aged.(earp_my_mac);
                       earp_my_ip := ctx_aged.(earp_my_ip);
@@ -3543,9 +3571,9 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
       then
         process_conflict ctx_aged current_time
       else
-        (* RFC 826 strict processing *)
+        (* RFC 826 strict processing with size enforcement *)
         let i_am_target := ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip) in
-        let cache' := rfc826_merge ctx_aged.(earp_cache)
+        let cache' := rfc826_merge_bounded ctx_aged.(earp_cache)
                                    packet.(arp_spa) packet.(arp_sha) ctx_aged.(earp_cache_ttl) i_am_target in
 
         (* Remove from pending if this is a reply to our request *)
@@ -3662,6 +3690,49 @@ Proof.
 Qed.
 
 (* RFC 826 merge when target ensures entry exists (possibly static MAC) *)
+Lemma update_cache_entry_size : forall cache ip mac ttl,
+  length (update_cache_entry cache ip mac ttl) = length cache.
+Proof.
+  intros cache ip mac ttl.
+  induction cache as [|e rest IH].
+  - simpl. reflexivity.
+  - simpl. destruct (ip_eq (ace_ip e) ip).
+    + destruct (ace_static e); simpl; reflexivity.
+    + simpl. rewrite IH. reflexivity.
+Qed.
+
+Lemma add_cache_entry_size_bound : forall cache ip mac ttl,
+  (length (add_cache_entry cache ip mac ttl) <= length cache + 1)%nat.
+Proof.
+  intros cache ip mac ttl.
+  induction cache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (ace_ip e) ip); simpl; lia.
+Qed.
+
+Lemma rfc826_merge_size_bound : forall cache ip mac ttl i_am_target,
+  (length (rfc826_merge cache ip mac ttl i_am_target) <= length cache + 1)%nat.
+Proof.
+  intros cache ip mac ttl i_am_target.
+  unfold rfc826_merge.
+  destruct (lookup_cache cache ip).
+  - rewrite update_cache_entry_size. lia.
+  - destruct i_am_target.
+    + apply add_cache_entry_size_bound.
+    + simpl. lia.
+Qed.
+
+Lemma rfc826_merge_bounded_eq_merge : forall cache ip mac ttl target,
+  (length (rfc826_merge cache ip mac ttl target) <= MAX_CACHE_SIZE)%nat ->
+  rfc826_merge_bounded cache ip mac ttl target = rfc826_merge cache ip mac ttl target.
+Proof.
+  intros cache ip mac ttl target Hbound.
+  unfold rfc826_merge_bounded.
+  destruct (Nat.leb (length (rfc826_merge cache ip mac ttl target)) MAX_CACHE_SIZE) eqn:Hcheck.
+  - reflexivity.
+  - apply Nat.leb_nle in Hcheck. lia.
+Qed.
+
 Lemma rfc826_merge_updates_or_adds : forall cache ip mac ttl target,
   target = true ->
   exists m, lookup_cache (rfc826_merge cache ip mac ttl target) ip = Some m.
@@ -3689,6 +3760,18 @@ Proof.
         simpl in Hlook. rewrite Heq in Hlook. assumption.
 Qed.
 
+Lemma rfc826_merge_bounded_updates_or_adds : forall cache ip mac ttl target,
+  (length cache < MAX_CACHE_SIZE)%nat ->
+  target = true ->
+  exists m, lookup_cache (rfc826_merge_bounded cache ip mac ttl target) ip = Some m.
+Proof.
+  intros cache ip mac ttl target Hlen Htarget.
+  assert (Hbound: (length (rfc826_merge cache ip mac ttl target) <= MAX_CACHE_SIZE)%nat).
+  { pose proof (rfc826_merge_size_bound cache ip mac ttl target) as H. lia. }
+  rewrite (rfc826_merge_bounded_eq_merge cache ip mac ttl target Hbound).
+  apply rfc826_merge_updates_or_adds. assumption.
+Qed.
+
 (* RFC 826 merge with no static entries guarantees exact MAC *)
 Lemma rfc826_merge_target : forall cache ip mac ttl,
   (forall e, In e cache -> ip_eq (ace_ip e) ip = true -> ace_static e = false) ->
@@ -3703,7 +3786,31 @@ Proof.
   - apply add_cache_entry_not_exists. assumption.
 Qed.
 
+Lemma rfc826_merge_bounded_size_bound : forall cache ip mac ttl target,
+  (length (rfc826_merge_bounded cache ip mac ttl target) <= length cache + 1)%nat.
+Proof.
+  intros cache ip mac ttl target.
+  unfold rfc826_merge_bounded.
+  destruct (Nat.leb (length (rfc826_merge cache ip mac ttl target)) MAX_CACHE_SIZE) eqn:Hcheck.
+  - apply rfc826_merge_size_bound.
+  - lia.
+Qed.
+
+(* Bounded merge with no static entries guarantees exact MAC when under limit *)
+Lemma rfc826_merge_bounded_target : forall cache ip mac ttl,
+  (length cache < MAX_CACHE_SIZE)%nat ->
+  (forall e, In e cache -> ip_eq (ace_ip e) ip = true -> ace_static e = false) ->
+  lookup_cache (rfc826_merge_bounded cache ip mac ttl true) ip = Some mac.
+Proof.
+  intros cache ip mac ttl Hlen Hno_static.
+  assert (Hbound: (length (rfc826_merge cache ip mac ttl true) <= MAX_CACHE_SIZE)%nat).
+  { pose proof (rfc826_merge_size_bound cache ip mac ttl true) as H. lia. }
+  rewrite (rfc826_merge_bounded_eq_merge cache ip mac ttl true Hbound).
+  apply rfc826_merge_target. assumption.
+Qed.
+
 Theorem gratuitous_arp_updates_cache : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
   is_gratuitous_arp pkt = true ->
   validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
@@ -3712,15 +3819,15 @@ Theorem gratuitous_arp_updates_cache : forall ctx pkt ctx' resp,
   process_arp_packet ctx pkt = (ctx', resp) ->
   lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
 Proof.
-  intros ctx pkt ctx' resp Hgrat Hvalid Htarget Hno_static Hproc.
+  intros ctx pkt ctx' resp Hlen Hgrat Hvalid Htarget Hno_static Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid, Htarget in Hproc.
   destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
   - rewrite Hgrat in Hproc.
     injection Hproc as Hctx _; subst ctx'; simpl.
-    apply rfc826_merge_target; assumption.
+    apply rfc826_merge_bounded_target; assumption.
   - injection Hproc as Hctx _; subst ctx'; simpl.
-    apply rfc826_merge_target; assumption.
+    apply rfc826_merge_bounded_target; assumption.
 Qed.
 
 (* Property 1: Cache coherence - if no static entry blocks, merge ensures lookup succeeds *)
@@ -3800,6 +3907,7 @@ Proof.
 Qed.
 
 Theorem bidirectional_cache_update_when_target : forall ctx packet ctx' response,
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
   (forall e, In e ctx.(arp_cache) ->
    ip_eq (ace_ip e) packet.(arp_spa) = true -> ace_static e = false) ->
   validate_arp_packet packet ctx.(arp_my_mac) = true ->
@@ -3807,18 +3915,18 @@ Theorem bidirectional_cache_update_when_target : forall ctx packet ctx' response
   process_arp_packet ctx packet = (ctx', response) ->
   lookup_cache ctx'.(arp_cache) packet.(arp_spa) = Some packet.(arp_sha).
 Proof.
-  intros ctx packet ctx' response Hno_static Hvalid_pkt Htarget Hproc.
+  intros ctx packet ctx' response Hlen Hno_static Hvalid_pkt Htarget Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
   destruct (N.eqb (arp_op packet) ARP_OP_REQUEST) eqn:Hop.
   - destruct (is_gratuitous_arp packet) eqn:Hgrat.
     + injection Hproc. intros. subst ctx'. simpl.
-      apply rfc826_merge_target. assumption.
+      apply rfc826_merge_bounded_target; assumption.
     + injection Hproc. intros. subst ctx'. simpl.
-      apply rfc826_merge_target. assumption.
+      apply rfc826_merge_bounded_target; assumption.
   - injection Hproc. intros. subst ctx'. simpl.
-    apply rfc826_merge_target. assumption.
+    apply rfc826_merge_bounded_target; assumption.
 Qed.
 
 (* RFC 826 Compliance: Only update existing entries when not target *)
@@ -3833,46 +3941,36 @@ Proof.
   destruct (validate_arp_packet packet (arp_my_mac ctx)) eqn:Hvalid.
   - rewrite Hnot_target in Hproc.
     injection Hproc as Hctx'. subst ctx'. simpl.
-    unfold rfc826_merge. rewrite Hnot_in_cache. simpl. assumption.
+    unfold rfc826_merge_bounded, rfc826_merge. rewrite Hnot_in_cache. simpl.
+    destruct (Nat.leb (length (arp_cache ctx)) MAX_CACHE_SIZE); assumption.
   - injection Hproc as Hctx'. subst ctx'. simpl. assumption.
 Qed.
 
 (* Property 4: Cache size bounds *)
 Definition cache_size (c : ARPCache) : nat := length c.
 
-(* RFC 826 Cache Size Limit: Maximum entries to prevent unbounded growth *)
-Definition MAX_CACHE_SIZE : nat := 1024.
-
-Lemma update_cache_entry_size : forall cache ip mac ttl,
-  length (update_cache_entry cache ip mac ttl) = length cache.
+Lemma rfc826_merge_bounded_respects_limit : forall cache ip mac ttl target,
+  (length cache <= MAX_CACHE_SIZE)%nat ->
+  (length (rfc826_merge_bounded cache ip mac ttl target) <= MAX_CACHE_SIZE)%nat.
 Proof.
-  intros cache ip mac ttl.
-  induction cache as [|e rest IH].
-  - simpl. reflexivity.
-  - simpl. destruct (ip_eq (ace_ip e) ip).
-    + destruct (ace_static e); simpl; reflexivity.
-    + simpl. rewrite IH. reflexivity.
+  intros cache ip mac ttl target Hbound.
+  unfold rfc826_merge_bounded.
+  destruct (Nat.leb (length (rfc826_merge cache ip mac ttl target)) MAX_CACHE_SIZE) eqn:Hcheck.
+  - apply Nat.leb_le in Hcheck. assumption.
+  - assumption.
 Qed.
 
-Lemma add_cache_entry_size_bound : forall cache ip mac ttl,
-  (length (add_cache_entry cache ip mac ttl) <= length cache + 1)%nat.
+Lemma add_cache_entry_bounded_respects_limit : forall cache ip mac ttl,
+  (length cache <= MAX_CACHE_SIZE)%nat ->
+  (length (add_cache_entry_bounded cache ip mac ttl) <= MAX_CACHE_SIZE)%nat.
 Proof.
-  intros cache ip mac ttl.
-  induction cache as [|e rest IH].
-  - simpl. lia.
-  - simpl. destruct (ip_eq (ace_ip e) ip); simpl; lia.
-Qed.
-
-Lemma rfc826_merge_size_bound : forall cache ip mac ttl i_am_target,
-  (length (rfc826_merge cache ip mac ttl i_am_target) <= length cache + 1)%nat.
-Proof.
-  intros cache ip mac ttl i_am_target.
-  unfold rfc826_merge.
-  destruct (lookup_cache cache ip).
-  - rewrite update_cache_entry_size. lia.
-  - destruct i_am_target.
-    + apply add_cache_entry_size_bound.
-    + simpl. lia.
+  intros cache ip mac ttl Hbound.
+  unfold add_cache_entry_bounded.
+  destruct (Nat.ltb (length cache) MAX_CACHE_SIZE) eqn:Hcheck.
+  - apply Nat.ltb_lt in Hcheck.
+    assert (Hadd := add_cache_entry_size_bound cache ip mac ttl).
+    lia.
+  - assumption.
 Qed.
 
 (* Transitivity of IP inequality: if ip1=ip2 and ip2≠ip3, then ip1≠ip3 *)
@@ -3970,6 +4068,17 @@ Proof.
     + reflexivity.
 Qed.
 
+Lemma rfc826_merge_bounded_preserves_other_ips : forall cache ip mac ttl i_am_target other_ip,
+  other_ip <> ip ->
+  lookup_cache (rfc826_merge_bounded cache ip mac ttl i_am_target) other_ip = lookup_cache cache other_ip.
+Proof.
+  intros cache ip mac ttl i_am_target other_ip Hneq.
+  unfold rfc826_merge_bounded.
+  destruct (Nat.leb (length (rfc826_merge cache ip mac ttl i_am_target)) MAX_CACHE_SIZE) eqn:Hcheck.
+  - apply rfc826_merge_preserves_other_ips. assumption.
+  - reflexivity.
+Qed.
+
 
 Lemma merge_cache_size_bound : forall cache ip mac ttl,
   (length (merge_cache_entry cache ip mac ttl) <= length cache + 1)%nat.
@@ -3997,62 +4106,23 @@ Proof.
       subst ctx';
       simpl;
       unfold cache_size;
-      apply rfc826_merge_size_bound.
+      apply rfc826_merge_bounded_size_bound.
     + injection Hproc as Hctx' _;
       subst ctx';
       simpl;
       unfold cache_size;
-      apply rfc826_merge_size_bound.
+      apply rfc826_merge_bounded_size_bound.
     + injection Hproc as Hctx' _;
       subst ctx';
       simpl;
       unfold cache_size;
-      apply rfc826_merge_size_bound.
+      apply rfc826_merge_bounded_size_bound.
     + injection Hproc as Hctx' _;
       subst ctx';
       simpl;
       unfold cache_size;
-      apply rfc826_merge_size_bound.
+      apply rfc826_merge_bounded_size_bound.
   - injection Hproc as Hctx' _. subst ctx'. simpl. unfold cache_size. lia.
-Qed.
-
-(* Bounded cache operations: Enforce MAX_CACHE_SIZE limit *)
-Definition rfc826_merge_bounded (cache : ARPCache) (ip : IPv4Address)
-                                 (mac : MACAddress) (ttl : N) (i_am_target : bool)
-                                 : ARPCache :=
-  let result := rfc826_merge cache ip mac ttl i_am_target in
-  if Nat.leb (length result) MAX_CACHE_SIZE
-  then result
-  else cache.
-
-Definition add_cache_entry_bounded (cache : ARPCache) (ip : IPv4Address)
-                                    (mac : MACAddress) (ttl : N) : ARPCache :=
-  if Nat.ltb (length cache) MAX_CACHE_SIZE
-  then add_cache_entry cache ip mac ttl
-  else cache.
-
-Lemma rfc826_merge_bounded_respects_limit : forall cache ip mac ttl target,
-  (length cache <= MAX_CACHE_SIZE)%nat ->
-  (length (rfc826_merge_bounded cache ip mac ttl target) <= MAX_CACHE_SIZE)%nat.
-Proof.
-  intros cache ip mac ttl target Hbound.
-  unfold rfc826_merge_bounded.
-  destruct (Nat.leb (length (rfc826_merge cache ip mac ttl target)) MAX_CACHE_SIZE) eqn:Hcheck.
-  - apply Nat.leb_le in Hcheck. assumption.
-  - assumption.
-Qed.
-
-Lemma add_cache_entry_bounded_respects_limit : forall cache ip mac ttl,
-  (length cache <= MAX_CACHE_SIZE)%nat ->
-  (length (add_cache_entry_bounded cache ip mac ttl) <= MAX_CACHE_SIZE)%nat.
-Proof.
-  intros cache ip mac ttl Hbound.
-  unfold add_cache_entry_bounded.
-  destruct (Nat.ltb (length cache) MAX_CACHE_SIZE) eqn:Hcheck.
-  - apply Nat.ltb_lt in Hcheck.
-    assert (Hadd := add_cache_entry_size_bound cache ip mac ttl).
-    lia.
-  - assumption.
 Qed.
 
 Theorem cache_bounded : forall ctx pkt ctx' resp,
@@ -4067,25 +4137,15 @@ Proof.
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
     + destruct (is_gratuitous_arp pkt) eqn:Hgrat.
       * injection Hproc as Hctx _; subst ctx'; simpl.
-        assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
-                                                   (arp_sha pkt) (arp_cache_ttl ctx) true).
-        lia.
+        apply rfc826_merge_bounded_respects_limit. lia.
       * injection Hproc as Hctx _; subst ctx'; simpl.
-        assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
-                                                   (arp_sha pkt) (arp_cache_ttl ctx) true).
-        lia.
+        apply rfc826_merge_bounded_respects_limit. lia.
     + injection Hproc as Hctx _; subst ctx'; simpl.
-      assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
-                                                 (arp_sha pkt) (arp_cache_ttl ctx) true).
-      lia.
+      apply rfc826_merge_bounded_respects_limit. lia.
     + injection Hproc as Hctx _; subst ctx'; simpl.
-      assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
-                                                 (arp_sha pkt) (arp_cache_ttl ctx) false).
-      lia.
+      apply rfc826_merge_bounded_respects_limit. lia.
     + injection Hproc as Hctx _; subst ctx'; simpl.
-      assert (Hmerge := rfc826_merge_size_bound (arp_cache ctx) (arp_spa pkt)
-                                                 (arp_sha pkt) (arp_cache_ttl ctx) false).
-      lia.
+      apply rfc826_merge_bounded_respects_limit. lia.
   - injection Hproc as Hctx _; subst ctx'; simpl. lia.
 Qed.
 
@@ -4108,8 +4168,34 @@ Proof.
   - assumption.
 Qed.
 
+Theorem cache_bounded_invariant_strong : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) <= MAX_CACHE_SIZE)%nat ->
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (length (arp_cache ctx') <= MAX_CACHE_SIZE)%nat.
+Proof.
+  intros ctx pkt ctx' resp Hbound Hproc.
+  destruct (Nat.eq_dec (length (arp_cache ctx)) MAX_CACHE_SIZE).
+  - unfold process_arp_packet in Hproc.
+    destruct (validate_arp_packet pkt (arp_my_mac ctx)) eqn:Hvalid.
+    + destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htarget;
+      destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+      * destruct (is_gratuitous_arp pkt);
+        injection Hproc as Hctx _; subst ctx'; simpl;
+        apply rfc826_merge_bounded_respects_limit; lia.
+      * injection Hproc as Hctx _; subst ctx'; simpl;
+        apply rfc826_merge_bounded_respects_limit; lia.
+      * injection Hproc as Hctx _; subst ctx'; simpl;
+        apply rfc826_merge_bounded_respects_limit; lia.
+      * injection Hproc as Hctx _; subst ctx'; simpl;
+        apply rfc826_merge_bounded_respects_limit; lia.
+    + injection Hproc as Hctx _; subst ctx'; simpl; lia.
+  - assert (Hlt: (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat) by lia.
+    eapply cache_bounded; eassumption.
+Qed.
+
 (* Property 5: Gratuitous ARP updates when we're target *)
 Theorem gratuitous_arp_updates_cache_when_target : forall ctx grat ctx',
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
   (forall e, In e ctx.(arp_cache) ->
    ip_eq (ace_ip e) grat.(arp_spa) = true -> ace_static e = false) ->
   validate_arp_packet grat ctx.(arp_my_mac) = true ->
@@ -4118,7 +4204,7 @@ Theorem gratuitous_arp_updates_cache_when_target : forall ctx grat ctx',
   process_arp_packet ctx grat = (ctx', None) ->
   lookup_cache ctx'.(arp_cache) grat.(arp_spa) = Some grat.(arp_sha).
 Proof.
-  intros ctx grat ctx' Hno_static Hvalid_pkt Hgrat Htarget Hproc.
+  intros ctx grat ctx' Hlen Hno_static Hvalid_pkt Hgrat Htarget Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
@@ -4128,9 +4214,9 @@ Proof.
       subst spa. apply ip_eq_refl. }
     rewrite Hgrat_bool in Hproc.
     injection Hproc. intros. subst ctx'. simpl.
-    apply rfc826_merge_target. assumption.
+    apply rfc826_merge_bounded_target; assumption.
   - injection Hproc. intros. subst ctx'. simpl.
-    apply rfc826_merge_target. assumption.
+    apply rfc826_merge_bounded_target; assumption.
 Qed.
 
 
@@ -4934,6 +5020,7 @@ Proof.
 Qed.
 
 Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
   validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   pkt.(arp_op) = ARP_OP_REQUEST ->
   ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
@@ -4951,7 +5038,7 @@ Theorem arp_request_reply_roundtrip_correctness : forall ctx pkt resp ctx',
     reply.(arp_tha) = pkt.(arp_sha) /\
     lookup_cache ctx'.(arp_cache) pkt.(arp_spa) = Some pkt.(arp_sha).
 Proof.
-  intros ctx pkt resp ctx' Hvalid_pkt Hop Htarget Hnot_grat Hno_static Hproc.
+  intros ctx pkt resp ctx' Hlen Hvalid_pkt Hop Htarget Hnot_grat Hno_static Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid_pkt in Hproc.
   rewrite Htarget in Hproc.
@@ -4967,11 +5054,12 @@ Proof.
   split. unfold make_arp_reply. simpl. reflexivity.
   split. unfold make_arp_reply. simpl. reflexivity.
   split. unfold make_arp_reply. simpl. reflexivity.
-  simpl. apply rfc826_merge_target. assumption.
+  simpl. apply rfc826_merge_bounded_target; assumption.
 Qed.
 
 (* RFC 826 algorithm completeness: proves reply generation, cache updates, and identity preservation *)
 Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
   validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   process_arp_packet ctx pkt = (ctx', resp) ->
   (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip) = true ->
@@ -4993,7 +5081,7 @@ Theorem rfc826_algorithm_is_complete : forall ctx pkt ctx' resp,
   (arp_my_mac ctx' = arp_my_mac ctx /\
    arp_my_ip ctx' = arp_my_ip ctx).
 Proof.
-  intros ctx pkt ctx' resp Hvalid_pkt Hproc.
+  intros ctx pkt ctx' resp Hlen Hvalid_pkt Hproc.
   repeat split.
   - intros Htarget Hreq.
     unfold process_arp_packet in Hproc.
@@ -5019,21 +5107,21 @@ Proof.
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
     + destruct (is_gratuitous_arp pkt) eqn:Hgrat.
       * injection Hproc as Hctx _; subst ctx'; simpl.
-        apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+        apply rfc826_merge_bounded_updates_or_adds; [assumption | reflexivity].
       * injection Hproc as Hctx _; subst ctx'; simpl.
-        apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+        apply rfc826_merge_bounded_updates_or_adds; [assumption | reflexivity].
     + injection Hproc as Hctx _; subst ctx'; simpl.
-      apply rfc826_merge_updates_or_adds with (target := true); reflexivity.
+      apply rfc826_merge_bounded_updates_or_adds; [assumption | reflexivity].
   - intros Hnot_target Hnot_in_cache.
     unfold process_arp_packet in Hproc.
     rewrite Hvalid_pkt in Hproc.
     rewrite Hnot_target in Hproc.
     destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hop.
     + injection Hproc as Hctx _. subst ctx'. simpl.
-      rewrite rfc826_merge_not_target by assumption.
+      rewrite rfc826_merge_bounded_not_target by assumption.
       assumption.
     + injection Hproc as Hctx _. subst ctx'. simpl.
-      rewrite rfc826_merge_not_target by assumption.
+      rewrite rfc826_merge_bounded_not_target by assumption.
       assumption.
   - unfold process_arp_packet in Hproc.
     rewrite Hvalid_pkt in Hproc.
@@ -5081,21 +5169,22 @@ Proof.
     + destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
       * destruct (is_gratuitous_arp pkt) eqn:Hgrat.
         { injection Hproc as Hctx Hresp; subst ctx'; simpl;
-          erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption]. }
+          erewrite rfc826_merge_bounded_preserves_other_ips; [exact Hlook | assumption]. }
         { injection Hproc as Hctx Hresp; subst ctx'; simpl;
-          erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption]. }
+          erewrite rfc826_merge_bounded_preserves_other_ips; [exact Hlook | assumption]. }
       * injection Hproc as Hctx Hresp; subst ctx'; simpl;
-        erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption].
+        erewrite rfc826_merge_bounded_preserves_other_ips; [exact Hlook | assumption].
     + destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
       * injection Hproc as Hctx Hresp; subst ctx'; simpl;
-        erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption].
+        erewrite rfc826_merge_bounded_preserves_other_ips; [exact Hlook | assumption].
       * injection Hproc as Hctx Hresp; subst ctx'; simpl;
-        erewrite rfc826_merge_preserves_other_ips; [exact Hlook | assumption].
+        erewrite rfc826_merge_bounded_preserves_other_ips; [exact Hlook | assumption].
   - injection Hproc as Hctx Hresp. subst. simpl. assumption.
 Qed.
 
 (* Stronger RFC 826 completeness: full behavioral specification with IFF semantics, cache isolation, and complete immutability *)
 Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
+  (length (arp_cache ctx) < MAX_CACHE_SIZE)%nat ->
   validate_arp_packet pkt ctx.(arp_my_mac) = true ->
   process_arp_packet ctx pkt = (ctx', resp) ->
   (* Part 1: Complete response characterization (excluding GARP) *)
@@ -5125,7 +5214,7 @@ Theorem rfc826_algorithm_complete_strong : forall ctx pkt ctx' resp,
   (arp_my_mac ctx' = arp_my_mac ctx) /\
   (arp_my_ip ctx' = arp_my_ip ctx).
 Proof.
-  intros ctx pkt ctx' resp Hvalid_pkt Hproc.
+  intros ctx pkt ctx' resp Hlen Hvalid_pkt Hproc.
   unfold process_arp_packet in Hproc.
   rewrite Hvalid_pkt in Hproc.
   destruct (ip_eq pkt.(arp_tpa) ctx.(arp_my_ip)) eqn:Htgt;
@@ -5140,11 +5229,11 @@ Proof.
       split.
       { intros [H | [H | H]]; try reflexivity; try congruence. }
       split.
-      { intros _. simpl. apply rfc826_merge_updates_or_adds with (target := true). reflexivity. }
+      { intros _. simpl. apply rfc826_merge_bounded_updates_or_adds; [lia | reflexivity]. }
       split.
       { intros H. congruence. }
       split.
-      { intros. simpl. apply rfc826_merge_preserves_other_ips. assumption. }
+      { intros. simpl. apply rfc826_merge_bounded_preserves_other_ips. assumption. }
       split; reflexivity.
     (* Case 1b: Normal REQUEST - send reply *)
     + injection Hproc as Hctx Hresp. subst ctx' resp.
@@ -5165,15 +5254,15 @@ Proof.
     split.
     { intros _.
       simpl.
-      apply rfc826_merge_updates_or_adds with (target := true).
-      reflexivity. }
+      apply rfc826_merge_bounded_updates_or_adds with (target := true).
+      assumption. reflexivity. }
     split.
     { intros H _.
       congruence. }
     split.
     { intros other_ip Hneq.
       simpl.
-      apply rfc826_merge_preserves_other_ips.
+      apply rfc826_merge_bounded_preserves_other_ips.
       assumption. }
     simpl. repeat split; reflexivity.
 
@@ -5190,15 +5279,15 @@ Proof.
     split.
     { intros _.
       simpl.
-      apply rfc826_merge_updates_or_adds with (target := true).
-      reflexivity. }
+      apply rfc826_merge_bounded_updates_or_adds with (target := true).
+      assumption. reflexivity. }
     split.
     { intros H _.
       congruence. }
     split.
     { intros other_ip Hneq.
       simpl.
-      apply rfc826_merge_preserves_other_ips.
+      apply rfc826_merge_bounded_preserves_other_ips.
       assumption. }
     simpl. repeat split; reflexivity.
 
@@ -5217,14 +5306,14 @@ Proof.
     split.
     { intros _ Hnot_in.
       simpl.
-      rewrite rfc826_merge_not_target by assumption.
+      rewrite rfc826_merge_bounded_not_target by assumption.
       assumption. }
     split.
     { intros other_ip Hneq.
       simpl.
       destruct (lookup_cache (arp_cache ctx) (arp_spa pkt)) eqn:Hlookup.
-      * apply rfc826_merge_preserves_other_ips. assumption.
-      * rewrite rfc826_merge_not_target by assumption.
+      * apply rfc826_merge_bounded_preserves_other_ips. assumption.
+      * rewrite rfc826_merge_bounded_not_target by assumption.
         reflexivity. }
     simpl. repeat split; reflexivity.
 
@@ -5243,14 +5332,14 @@ Proof.
     split.
     { intros _ Hnot_in.
       simpl.
-      rewrite rfc826_merge_not_target by assumption.
+      rewrite rfc826_merge_bounded_not_target by assumption.
       assumption. }
     split.
     { intros other_ip Hneq.
       simpl.
       destruct (lookup_cache (arp_cache ctx) (arp_spa pkt)) eqn:Hlookup.
-      * apply rfc826_merge_preserves_other_ips. assumption.
-      * rewrite rfc826_merge_not_target by assumption.
+      * apply rfc826_merge_bounded_preserves_other_ips. assumption.
+      * rewrite rfc826_merge_bounded_not_target by assumption.
         reflexivity. }
     simpl. repeat split; reflexivity.
 Qed.
