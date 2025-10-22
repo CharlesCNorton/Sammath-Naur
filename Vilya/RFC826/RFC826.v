@@ -2204,6 +2204,37 @@ Record NetworkInterface := {
   if_up : bool
 }.
 
+(* =============================================================================
+   Multi-Interface Architecture
+   ============================================================================= *)
+
+(* Interface identifier - unique ID for each network interface *)
+Definition InterfaceID := N.
+
+(* Per-interface ARP cache with interface binding *)
+Record InterfaceCacheEntry := {
+  ice_iface_id : InterfaceID;
+  ice_cache : ARPCache
+}.
+
+Definition InterfaceCacheTable := list InterfaceCacheEntry.
+
+(* Enhanced network interface with unique ID *)
+Record NetworkInterfaceEx := {
+  ifex_id : InterfaceID;
+  ifex_mac : MACAddress;
+  ifex_ip : IPv4Address;
+  ifex_mtu : N;
+  ifex_up : bool;
+  ifex_cache : ARPCache;          (* Per-interface ARP cache *)
+  ifex_cache_ttl : N;              (* Per-interface cache TTL *)
+  ifex_state_data : ARPStateData   (* Per-interface state (DAD, etc.) *)
+}.
+
+(* Interface table - list of all network interfaces *)
+Definition InterfaceTable := list NetworkInterfaceEx.
+
+(* Flood prevention structures (defined here for use in multi-interface context) *)
 Record FloodEntry := {
   fe_ip : IPv4Address;
   fe_last_request : N;
@@ -2211,6 +2242,369 @@ Record FloodEntry := {
 }.
 
 Definition FloodTable := list FloodEntry.
+
+(* Multi-interface context *)
+Record MultiInterfaceARPContext := {
+  mi_interfaces : InterfaceTable;
+  mi_global_flood_table : FloodTable;  (* Global flood prevention *)
+  mi_last_cleanup : N
+}.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
+   Interface Lookup and Selection
+   ============================================================================= *)
+
+(* Look up interface by ID *)
+Fixpoint lookup_interface (table : InterfaceTable) (id : InterfaceID)
+  : option NetworkInterfaceEx :=
+  match table with
+  | [] => None
+  | iface :: rest =>
+      if N.eqb iface.(ifex_id) id
+      then Some iface
+      else lookup_interface rest id
+  end.
+
+(* Look up interface by MAC address *)
+Fixpoint lookup_interface_by_mac (table : InterfaceTable) (mac : MACAddress)
+  : option NetworkInterfaceEx :=
+  match table with
+  | [] => None
+  | iface :: rest =>
+      if mac_eq iface.(ifex_mac) mac
+      then Some iface
+      else lookup_interface_by_mac rest mac
+  end.
+
+(* Look up interface by IP address *)
+Fixpoint lookup_interface_by_ip (table : InterfaceTable) (ip : IPv4Address)
+  : option NetworkInterfaceEx :=
+  match table with
+  | [] => None
+  | iface :: rest =>
+      if ip_eq iface.(ifex_ip) ip
+      then Some iface
+      else lookup_interface_by_ip rest ip
+  end.
+
+(* Check if IP belongs to any local interface *)
+Definition is_local_ip (table : InterfaceTable) (ip : IPv4Address) : bool :=
+  match lookup_interface_by_ip table ip with
+  | Some _ => true
+  | None => false
+  end.
+
+(* Select appropriate interface for sending ARP request to target IP *)
+(* Currently simple: use first UP interface, but extensible for routing logic *)
+Fixpoint select_interface_for_target (table : InterfaceTable) (target_ip : IPv4Address)
+  : option NetworkInterfaceEx :=
+  match table with
+  | [] => None
+  | iface :: rest =>
+      if iface.(ifex_up)
+      then Some iface  (* Simple: first UP interface *)
+      else select_interface_for_target rest target_ip
+  end.
+
+(* Get all UP interfaces *)
+Fixpoint get_up_interfaces (table : InterfaceTable) : InterfaceTable :=
+  filter (fun iface => iface.(ifex_up)) table.
+
+(* Count interfaces *)
+Definition count_interfaces (table : InterfaceTable) : nat := length table.
+
+(* Count UP interfaces *)
+Definition count_up_interfaces (table : InterfaceTable) : nat :=
+  length (get_up_interfaces table).
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
+   Interface Update Operations
+   ============================================================================= *)
+
+(* Update interface in table *)
+Fixpoint update_interface (table : InterfaceTable) (updated : NetworkInterfaceEx)
+  : InterfaceTable :=
+  match table with
+  | [] => [updated]  (* Add if not found *)
+  | iface :: rest =>
+      if N.eqb iface.(ifex_id) updated.(ifex_id)
+      then updated :: rest
+      else iface :: update_interface rest updated
+  end.
+
+(* Update interface cache *)
+Definition update_interface_cache (iface : NetworkInterfaceEx) (cache : ARPCache)
+  : NetworkInterfaceEx :=
+  {| ifex_id := iface.(ifex_id);
+     ifex_mac := iface.(ifex_mac);
+     ifex_ip := iface.(ifex_ip);
+     ifex_mtu := iface.(ifex_mtu);
+     ifex_up := iface.(ifex_up);
+     ifex_cache := cache;
+     ifex_cache_ttl := iface.(ifex_cache_ttl);
+     ifex_state_data := iface.(ifex_state_data) |}.
+
+(* Update interface state data *)
+Definition update_interface_state (iface : NetworkInterfaceEx) (state : ARPStateData)
+  : NetworkInterfaceEx :=
+  {| ifex_id := iface.(ifex_id);
+     ifex_mac := iface.(ifex_mac);
+     ifex_ip := iface.(ifex_ip);
+     ifex_mtu := iface.(ifex_mtu);
+     ifex_up := iface.(ifex_up);
+     ifex_cache := iface.(ifex_cache);
+     ifex_cache_ttl := iface.(ifex_cache_ttl);
+     ifex_state_data := state |}.
+
+(* Set interface UP/DOWN *)
+Definition set_interface_up (iface : NetworkInterfaceEx) (up : bool)
+  : NetworkInterfaceEx :=
+  {| ifex_id := iface.(ifex_id);
+     ifex_mac := iface.(ifex_mac);
+     ifex_ip := iface.(ifex_ip);
+     ifex_mtu := iface.(ifex_mtu);
+     ifex_up := up;
+     ifex_cache := iface.(ifex_cache);
+     ifex_cache_ttl := iface.(ifex_cache_ttl);
+     ifex_state_data := iface.(ifex_state_data) |}.
+
+(* Remove interface from table *)
+Fixpoint remove_interface (table : InterfaceTable) (id : InterfaceID)
+  : InterfaceTable :=
+  match table with
+  | [] => []
+  | iface :: rest =>
+      if N.eqb iface.(ifex_id) id
+      then rest
+      else iface :: remove_interface rest id
+  end.
+
+(* Add new interface *)
+Definition add_interface (table : InterfaceTable) (new_iface : NetworkInterfaceEx)
+  : InterfaceTable :=
+  new_iface :: table.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
+   Multi-Interface Packet Processing
+   ============================================================================= *)
+
+(* Process ARP packet on specific interface *)
+Definition process_arp_packet_on_interface
+  (iface : NetworkInterfaceEx)
+  (packet : ARPEthernetIPv4)
+  : NetworkInterfaceEx * option ARPEthernetIPv4 :=
+
+  if validate_arp_packet packet iface.(ifex_mac)
+  then
+    let i_am_target := ip_eq packet.(arp_tpa) iface.(ifex_ip) in
+
+    let cache' := rfc826_merge iface.(ifex_cache)
+                               packet.(arp_spa)
+                               packet.(arp_sha)
+                               iface.(ifex_cache_ttl)
+                               i_am_target in
+
+    let iface' := update_interface_cache iface cache' in
+
+    if i_am_target
+    then
+      if N.eqb packet.(arp_op) ARP_OP_REQUEST
+      then
+        if is_gratuitous_arp packet
+        then (iface', None)
+        else
+          let reply := make_arp_reply iface.(ifex_mac) iface.(ifex_ip)
+                                      packet.(arp_sha) packet.(arp_spa) in
+          (iface', Some reply)
+      else
+        (iface', None)
+    else
+      (iface', None)
+  else
+    (iface, None).
+
+(* Process incoming ARP packet in multi-interface context *)
+(* Determines receiving interface by matching target IP or uses all interfaces *)
+Definition process_arp_packet_multi
+  (ctx : MultiInterfaceARPContext)
+  (packet : ARPEthernetIPv4)
+  : MultiInterfaceARPContext * option (InterfaceID * ARPEthernetIPv4) :=
+
+  match lookup_interface_by_ip ctx.(mi_interfaces) packet.(arp_tpa) with
+  | Some iface =>
+      (* Packet is for one of our interfaces *)
+      let (iface', resp) := process_arp_packet_on_interface iface packet in
+      let ctx' := {| mi_interfaces := update_interface ctx.(mi_interfaces) iface';
+                     mi_global_flood_table := ctx.(mi_global_flood_table);
+                     mi_last_cleanup := ctx.(mi_last_cleanup) |} in
+      match resp with
+      | Some reply => (ctx', Some (iface.(ifex_id), reply))
+      | None => (ctx', None)
+      end
+  | None =>
+      (* Not for us, update cache on all UP interfaces (RFC 826 opportunistic) *)
+      let update_all_caches := fun (ifaces : InterfaceTable) =>
+        map (fun iface =>
+          if iface.(ifex_up)
+          then
+            let cache' := rfc826_merge iface.(ifex_cache)
+                                       packet.(arp_spa)
+                                       packet.(arp_sha)
+                                       iface.(ifex_cache_ttl)
+                                       false in
+            update_interface_cache iface cache'
+          else iface) ifaces in
+      let ctx' := {| mi_interfaces := update_all_caches ctx.(mi_interfaces);
+                     mi_global_flood_table := ctx.(mi_global_flood_table);
+                     mi_last_cleanup := ctx.(mi_last_cleanup) |} in
+      (ctx', None)
+  end.
+
+(* Send ARP request from specific interface *)
+Definition send_arp_request_from_interface
+  (iface : NetworkInterfaceEx)
+  (target_ip : IPv4Address)
+  : ARPEthernetIPv4 :=
+  make_arp_request iface.(ifex_mac) iface.(ifex_ip) target_ip.
+
+(* Helper: check if target IP is in any interface cache *)
+Fixpoint check_interface_caches (ifaces : InterfaceTable) (target_ip : IPv4Address)
+  : option (InterfaceID * MACAddress) :=
+  match ifaces with
+  | [] => None
+  | iface :: rest =>
+      match lookup_cache iface.(ifex_cache) target_ip with
+      | Some mac => Some (iface.(ifex_id), mac)
+      | None => check_interface_caches rest target_ip
+      end
+  end.
+
+(* Resolve address using multi-interface context *)
+Definition resolve_address_multi
+  (ctx : MultiInterfaceARPContext)
+  (target_ip : IPv4Address)
+  : option (InterfaceID * MACAddress) * option (InterfaceID * ARPEthernetIPv4) :=
+
+  match check_interface_caches ctx.(mi_interfaces) target_ip with
+  | Some result => (Some result, None)  (* Cache hit *)
+  | None =>
+      (* Cache miss: select interface and send request *)
+      match select_interface_for_target ctx.(mi_interfaces) target_ip with
+      | Some iface =>
+          let request := send_arp_request_from_interface iface target_ip in
+          (None, Some (iface.(ifex_id), request))
+      | None => (None, None)  (* No UP interface available *)
+      end
+  end.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
+   Multi-Interface Management API
+   ============================================================================= *)
+
+(* Create new interface *)
+Definition create_interface
+  (id : InterfaceID)
+  (mac : MACAddress)
+  (ip : IPv4Address)
+  (mtu : N)
+  : NetworkInterfaceEx :=
+  {| ifex_id := id;
+     ifex_mac := mac;
+     ifex_ip := ip;
+     ifex_mtu := mtu;
+     ifex_up := false;  (* Start DOWN *)
+     ifex_cache := [];
+     ifex_cache_ttl := DEFAULT_ARP_TTL;
+     ifex_state_data := StateIdle |}.
+
+(* Bring interface UP *)
+Definition bring_interface_up
+  (ctx : MultiInterfaceARPContext)
+  (id : InterfaceID)
+  : MultiInterfaceARPContext :=
+  match lookup_interface ctx.(mi_interfaces) id with
+  | Some iface =>
+      let iface' := set_interface_up iface true in
+      {| mi_interfaces := update_interface ctx.(mi_interfaces) iface';
+         mi_global_flood_table := ctx.(mi_global_flood_table);
+         mi_last_cleanup := ctx.(mi_last_cleanup) |}
+  | None => ctx
+  end.
+
+(* Bring interface DOWN *)
+Definition bring_interface_down
+  (ctx : MultiInterfaceARPContext)
+  (id : InterfaceID)
+  : MultiInterfaceARPContext :=
+  match lookup_interface ctx.(mi_interfaces) id with
+  | Some iface =>
+      let iface' := set_interface_up iface false in
+      {| mi_interfaces := update_interface ctx.(mi_interfaces) iface';
+         mi_global_flood_table := ctx.(mi_global_flood_table);
+         mi_last_cleanup := ctx.(mi_last_cleanup) |}
+  | None => ctx
+  end.
+
+(* Flush cache on specific interface *)
+Definition flush_interface_cache
+  (ctx : MultiInterfaceARPContext)
+  (id : InterfaceID)
+  : MultiInterfaceARPContext :=
+  match lookup_interface ctx.(mi_interfaces) id with
+  | Some iface =>
+      let iface' := update_interface_cache iface [] in
+      {| mi_interfaces := update_interface ctx.(mi_interfaces) iface';
+         mi_global_flood_table := ctx.(mi_global_flood_table);
+         mi_last_cleanup := ctx.(mi_last_cleanup) |}
+  | None => ctx
+  end.
+
+(* Flush cache on all interfaces *)
+Definition flush_all_interface_caches
+  (ctx : MultiInterfaceARPContext)
+  : MultiInterfaceARPContext :=
+  let flush_all := map (fun iface => update_interface_cache iface [])
+                       ctx.(mi_interfaces) in
+  {| mi_interfaces := flush_all;
+     mi_global_flood_table := ctx.(mi_global_flood_table);
+     mi_last_cleanup := ctx.(mi_last_cleanup) |}.
+
+(* Add interface to context *)
+Definition add_interface_to_context
+  (ctx : MultiInterfaceARPContext)
+  (iface : NetworkInterfaceEx)
+  : MultiInterfaceARPContext :=
+  {| mi_interfaces := add_interface ctx.(mi_interfaces) iface;
+     mi_global_flood_table := ctx.(mi_global_flood_table);
+     mi_last_cleanup := ctx.(mi_last_cleanup) |}.
+
+(* Remove interface from context *)
+Definition remove_interface_from_context
+  (ctx : MultiInterfaceARPContext)
+  (id : InterfaceID)
+  : MultiInterfaceARPContext :=
+  {| mi_interfaces := remove_interface ctx.(mi_interfaces) id;
+     mi_global_flood_table := ctx.(mi_global_flood_table);
+     mi_last_cleanup := ctx.(mi_last_cleanup) |}.
+
+(* Note: age_all_interface_caches is defined later after age_cache *)
+
+(* Get total cache entries across all interfaces *)
+Definition total_cache_entries (ctx : MultiInterfaceARPContext) : nat :=
+  fold_left (fun (acc : nat) iface => (acc + length iface.(ifex_cache))%nat)
+            ctx.(mi_interfaces) 0%nat.
+
+(* Note: Conversion functions (single_to_multi, enhanced_to_multi) defined later after EnhancedARPContext *)
+
+(* Compilation checkpoint *)
 
 Record EnhancedARPContext := {
   earp_my_mac : MACAddress;
@@ -2273,6 +2667,36 @@ Definition reset_flood_table (ctx : EnhancedARPContext) : EnhancedARPContext :=
      earp_iface := ctx.(earp_iface);
      earp_flood_table := [];
      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+
+(* Conversion: Single interface context to multi-interface *)
+Definition single_to_multi (ctx : ARPContext) (id : InterfaceID)
+  : MultiInterfaceARPContext :=
+  let iface := {| ifex_id := id;
+                  ifex_mac := ctx.(arp_my_mac);
+                  ifex_ip := ctx.(arp_my_ip);
+                  ifex_mtu := 1500;  (* Default Ethernet MTU *)
+                  ifex_up := true;
+                  ifex_cache := ctx.(arp_cache);
+                  ifex_cache_ttl := ctx.(arp_cache_ttl);
+                  ifex_state_data := StateIdle |} in
+  {| mi_interfaces := [iface];
+     mi_global_flood_table := [];
+     mi_last_cleanup := 0 |}.
+
+(* Conversion: Enhanced single interface to multi-interface *)
+Definition enhanced_to_multi (ctx : EnhancedARPContext) (id : InterfaceID)
+  : MultiInterfaceARPContext :=
+  let iface := {| ifex_id := id;
+                  ifex_mac := ctx.(earp_my_mac);
+                  ifex_ip := ctx.(earp_my_ip);
+                  ifex_mtu := ctx.(earp_iface).(if_mtu);
+                  ifex_up := ctx.(earp_iface).(if_up);
+                  ifex_cache := ctx.(earp_cache);
+                  ifex_cache_ttl := ctx.(earp_cache_ttl);
+                  ifex_state_data := ctx.(earp_state_data) |} in
+  {| mi_interfaces := [iface];
+     mi_global_flood_table := ctx.(earp_flood_table);
+     mi_last_cleanup := ctx.(earp_last_cache_cleanup) |}.
 
 (* Compilation checkpoint *)
 
@@ -2852,6 +3276,20 @@ Proof.
     + assumption.
   - simpl. reflexivity.
 Qed.
+
+(* Multi-interface cache aging (defined here after age_cache) *)
+Definition age_all_interface_caches
+  (ctx : MultiInterfaceARPContext)
+  (elapsed : N)
+  : MultiInterfaceARPContext :=
+  let age_all := map (fun iface =>
+    update_interface_cache iface (age_cache iface.(ifex_cache) elapsed))
+    ctx.(mi_interfaces) in
+  {| mi_interfaces := age_all;
+     mi_global_flood_table := ctx.(mi_global_flood_table);
+     mi_last_cleanup := ctx.(mi_last_cleanup) + elapsed |}.
+
+(* Compilation checkpoint *)
 
 Theorem flood_table_bounded_requests : forall table ip t,
   snd (update_flood_table table ip t) = true ->
@@ -5429,7 +5867,226 @@ Extraction "arp.ml"
   flush_enhanced_cache
   flush_enhanced_dynamic
   disable_dad
-  reset_flood_table.
+  reset_flood_table
+
+  (* Multi-Interface Support *)
+  lookup_interface
+  lookup_interface_by_mac
+  lookup_interface_by_ip
+  is_local_ip
+  select_interface_for_target
+  get_up_interfaces
+  count_interfaces
+  count_up_interfaces
+  update_interface
+  update_interface_cache
+  update_interface_state
+  set_interface_up
+  remove_interface
+  add_interface
+  process_arp_packet_on_interface
+  process_arp_packet_multi
+  send_arp_request_from_interface
+  resolve_address_multi
+  create_interface
+  bring_interface_up
+  bring_interface_down
+  flush_interface_cache
+  flush_all_interface_caches
+  add_interface_to_context
+  remove_interface_from_context
+  age_all_interface_caches
+  total_cache_entries
+  single_to_multi
+  enhanced_to_multi.
+
+(* =============================================================================
+   Multi-Interface Correctness Properties
+   ============================================================================= *)
+
+(* Lookup by ID is deterministic *)
+Lemma lookup_interface_deterministic : forall table id iface1 iface2,
+  lookup_interface table id = Some iface1 ->
+  lookup_interface table id = Some iface2 ->
+  iface1 = iface2.
+Proof.
+  intros table id iface1 iface2 H1 H2.
+  rewrite H1 in H2.
+  injection H2 as H.
+  assumption.
+Qed.
+
+(* Interface uniqueness: IDs are unique in table *)
+Fixpoint interface_ids_unique (table : InterfaceTable) : Prop :=
+  match table with
+  | [] => True
+  | iface :: rest =>
+      (forall iface', In iface' rest -> iface.(ifex_id) <> iface'.(ifex_id)) /\
+      interface_ids_unique rest
+  end.
+
+(* Lookup preserves interface existence *)
+Lemma lookup_interface_in : forall table id iface,
+  lookup_interface table id = Some iface ->
+  In iface table.
+Proof.
+  intros table id iface H.
+  induction table as [|i rest IH].
+  - discriminate.
+  - simpl in H.
+    destruct (N.eqb (ifex_id i) id) eqn:Heq.
+    + injection H as H'. subst. left. reflexivity.
+    + right. apply IH. assumption.
+Qed.
+
+(* Update preserves table length for existing interfaces *)
+Lemma update_interface_length_le : forall table iface,
+  In iface table ->
+  length (update_interface table iface) = length table.
+Proof.
+  intros table iface Hin.
+  induction table as [|i rest IH].
+  - inversion Hin.
+  - simpl.
+    destruct (N.eqb (ifex_id i) (ifex_id iface)) eqn:Heq.
+    + simpl. reflexivity.
+    + simpl. f_equal.
+      destruct Hin as [Heq_iface | Hin_rest].
+      * subst. simpl in Heq.
+        rewrite N.eqb_refl in Heq. discriminate.
+      * apply IH. assumption.
+Qed.
+
+(* Remove reduces table length *)
+Lemma remove_interface_length_le : forall table id,
+  (length (remove_interface table id) <= length table)%nat.
+Proof.
+  intros table id.
+  induction table as [|i rest IH].
+  - simpl. lia.
+  - simpl.
+    destruct (N.eqb (ifex_id i) id) eqn:Heq.
+    + simpl. lia.
+    + simpl. lia.
+Qed.
+
+(* Process on interface preserves interface ID *)
+Theorem process_on_interface_preserves_id : forall iface pkt iface' resp,
+  process_arp_packet_on_interface iface pkt = (iface', resp) ->
+  ifex_id iface' = ifex_id iface.
+Proof.
+  intros iface pkt iface' resp Hproc.
+  unfold process_arp_packet_on_interface in Hproc.
+  destruct (validate_arp_packet pkt (ifex_mac iface)) eqn:Hvalid.
+  - destruct (ip_eq (arp_tpa pkt) (ifex_ip iface)) eqn:Htarget;
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+    + destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+      * injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. reflexivity.
+      * injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. reflexivity.
+    + injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. reflexivity.
+    + injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. reflexivity.
+    + injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. reflexivity.
+  - injection Hproc as Hi Hr. subst. reflexivity.
+Qed.
+
+(* Process on interface preserves MAC and IP *)
+Theorem process_on_interface_preserves_identity : forall iface pkt iface' resp,
+  process_arp_packet_on_interface iface pkt = (iface', resp) ->
+  ifex_mac iface' = ifex_mac iface /\
+  ifex_ip iface' = ifex_ip iface.
+Proof.
+  intros iface pkt iface' resp Hproc.
+  unfold process_arp_packet_on_interface in Hproc.
+  destruct (validate_arp_packet pkt (ifex_mac iface)) eqn:Hvalid.
+  - destruct (ip_eq (arp_tpa pkt) (ifex_ip iface)) eqn:Htarget;
+    destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+    + destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+      * injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. split; reflexivity.
+      * injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. split; reflexivity.
+    + injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. split; reflexivity.
+    + injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. split; reflexivity.
+    + injection Hproc as Hi Hr. subst. unfold update_interface_cache. simpl. split; reflexivity.
+  - injection Hproc as Hi Hr. subst. split; reflexivity.
+Qed.
+
+(* Multi-interface processing is deterministic *)
+Theorem process_multi_deterministic : forall ctx pkt ctx1 resp1 ctx2 resp2,
+  process_arp_packet_multi ctx pkt = (ctx1, resp1) ->
+  process_arp_packet_multi ctx pkt = (ctx2, resp2) ->
+  ctx1 = ctx2 /\ resp1 = resp2.
+Proof.
+  intros ctx pkt ctx1 resp1 ctx2 resp2 H1 H2.
+  rewrite H1 in H2.
+  injection H2 as Hctx Hresp.
+  split; assumption.
+Qed.
+
+(* Bringing interface UP preserves context structure *)
+Theorem bring_up_preserves_flood_table : forall ctx id,
+  mi_global_flood_table (bring_interface_up ctx id) = mi_global_flood_table ctx.
+Proof.
+  intros ctx id.
+  unfold bring_interface_up.
+  destruct (lookup_interface (mi_interfaces ctx) id) eqn:Hlookup.
+  - simpl. reflexivity.
+  - simpl. reflexivity.
+Qed.
+
+(* Bringing interface DOWN preserves context structure *)
+Theorem bring_down_preserves_flood_table : forall ctx id,
+  mi_global_flood_table (bring_interface_down ctx id) = mi_global_flood_table ctx.
+Proof.
+  intros ctx id.
+  unfold bring_interface_down.
+  destruct (lookup_interface (mi_interfaces ctx) id) eqn:Hlookup.
+  - simpl. reflexivity.
+  - simpl. reflexivity.
+Qed.
+
+(* Cache isolation: flushing preserves flood table *)
+Theorem flush_cache_preserves_flood_table : forall ctx id,
+  mi_global_flood_table (flush_interface_cache ctx id) = mi_global_flood_table ctx.
+Proof.
+  intros ctx id.
+  unfold flush_interface_cache.
+  destruct (lookup_interface (mi_interfaces ctx) id) eqn:Hlookup.
+  - simpl. reflexivity.
+  - simpl. reflexivity.
+Qed.
+
+(* Total cache entries is sum of individual caches *)
+Lemma total_cache_entries_correct : forall ctx,
+  total_cache_entries ctx =
+  fold_left (fun acc iface => acc + length (ifex_cache iface))%nat
+            ctx.(mi_interfaces) 0%nat.
+Proof.
+  intros ctx.
+  unfold total_cache_entries.
+  reflexivity.
+Qed.
+
+(* Age all preserves interface count *)
+Theorem age_all_preserves_interface_count : forall ctx elapsed,
+  length (age_all_interface_caches ctx elapsed).(mi_interfaces) =
+  length ctx.(mi_interfaces).
+Proof.
+  intros ctx elapsed.
+  unfold age_all_interface_caches.
+  simpl.
+  apply map_length.
+Qed.
+
+(* Single to multi conversion creates single interface *)
+Theorem single_to_multi_has_one_interface : forall ctx id,
+  length (mi_interfaces (single_to_multi ctx id)) = 1%nat.
+Proof.
+  intros ctx id.
+  unfold single_to_multi.
+  simpl.
+  reflexivity.
+Qed.
+
+(* Compilation checkpoint *)
 
 Definition compilation_successful : bool := true.
 Compute compilation_successful.
