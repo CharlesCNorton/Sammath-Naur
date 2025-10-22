@@ -1,5 +1,14 @@
 
+type unit0 =
+| Tt
+
 val negb : bool -> bool
+
+type nat =
+| O
+| S of nat
+
+val length : 'a1 list -> nat
 
 val app : 'a1 list -> 'a1 list -> 'a1 list
 
@@ -11,6 +20,8 @@ type comparison =
 type sumbool =
 | Left
 | Right
+
+val add : nat -> nat -> nat
 
 val bool_dec : bool -> bool -> sumbool
 
@@ -192,6 +203,17 @@ val merge_cache_entry : aRPCache -> iPv4Address -> mACAddress -> n -> aRPCache
 val rfc826_merge :
   aRPCache -> iPv4Address -> mACAddress -> n -> bool -> aRPCache
 
+val add_static_entry : aRPCache -> iPv4Address -> mACAddress -> aRPCache
+
+val is_static_cache_entry : aRPCache -> iPv4Address -> bool
+
+val list_static_entries : aRPCache -> aRPCacheEntry list
+
+val count_static_entries : aRPCache -> nat
+
+val would_conflict_static_entry :
+  aRPCache -> iPv4Address -> mACAddress -> bool
+
 val make_arp_request :
   mACAddress -> iPv4Address -> iPv4Address -> aRPEthernetIPv4
 
@@ -216,7 +238,31 @@ val process_generic_arp : aRPPacket -> aRPEthernetIPv4 option
 
 val convert_to_generic : aRPEthernetIPv4 -> aRPPacket
 
+type aRPError =
+| ErrInvalidOpcode of word16
+| ErrBroadcastSender
+| ErrMulticastSender
+| ErrZeroSPANonRequest
+| ErrReplyWrongTHA of mACAddress * mACAddress
+| ErrCacheFull of nat
+| ErrFloodLimitExceeded of iPv4Address * n
+| ErrStaticEntryConflict of iPv4Address
+| ErrDuplicateIP of iPv4Address * mACAddress
+| ErrInvalidPacketLength of nat
+| ErrUnsupportedHardware of word16
+| ErrUnsupportedProtocol of word16
+
+type 'a aRPResult =
+| ARPSuccess of 'a
+| ARPFailure of aRPError
+
+val add_static_entry_safe :
+  aRPCache -> iPv4Address -> mACAddress -> aRPCache aRPResult
+
 val validate_arp_packet : aRPEthernetIPv4 -> mACAddress -> bool
+
+val validate_arp_packet_detailed :
+  aRPEthernetIPv4 -> mACAddress -> unit0 aRPResult
 
 type validatedARPPacket =
   aRPEthernetIPv4
@@ -225,10 +271,41 @@ type validatedARPPacket =
 val mk_validated_arp :
   mACAddress -> aRPEthernetIPv4 -> validatedARPPacket option
 
+val dEFAULT_ARP_TTL : n
+
 type aRPContext = { arp_my_mac : mACAddress; arp_my_ip : iPv4Address;
                     arp_cache : aRPCache; arp_cache_ttl : n }
 
+type gratuitousARPType =
+| NotGratuitous
+| GratuitousRequest
+| GratuitousReply
+
 val is_gratuitous_arp : aRPEthernetIPv4 -> bool
+
+val classify_gratuitous_arp : aRPEthernetIPv4 -> gratuitousARPType
+
+val is_gratuitous_request : aRPEthernetIPv4 -> bool
+
+val is_gratuitous_reply : aRPEthernetIPv4 -> bool
+
+val flush_cache : aRPCache
+
+val flush_dynamic_entries : aRPCache -> aRPCache
+
+val update_cache_ttl : aRPCache -> n -> aRPCache
+
+val set_context_ttl : aRPContext -> n -> aRPContext
+
+val flush_context_cache : aRPContext -> aRPContext
+
+val flush_context_dynamic : aRPContext -> aRPContext
+
+val get_cache_size : aRPCache -> nat
+
+val get_static_count : aRPCache -> nat
+
+val get_dynamic_count : aRPCache -> nat
 
 val process_arp_packet :
   aRPContext -> aRPEthernetIPv4 -> aRPContext*aRPEthernetIPv4 option
@@ -329,10 +406,98 @@ type aRPStateData =
 type networkInterface = { if_mac : mACAddress; if_ip : iPv4Address;
                           if_mtu : n; if_up : bool }
 
+type interfaceID = n
+
+type networkInterfaceEx = { ifex_id : interfaceID; ifex_mac : mACAddress;
+                            ifex_ip : iPv4Address; ifex_mtu : n;
+                            ifex_up : bool; ifex_cache : aRPCache;
+                            ifex_cache_ttl : n; ifex_state_data : aRPStateData }
+
+type interfaceTable = networkInterfaceEx list
+
 type floodEntry = { fe_ip : iPv4Address; fe_last_request : n;
                     fe_request_count : n }
 
 type floodTable = floodEntry list
+
+type multiInterfaceARPContext = { mi_interfaces : interfaceTable;
+                                  mi_global_flood_table : floodTable;
+                                  mi_last_cleanup : n }
+
+val lookup_interface :
+  interfaceTable -> interfaceID -> networkInterfaceEx option
+
+val lookup_interface_by_mac :
+  interfaceTable -> mACAddress -> networkInterfaceEx option
+
+val lookup_interface_by_ip :
+  interfaceTable -> iPv4Address -> networkInterfaceEx option
+
+val is_local_ip : interfaceTable -> iPv4Address -> bool
+
+val select_interface_for_target :
+  interfaceTable -> iPv4Address -> networkInterfaceEx option
+
+val get_up_interfaces : interfaceTable -> interfaceTable
+
+val count_interfaces : interfaceTable -> nat
+
+val count_up_interfaces : interfaceTable -> nat
+
+val update_interface : interfaceTable -> networkInterfaceEx -> interfaceTable
+
+val update_interface_cache :
+  networkInterfaceEx -> aRPCache -> networkInterfaceEx
+
+val update_interface_state :
+  networkInterfaceEx -> aRPStateData -> networkInterfaceEx
+
+val set_interface_up : networkInterfaceEx -> bool -> networkInterfaceEx
+
+val remove_interface : interfaceTable -> interfaceID -> interfaceTable
+
+val add_interface : interfaceTable -> networkInterfaceEx -> interfaceTable
+
+val process_arp_packet_on_interface :
+  networkInterfaceEx -> aRPEthernetIPv4 -> networkInterfaceEx*aRPEthernetIPv4
+  option
+
+val process_arp_packet_multi :
+  multiInterfaceARPContext -> aRPEthernetIPv4 ->
+  multiInterfaceARPContext*(interfaceID*aRPEthernetIPv4) option
+
+val send_arp_request_from_interface :
+  networkInterfaceEx -> iPv4Address -> aRPEthernetIPv4
+
+val check_interface_caches :
+  interfaceTable -> iPv4Address -> (interfaceID*mACAddress) option
+
+val resolve_address_multi :
+  multiInterfaceARPContext -> iPv4Address -> (interfaceID*mACAddress)
+  option*(interfaceID*aRPEthernetIPv4) option
+
+val create_interface :
+  interfaceID -> mACAddress -> iPv4Address -> n -> networkInterfaceEx
+
+val bring_interface_up :
+  multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext
+
+val bring_interface_down :
+  multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext
+
+val flush_interface_cache :
+  multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext
+
+val flush_all_interface_caches :
+  multiInterfaceARPContext -> multiInterfaceARPContext
+
+val add_interface_to_context :
+  multiInterfaceARPContext -> networkInterfaceEx -> multiInterfaceARPContext
+
+val remove_interface_from_context :
+  multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext
+
+val total_cache_entries : multiInterfaceARPContext -> nat
 
 type enhancedARPContext = { earp_my_mac : mACAddress;
                             earp_my_ip : iPv4Address; earp_cache : aRPCache;
@@ -341,6 +506,21 @@ type enhancedARPContext = { earp_my_mac : mACAddress;
                             earp_iface : networkInterface;
                             earp_flood_table : floodTable;
                             earp_last_cache_cleanup : n }
+
+val set_enhanced_context_ttl : enhancedARPContext -> n -> enhancedARPContext
+
+val flush_enhanced_cache : enhancedARPContext -> enhancedARPContext
+
+val flush_enhanced_dynamic : enhancedARPContext -> enhancedARPContext
+
+val disable_dad : enhancedARPContext -> enhancedARPContext
+
+val reset_flood_table : enhancedARPContext -> enhancedARPContext
+
+val single_to_multi : aRPContext -> interfaceID -> multiInterfaceARPContext
+
+val enhanced_to_multi :
+  enhancedARPContext -> interfaceID -> multiInterfaceARPContext
 
 val aRP_FLOOD_WINDOW : n
 
@@ -399,6 +579,9 @@ val send_arp_request_with_flood_check :
   enhancedARPContext*aRPEthernetIPv4 option
 
 val age_cache : aRPCache -> n -> aRPCache
+
+val age_all_interface_caches :
+  multiInterfaceARPContext -> n -> multiInterfaceARPContext
 
 val process_arp_packet_enhanced :
   enhancedARPContext -> aRPEthernetIPv4 -> n -> n ->

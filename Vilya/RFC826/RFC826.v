@@ -425,6 +425,16 @@ Definition list_static_entries (cache : ARPCache) : list ARPCacheEntry :=
 Definition count_static_entries (cache : ARPCache) : nat :=
   length (list_static_entries cache).
 
+(* Check if adding a static entry would conflict with an existing static entry *)
+Definition would_conflict_static_entry (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress) : bool :=
+  match lookup_cache cache ip with
+  | None => false
+  | Some existing_mac =>
+      if mac_eq existing_mac mac
+      then false
+      else is_static_cache_entry cache ip
+  end.
+
 Theorem add_static_entry_creates_static : forall cache ip mac,
   is_static_cache_entry (add_static_entry cache ip mac) ip = true.
 Proof.
@@ -830,6 +840,99 @@ Definition bind_result {A B} (r : ARPResult A) (f : A -> ARPResult B) : ARPResul
   | ARPSuccess a => f a
   | ARPFailure e => ARPFailure e
   end.
+
+(* Safe static entry addition that detects conflicts *)
+Definition add_static_entry_safe (cache : ARPCache) (ip : IPv4Address) (mac : MACAddress)
+  : ARPResult ARPCache :=
+  if would_conflict_static_entry cache ip mac
+  then ARPFailure (ErrStaticEntryConflict ip)
+  else ARPSuccess (add_static_entry cache ip mac).
+
+(* Lemma: would_conflict returns false when no static entry exists *)
+Lemma would_conflict_false_when_no_static : forall cache ip mac,
+  is_static_cache_entry cache ip = false ->
+  would_conflict_static_entry cache ip mac = false.
+Proof.
+  intros cache ip mac Hnot_static.
+  unfold would_conflict_static_entry.
+  destruct (lookup_cache cache ip) eqn:Hlookup.
+  - destruct (mac_eq m mac) eqn:Hmac_eq.
+    + reflexivity.
+    + rewrite Hnot_static. reflexivity.
+  - reflexivity.
+Qed.
+
+(* Lemma: would_conflict returns false when MAC matches *)
+Lemma would_conflict_false_when_same_mac : forall cache ip mac,
+  lookup_cache cache ip = Some mac ->
+  would_conflict_static_entry cache ip mac = false.
+Proof.
+  intros cache ip mac Hlookup.
+  unfold would_conflict_static_entry.
+  rewrite Hlookup.
+  assert (Heq: mac_eq mac mac = true).
+  { unfold mac_eq. destruct mac as [bytes valid].
+    simpl. destruct (list_eq_dec N.eq_dec bytes bytes).
+    - simpl. reflexivity.
+    - simpl. contradiction. }
+  rewrite Heq. reflexivity.
+Qed.
+
+(* Lemma: would_conflict returns true when different static MAC exists *)
+Lemma would_conflict_true_when_different_static : forall cache ip mac1 mac2,
+  lookup_cache cache ip = Some mac1 ->
+  is_static_cache_entry cache ip = true ->
+  mac1 <> mac2 ->
+  would_conflict_static_entry cache ip mac2 = true.
+Proof.
+  intros cache ip mac1 mac2 Hlookup Hstatic Hneq.
+  unfold would_conflict_static_entry.
+  rewrite Hlookup.
+  unfold mac_eq.
+  destruct mac1 as [bytes1 valid1].
+  destruct mac2 as [bytes2 valid2].
+  simpl. destruct (list_eq_dec N.eq_dec bytes1 bytes2) eqn:Heq.
+  - subst bytes2.
+    assert (valid1 = valid2) by apply proof_irrelevance.
+    subst. contradiction.
+  - simpl. rewrite Hstatic. reflexivity.
+Qed.
+
+(* Theorem: safe static entry addition succeeds when no conflict *)
+Theorem add_static_entry_safe_succeeds_when_no_conflict : forall cache ip mac,
+  would_conflict_static_entry cache ip mac = false ->
+  exists cache', add_static_entry_safe cache ip mac = ARPSuccess cache' /\
+                 cache' = add_static_entry cache ip mac.
+Proof.
+  intros cache ip mac Hno_conflict.
+  unfold add_static_entry_safe.
+  rewrite Hno_conflict.
+  exists (add_static_entry cache ip mac).
+  split; reflexivity.
+Qed.
+
+(* Theorem: safe static entry addition fails when conflict detected *)
+Theorem add_static_entry_safe_fails_on_conflict : forall cache ip mac,
+  would_conflict_static_entry cache ip mac = true ->
+  add_static_entry_safe cache ip mac = ARPFailure (ErrStaticEntryConflict ip).
+Proof.
+  intros cache ip mac Hconflict.
+  unfold add_static_entry_safe.
+  rewrite Hconflict.
+  reflexivity.
+Qed.
+
+(* Theorem: safe addition never creates conflict *)
+Theorem add_static_entry_safe_no_conflict_invariant : forall cache ip mac cache',
+  add_static_entry_safe cache ip mac = ARPSuccess cache' ->
+  would_conflict_static_entry cache ip mac = false.
+Proof.
+  intros cache ip mac cache' Hsafe.
+  unfold add_static_entry_safe in Hsafe.
+  destruct (would_conflict_static_entry cache ip mac) eqn:Hconflict.
+  - discriminate.
+  - reflexivity.
+Qed.
 
 (* Compilation checkpoint *)
 
@@ -5781,6 +5884,10 @@ Extraction "arp.ml"
   merge_cache_entry
   update_cache_entry
   add_cache_entry
+  add_static_entry
+  add_static_entry_safe
+  would_conflict_static_entry
+  is_static_cache_entry
   rfc826_merge
   age_cache
 

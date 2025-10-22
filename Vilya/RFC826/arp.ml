@@ -1,9 +1,22 @@
 
+type unit0 =
+| Tt
+
 (** val negb : bool -> bool **)
 
 let negb = function
 | true -> false
 | false -> true
+
+type nat =
+| O
+| S of nat
+
+(** val length : 'a1 list -> nat **)
+
+let rec length = function
+| [] -> O
+| _::l' -> S (length l')
 
 (** val app : 'a1 list -> 'a1 list -> 'a1 list **)
 
@@ -20,6 +33,13 @@ type comparison =
 type sumbool =
 | Left
 | Right
+
+(** val add : nat -> nat -> nat **)
+
+let rec add n0 m =
+  match n0 with
+  | O -> m
+  | S p -> S (add p m)
 
 (** val bool_dec : bool -> bool -> sumbool **)
 
@@ -867,6 +887,46 @@ let rfc826_merge cache ip mac ttl i_am_target =
   | Some _ -> update_cache_entry cache ip mac ttl
   | None -> if i_am_target then add_cache_entry cache ip mac ttl else cache
 
+(** val add_static_entry :
+    aRPCache -> iPv4Address -> mACAddress -> aRPCache **)
+
+let add_static_entry cache ip mac =
+  let static_entry = { ace_ip = ip; ace_mac = mac; ace_ttl = N0; ace_static =
+    true }
+  in
+  let rec add_or_update = function
+  | [] -> static_entry::[]
+  | e::rest ->
+    if ip_eq e.ace_ip ip then static_entry::rest else e::(add_or_update rest)
+  in add_or_update cache
+
+(** val is_static_cache_entry : aRPCache -> iPv4Address -> bool **)
+
+let rec is_static_cache_entry cache ip =
+  match cache with
+  | [] -> false
+  | e::rest ->
+    if ip_eq e.ace_ip ip then e.ace_static else is_static_cache_entry rest ip
+
+(** val list_static_entries : aRPCache -> aRPCacheEntry list **)
+
+let list_static_entries cache =
+  filter (fun e -> e.ace_static) cache
+
+(** val count_static_entries : aRPCache -> nat **)
+
+let count_static_entries cache =
+  length (list_static_entries cache)
+
+(** val would_conflict_static_entry :
+    aRPCache -> iPv4Address -> mACAddress -> bool **)
+
+let would_conflict_static_entry cache ip mac =
+  match lookup_cache cache ip with
+  | Some existing_mac ->
+    if mac_eq existing_mac mac then false else is_static_cache_entry cache ip
+  | None -> false
+
 (** val make_arp_request :
     mACAddress -> iPv4Address -> iPv4Address -> aRPEthernetIPv4 **)
 
@@ -1190,26 +1250,69 @@ let convert_to_generic packet =
     (serialize_ipv4 packet.arp_spa); ar_tha = (serialize_mac packet.arp_tha);
     ar_tpa = (serialize_ipv4 packet.arp_tpa) }
 
+type aRPError =
+| ErrInvalidOpcode of word16
+| ErrBroadcastSender
+| ErrMulticastSender
+| ErrZeroSPANonRequest
+| ErrReplyWrongTHA of mACAddress * mACAddress
+| ErrCacheFull of nat
+| ErrFloodLimitExceeded of iPv4Address * n
+| ErrStaticEntryConflict of iPv4Address
+| ErrDuplicateIP of iPv4Address * mACAddress
+| ErrInvalidPacketLength of nat
+| ErrUnsupportedHardware of word16
+| ErrUnsupportedProtocol of word16
+
+type 'a aRPResult =
+| ARPSuccess of 'a
+| ARPFailure of aRPError
+
+(** val add_static_entry_safe :
+    aRPCache -> iPv4Address -> mACAddress -> aRPCache aRPResult **)
+
+let add_static_entry_safe cache ip mac =
+  if would_conflict_static_entry cache ip mac
+  then ARPFailure (ErrStaticEntryConflict ip)
+  else ARPSuccess (add_static_entry cache ip mac)
+
 (** val validate_arp_packet : aRPEthernetIPv4 -> mACAddress -> bool **)
 
 let validate_arp_packet packet my_mac =
-  if if if if if is_valid_arp_opcode packet.arp_op
-              then negb (is_broadcast_mac packet.arp_sha)
-              else false
-           then negb (is_multicast_mac packet.arp_sha)
+  if if if if is_valid_arp_opcode packet.arp_op
+           then negb (is_broadcast_mac packet.arp_sha)
            else false
-        then if negb (is_zero_ipv4 packet.arp_spa)
-             then true
-             else N.eqb packet.arp_op aRP_OP_REQUEST
+        then negb (is_multicast_mac packet.arp_sha)
         else false
-     then if negb (N.eqb packet.arp_op aRP_OP_REQUEST)
+     then if negb (is_zero_ipv4 packet.arp_spa)
           then true
-          else mac_eq packet.arp_tha mAC_ZERO
+          else N.eqb packet.arp_op aRP_OP_REQUEST
      else false
   then if negb (N.eqb packet.arp_op aRP_OP_REPLY)
        then true
        else mac_eq packet.arp_tha my_mac
   else false
+
+(** val validate_arp_packet_detailed :
+    aRPEthernetIPv4 -> mACAddress -> unit0 aRPResult **)
+
+let validate_arp_packet_detailed packet my_mac =
+  if negb (is_valid_arp_opcode packet.arp_op)
+  then ARPFailure (ErrInvalidOpcode packet.arp_op)
+  else if is_broadcast_mac packet.arp_sha
+       then ARPFailure ErrBroadcastSender
+       else if is_multicast_mac packet.arp_sha
+            then ARPFailure ErrMulticastSender
+            else if is_zero_ipv4 packet.arp_spa
+                 then if negb (N.eqb packet.arp_op aRP_OP_REQUEST)
+                      then ARPFailure ErrZeroSPANonRequest
+                      else ARPSuccess Tt
+                 else if N.eqb packet.arp_op aRP_OP_REPLY
+                      then if negb (mac_eq packet.arp_tha my_mac)
+                           then ARPFailure (ErrReplyWrongTHA (packet.arp_tha,
+                                  my_mac))
+                           else ARPSuccess Tt
+                      else ARPSuccess Tt
 
 type validatedARPPacket =
   aRPEthernetIPv4
@@ -1223,13 +1326,100 @@ let mk_validated_arp my_mac packet =
   | Left -> Some packet
   | Right -> None
 
+(** val dEFAULT_ARP_TTL : n **)
+
+let dEFAULT_ARP_TTL =
+  Npos (XO (XO (XI (XI (XO (XI (XO (XO XH))))))))
+
 type aRPContext = { arp_my_mac : mACAddress; arp_my_ip : iPv4Address;
                     arp_cache : aRPCache; arp_cache_ttl : n }
+
+type gratuitousARPType =
+| NotGratuitous
+| GratuitousRequest
+| GratuitousReply
 
 (** val is_gratuitous_arp : aRPEthernetIPv4 -> bool **)
 
 let is_gratuitous_arp pkt =
   ip_eq pkt.arp_spa pkt.arp_tpa
+
+(** val classify_gratuitous_arp : aRPEthernetIPv4 -> gratuitousARPType **)
+
+let classify_gratuitous_arp pkt =
+  if ip_eq pkt.arp_spa pkt.arp_tpa
+  then if N.eqb pkt.arp_op aRP_OP_REQUEST
+       then GratuitousRequest
+       else if N.eqb pkt.arp_op aRP_OP_REPLY
+            then GratuitousReply
+            else NotGratuitous
+  else NotGratuitous
+
+(** val is_gratuitous_request : aRPEthernetIPv4 -> bool **)
+
+let is_gratuitous_request pkt =
+  match classify_gratuitous_arp pkt with
+  | GratuitousRequest -> true
+  | _ -> false
+
+(** val is_gratuitous_reply : aRPEthernetIPv4 -> bool **)
+
+let is_gratuitous_reply pkt =
+  match classify_gratuitous_arp pkt with
+  | GratuitousReply -> true
+  | _ -> false
+
+(** val flush_cache : aRPCache **)
+
+let flush_cache =
+  []
+
+(** val flush_dynamic_entries : aRPCache -> aRPCache **)
+
+let flush_dynamic_entries cache =
+  filter (fun e -> e.ace_static) cache
+
+(** val update_cache_ttl : aRPCache -> n -> aRPCache **)
+
+let update_cache_ttl cache new_ttl =
+  map (fun e ->
+    if e.ace_static
+    then e
+    else { ace_ip = e.ace_ip; ace_mac = e.ace_mac; ace_ttl = new_ttl;
+           ace_static = e.ace_static }) cache
+
+(** val set_context_ttl : aRPContext -> n -> aRPContext **)
+
+let set_context_ttl ctx new_ttl =
+  { arp_my_mac = ctx.arp_my_mac; arp_my_ip = ctx.arp_my_ip; arp_cache =
+    ctx.arp_cache; arp_cache_ttl = new_ttl }
+
+(** val flush_context_cache : aRPContext -> aRPContext **)
+
+let flush_context_cache ctx =
+  { arp_my_mac = ctx.arp_my_mac; arp_my_ip = ctx.arp_my_ip; arp_cache =
+    flush_cache; arp_cache_ttl = ctx.arp_cache_ttl }
+
+(** val flush_context_dynamic : aRPContext -> aRPContext **)
+
+let flush_context_dynamic ctx =
+  { arp_my_mac = ctx.arp_my_mac; arp_my_ip = ctx.arp_my_ip; arp_cache =
+    (flush_dynamic_entries ctx.arp_cache); arp_cache_ttl = ctx.arp_cache_ttl }
+
+(** val get_cache_size : aRPCache -> nat **)
+
+let get_cache_size =
+  length
+
+(** val get_static_count : aRPCache -> nat **)
+
+let get_static_count =
+  count_static_entries
+
+(** val get_dynamic_count : aRPCache -> nat **)
+
+let get_dynamic_count cache =
+  length (filter (fun e -> negb e.ace_static) cache)
 
 (** val process_arp_packet :
     aRPContext -> aRPEthernetIPv4 -> aRPContext*aRPEthernetIPv4 option **)
@@ -1496,10 +1686,303 @@ type aRPStateData =
 type networkInterface = { if_mac : mACAddress; if_ip : iPv4Address;
                           if_mtu : n; if_up : bool }
 
+type interfaceID = n
+
+type networkInterfaceEx = { ifex_id : interfaceID; ifex_mac : mACAddress;
+                            ifex_ip : iPv4Address; ifex_mtu : n;
+                            ifex_up : bool; ifex_cache : aRPCache;
+                            ifex_cache_ttl : n; ifex_state_data : aRPStateData }
+
+type interfaceTable = networkInterfaceEx list
+
 type floodEntry = { fe_ip : iPv4Address; fe_last_request : n;
                     fe_request_count : n }
 
 type floodTable = floodEntry list
+
+type multiInterfaceARPContext = { mi_interfaces : interfaceTable;
+                                  mi_global_flood_table : floodTable;
+                                  mi_last_cleanup : n }
+
+(** val lookup_interface :
+    interfaceTable -> interfaceID -> networkInterfaceEx option **)
+
+let rec lookup_interface table id =
+  match table with
+  | [] -> None
+  | iface::rest ->
+    if N.eqb iface.ifex_id id then Some iface else lookup_interface rest id
+
+(** val lookup_interface_by_mac :
+    interfaceTable -> mACAddress -> networkInterfaceEx option **)
+
+let rec lookup_interface_by_mac table mac =
+  match table with
+  | [] -> None
+  | iface::rest ->
+    if mac_eq iface.ifex_mac mac
+    then Some iface
+    else lookup_interface_by_mac rest mac
+
+(** val lookup_interface_by_ip :
+    interfaceTable -> iPv4Address -> networkInterfaceEx option **)
+
+let rec lookup_interface_by_ip table ip =
+  match table with
+  | [] -> None
+  | iface::rest ->
+    if ip_eq iface.ifex_ip ip
+    then Some iface
+    else lookup_interface_by_ip rest ip
+
+(** val is_local_ip : interfaceTable -> iPv4Address -> bool **)
+
+let is_local_ip table ip =
+  match lookup_interface_by_ip table ip with
+  | Some _ -> true
+  | None -> false
+
+(** val select_interface_for_target :
+    interfaceTable -> iPv4Address -> networkInterfaceEx option **)
+
+let rec select_interface_for_target table target_ip =
+  match table with
+  | [] -> None
+  | iface::rest ->
+    if iface.ifex_up
+    then Some iface
+    else select_interface_for_target rest target_ip
+
+(** val get_up_interfaces : interfaceTable -> interfaceTable **)
+
+let rec get_up_interfaces table =
+  filter (fun iface -> iface.ifex_up) table
+
+(** val count_interfaces : interfaceTable -> nat **)
+
+let count_interfaces =
+  length
+
+(** val count_up_interfaces : interfaceTable -> nat **)
+
+let count_up_interfaces table =
+  length (get_up_interfaces table)
+
+(** val update_interface :
+    interfaceTable -> networkInterfaceEx -> interfaceTable **)
+
+let rec update_interface table updated =
+  match table with
+  | [] -> updated::[]
+  | iface::rest ->
+    if N.eqb iface.ifex_id updated.ifex_id
+    then updated::rest
+    else iface::(update_interface rest updated)
+
+(** val update_interface_cache :
+    networkInterfaceEx -> aRPCache -> networkInterfaceEx **)
+
+let update_interface_cache iface cache =
+  { ifex_id = iface.ifex_id; ifex_mac = iface.ifex_mac; ifex_ip =
+    iface.ifex_ip; ifex_mtu = iface.ifex_mtu; ifex_up = iface.ifex_up;
+    ifex_cache = cache; ifex_cache_ttl = iface.ifex_cache_ttl;
+    ifex_state_data = iface.ifex_state_data }
+
+(** val update_interface_state :
+    networkInterfaceEx -> aRPStateData -> networkInterfaceEx **)
+
+let update_interface_state iface state =
+  { ifex_id = iface.ifex_id; ifex_mac = iface.ifex_mac; ifex_ip =
+    iface.ifex_ip; ifex_mtu = iface.ifex_mtu; ifex_up = iface.ifex_up;
+    ifex_cache = iface.ifex_cache; ifex_cache_ttl = iface.ifex_cache_ttl;
+    ifex_state_data = state }
+
+(** val set_interface_up :
+    networkInterfaceEx -> bool -> networkInterfaceEx **)
+
+let set_interface_up iface up =
+  { ifex_id = iface.ifex_id; ifex_mac = iface.ifex_mac; ifex_ip =
+    iface.ifex_ip; ifex_mtu = iface.ifex_mtu; ifex_up = up; ifex_cache =
+    iface.ifex_cache; ifex_cache_ttl = iface.ifex_cache_ttl;
+    ifex_state_data = iface.ifex_state_data }
+
+(** val remove_interface : interfaceTable -> interfaceID -> interfaceTable **)
+
+let rec remove_interface table id =
+  match table with
+  | [] -> []
+  | iface::rest ->
+    if N.eqb iface.ifex_id id then rest else iface::(remove_interface rest id)
+
+(** val add_interface :
+    interfaceTable -> networkInterfaceEx -> interfaceTable **)
+
+let add_interface table new_iface =
+  new_iface::table
+
+(** val process_arp_packet_on_interface :
+    networkInterfaceEx -> aRPEthernetIPv4 ->
+    networkInterfaceEx*aRPEthernetIPv4 option **)
+
+let process_arp_packet_on_interface iface packet =
+  if validate_arp_packet packet iface.ifex_mac
+  then let i_am_target = ip_eq packet.arp_tpa iface.ifex_ip in
+       let cache' =
+         rfc826_merge iface.ifex_cache packet.arp_spa packet.arp_sha
+           iface.ifex_cache_ttl i_am_target
+       in
+       let iface' = update_interface_cache iface cache' in
+       if i_am_target
+       then if N.eqb packet.arp_op aRP_OP_REQUEST
+            then if is_gratuitous_arp packet
+                 then iface',None
+                 else let reply =
+                        make_arp_reply iface.ifex_mac iface.ifex_ip
+                          packet.arp_sha packet.arp_spa
+                      in
+                      iface',(Some reply)
+            else iface',None
+       else iface',None
+  else iface,None
+
+(** val process_arp_packet_multi :
+    multiInterfaceARPContext -> aRPEthernetIPv4 ->
+    multiInterfaceARPContext*(interfaceID*aRPEthernetIPv4) option **)
+
+let process_arp_packet_multi ctx packet =
+  match lookup_interface_by_ip ctx.mi_interfaces packet.arp_tpa with
+  | Some iface ->
+    let iface',resp = process_arp_packet_on_interface iface packet in
+    let ctx' = { mi_interfaces = (update_interface ctx.mi_interfaces iface');
+      mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+      ctx.mi_last_cleanup }
+    in
+    (match resp with
+     | Some reply -> ctx',(Some (iface.ifex_id,reply))
+     | None -> ctx',None)
+  | None ->
+    let update_all_caches = fun ifaces ->
+      map (fun iface ->
+        if iface.ifex_up
+        then let cache' =
+               rfc826_merge iface.ifex_cache packet.arp_spa packet.arp_sha
+                 iface.ifex_cache_ttl false
+             in
+             update_interface_cache iface cache'
+        else iface) ifaces
+    in
+    let ctx' = { mi_interfaces = (update_all_caches ctx.mi_interfaces);
+      mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+      ctx.mi_last_cleanup }
+    in
+    ctx',None
+
+(** val send_arp_request_from_interface :
+    networkInterfaceEx -> iPv4Address -> aRPEthernetIPv4 **)
+
+let send_arp_request_from_interface iface target_ip =
+  make_arp_request iface.ifex_mac iface.ifex_ip target_ip
+
+(** val check_interface_caches :
+    interfaceTable -> iPv4Address -> (interfaceID*mACAddress) option **)
+
+let rec check_interface_caches ifaces target_ip =
+  match ifaces with
+  | [] -> None
+  | iface::rest ->
+    (match lookup_cache iface.ifex_cache target_ip with
+     | Some mac -> Some (iface.ifex_id,mac)
+     | None -> check_interface_caches rest target_ip)
+
+(** val resolve_address_multi :
+    multiInterfaceARPContext -> iPv4Address -> (interfaceID*mACAddress)
+    option*(interfaceID*aRPEthernetIPv4) option **)
+
+let resolve_address_multi ctx target_ip =
+  match check_interface_caches ctx.mi_interfaces target_ip with
+  | Some result -> (Some result),None
+  | None ->
+    (match select_interface_for_target ctx.mi_interfaces target_ip with
+     | Some iface ->
+       let request = send_arp_request_from_interface iface target_ip in
+       None,(Some (iface.ifex_id,request))
+     | None -> None,None)
+
+(** val create_interface :
+    interfaceID -> mACAddress -> iPv4Address -> n -> networkInterfaceEx **)
+
+let create_interface id mac ip mtu =
+  { ifex_id = id; ifex_mac = mac; ifex_ip = ip; ifex_mtu = mtu; ifex_up =
+    false; ifex_cache = []; ifex_cache_ttl = dEFAULT_ARP_TTL;
+    ifex_state_data = StateIdle }
+
+(** val bring_interface_up :
+    multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext **)
+
+let bring_interface_up ctx id =
+  match lookup_interface ctx.mi_interfaces id with
+  | Some iface ->
+    let iface' = set_interface_up iface true in
+    { mi_interfaces = (update_interface ctx.mi_interfaces iface');
+    mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+    ctx.mi_last_cleanup }
+  | None -> ctx
+
+(** val bring_interface_down :
+    multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext **)
+
+let bring_interface_down ctx id =
+  match lookup_interface ctx.mi_interfaces id with
+  | Some iface ->
+    let iface' = set_interface_up iface false in
+    { mi_interfaces = (update_interface ctx.mi_interfaces iface');
+    mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+    ctx.mi_last_cleanup }
+  | None -> ctx
+
+(** val flush_interface_cache :
+    multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext **)
+
+let flush_interface_cache ctx id =
+  match lookup_interface ctx.mi_interfaces id with
+  | Some iface ->
+    let iface' = update_interface_cache iface [] in
+    { mi_interfaces = (update_interface ctx.mi_interfaces iface');
+    mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+    ctx.mi_last_cleanup }
+  | None -> ctx
+
+(** val flush_all_interface_caches :
+    multiInterfaceARPContext -> multiInterfaceARPContext **)
+
+let flush_all_interface_caches ctx =
+  let flush_all =
+    map (fun iface -> update_interface_cache iface []) ctx.mi_interfaces
+  in
+  { mi_interfaces = flush_all; mi_global_flood_table =
+  ctx.mi_global_flood_table; mi_last_cleanup = ctx.mi_last_cleanup }
+
+(** val add_interface_to_context :
+    multiInterfaceARPContext -> networkInterfaceEx -> multiInterfaceARPContext **)
+
+let add_interface_to_context ctx iface =
+  { mi_interfaces = (add_interface ctx.mi_interfaces iface);
+    mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+    ctx.mi_last_cleanup }
+
+(** val remove_interface_from_context :
+    multiInterfaceARPContext -> interfaceID -> multiInterfaceARPContext **)
+
+let remove_interface_from_context ctx id =
+  { mi_interfaces = (remove_interface ctx.mi_interfaces id);
+    mi_global_flood_table = ctx.mi_global_flood_table; mi_last_cleanup =
+    ctx.mi_last_cleanup }
+
+(** val total_cache_entries : multiInterfaceARPContext -> nat **)
+
+let total_cache_entries ctx =
+  fold_left (fun acc iface -> add acc (length iface.ifex_cache))
+    ctx.mi_interfaces O
 
 type enhancedARPContext = { earp_my_mac : mACAddress;
                             earp_my_ip : iPv4Address; earp_cache : aRPCache;
@@ -1508,6 +1991,75 @@ type enhancedARPContext = { earp_my_mac : mACAddress;
                             earp_iface : networkInterface;
                             earp_flood_table : floodTable;
                             earp_last_cache_cleanup : n }
+
+(** val set_enhanced_context_ttl :
+    enhancedARPContext -> n -> enhancedARPContext **)
+
+let set_enhanced_context_ttl ctx new_ttl =
+  { earp_my_mac = ctx.earp_my_mac; earp_my_ip = ctx.earp_my_ip; earp_cache =
+    ctx.earp_cache; earp_cache_ttl = new_ttl; earp_state_data =
+    ctx.earp_state_data; earp_iface = ctx.earp_iface; earp_flood_table =
+    ctx.earp_flood_table; earp_last_cache_cleanup =
+    ctx.earp_last_cache_cleanup }
+
+(** val flush_enhanced_cache : enhancedARPContext -> enhancedARPContext **)
+
+let flush_enhanced_cache ctx =
+  { earp_my_mac = ctx.earp_my_mac; earp_my_ip = ctx.earp_my_ip; earp_cache =
+    flush_cache; earp_cache_ttl = ctx.earp_cache_ttl; earp_state_data =
+    ctx.earp_state_data; earp_iface = ctx.earp_iface; earp_flood_table =
+    ctx.earp_flood_table; earp_last_cache_cleanup =
+    ctx.earp_last_cache_cleanup }
+
+(** val flush_enhanced_dynamic : enhancedARPContext -> enhancedARPContext **)
+
+let flush_enhanced_dynamic ctx =
+  { earp_my_mac = ctx.earp_my_mac; earp_my_ip = ctx.earp_my_ip; earp_cache =
+    (flush_dynamic_entries ctx.earp_cache); earp_cache_ttl =
+    ctx.earp_cache_ttl; earp_state_data = ctx.earp_state_data; earp_iface =
+    ctx.earp_iface; earp_flood_table = ctx.earp_flood_table;
+    earp_last_cache_cleanup = ctx.earp_last_cache_cleanup }
+
+(** val disable_dad : enhancedARPContext -> enhancedARPContext **)
+
+let disable_dad ctx =
+  { earp_my_mac = ctx.earp_my_mac; earp_my_ip = ctx.earp_my_ip; earp_cache =
+    ctx.earp_cache; earp_cache_ttl = ctx.earp_cache_ttl; earp_state_data =
+    StateIdle; earp_iface = ctx.earp_iface; earp_flood_table =
+    ctx.earp_flood_table; earp_last_cache_cleanup =
+    ctx.earp_last_cache_cleanup }
+
+(** val reset_flood_table : enhancedARPContext -> enhancedARPContext **)
+
+let reset_flood_table ctx =
+  { earp_my_mac = ctx.earp_my_mac; earp_my_ip = ctx.earp_my_ip; earp_cache =
+    ctx.earp_cache; earp_cache_ttl = ctx.earp_cache_ttl; earp_state_data =
+    ctx.earp_state_data; earp_iface = ctx.earp_iface; earp_flood_table = [];
+    earp_last_cache_cleanup = ctx.earp_last_cache_cleanup }
+
+(** val single_to_multi :
+    aRPContext -> interfaceID -> multiInterfaceARPContext **)
+
+let single_to_multi ctx id =
+  let iface = { ifex_id = id; ifex_mac = ctx.arp_my_mac; ifex_ip =
+    ctx.arp_my_ip; ifex_mtu = (Npos (XO (XO (XI (XI (XI (XO (XI (XI (XI (XO
+    XH))))))))))); ifex_up = true; ifex_cache = ctx.arp_cache;
+    ifex_cache_ttl = ctx.arp_cache_ttl; ifex_state_data = StateIdle }
+  in
+  { mi_interfaces = (iface::[]); mi_global_flood_table = [];
+  mi_last_cleanup = N0 }
+
+(** val enhanced_to_multi :
+    enhancedARPContext -> interfaceID -> multiInterfaceARPContext **)
+
+let enhanced_to_multi ctx id =
+  let iface = { ifex_id = id; ifex_mac = ctx.earp_my_mac; ifex_ip =
+    ctx.earp_my_ip; ifex_mtu = ctx.earp_iface.if_mtu; ifex_up =
+    ctx.earp_iface.if_up; ifex_cache = ctx.earp_cache; ifex_cache_ttl =
+    ctx.earp_cache_ttl; ifex_state_data = ctx.earp_state_data }
+  in
+  { mi_interfaces = (iface::[]); mi_global_flood_table =
+  ctx.earp_flood_table; mi_last_cleanup = ctx.earp_last_cache_cleanup }
 
 (** val aRP_FLOOD_WINDOW : n **)
 
@@ -1859,6 +2411,19 @@ let age_cache cache elapsed =
   in
   filter (fun e -> if e.ace_static then true else negb (N.leb e.ace_ttl N0))
     (map dec cache)
+
+(** val age_all_interface_caches :
+    multiInterfaceARPContext -> n -> multiInterfaceARPContext **)
+
+let age_all_interface_caches ctx elapsed =
+  let age_all =
+    map (fun iface ->
+      update_interface_cache iface (age_cache iface.ifex_cache elapsed))
+      ctx.mi_interfaces
+  in
+  { mi_interfaces = age_all; mi_global_flood_table =
+  ctx.mi_global_flood_table; mi_last_cleanup =
+  (N.add ctx.mi_last_cleanup elapsed) }
 
 (** val process_arp_packet_enhanced :
     enhancedARPContext -> aRPEthernetIPv4 -> n -> n ->
