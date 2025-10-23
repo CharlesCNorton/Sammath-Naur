@@ -6421,6 +6421,36 @@ Proof.
   apply serialize_parse_identity.
 Qed.
 
+Definition ARP_PACKET_SIZE : N := 28.
+
+Theorem arp_packet_size_constant : forall pkt,
+  length (serialize_arp_packet pkt) = N.to_nat ARP_PACKET_SIZE.
+Proof.
+  intro pkt.
+  destruct pkt as [op sha spa tha tpa].
+  destruct sha as [[|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]] Hsha_valid];
+  destruct tha as [[|t1 [|t2 [|t3 [|t4 [|t5 [|t6 [|]]]]]]] Htha_valid];
+  try discriminate Hsha_valid; try discriminate Htha_valid.
+  unfold serialize_arp_packet, serialize_mac, serialize_ipv4, split_word16.
+  destruct spa, tpa. simpl. reflexivity.
+Qed.
+
+Theorem arp_fits_in_ethernet_mtu :
+  ARP_PACKET_SIZE <= 1500.
+Proof.
+  unfold ARP_PACKET_SIZE. lia.
+Qed.
+
+Definition arp_fits_in_mtu (pkt : ARPEthernetIPv4) (mtu : N) : bool :=
+  N.leb ARP_PACKET_SIZE mtu.
+
+Theorem arp_fits_in_mtu_correct : forall pkt mtu,
+  arp_fits_in_mtu pkt mtu = true <-> ARP_PACKET_SIZE <= mtu.
+Proof.
+  intros. unfold arp_fits_in_mtu.
+  apply N.leb_le.
+Qed.
+
 Definition bob_after_request : ARPContext * option ARPEthernetIPv4 :=
   process_arp_packet bob_initial request_alice_to_bob.
 
