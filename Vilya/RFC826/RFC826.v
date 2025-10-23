@@ -3033,8 +3033,8 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
                            : EnhancedARPContext * list ARPEthernetIPv4 :=
   match ctx.(earp_state_data) with
   | StatePending reqs =>
-      let process_req (acc : list PendingRequest * list ARPEthernetIPv4) (req : PendingRequest) :=
-        let '(kept_reqs, packets) := acc in
+      let process_req (acc : list PendingRequest * list ARPEthernetIPv4 * list IPv4Address) (req : PendingRequest) :=
+        let '(kept_reqs, packets, failed_ips) := acc in
         if timer_expired req.(preq_timer) current_time
         then
           if N.ltb req.(preq_retries) ARP_MAX_RETRIES
@@ -3042,14 +3042,16 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
             let new_req := retry_pending_request req current_time in
             let arp_req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip)
                                             req.(preq_target_ip) in
-            (new_req :: kept_reqs, arp_req :: packets)
+            (new_req :: kept_reqs, arp_req :: packets, failed_ips)
           else
-            (kept_reqs, packets)
+            (kept_reqs, packets, req.(preq_target_ip) :: failed_ips)
         else
-          (req :: kept_reqs, packets)
+          (req :: kept_reqs, packets, failed_ips)
       in
-      let '(acc_reqs, packets) := fold_left process_req reqs ([], []) in
+      let '(acc_reqs, packets, failed_ips) := fold_left process_req reqs ([], [], []) in
       let new_reqs := rev acc_reqs in
+      let updated_ncache := fold_left (fun nc ip => add_negative_cache_entry nc ip current_time 60)
+                                      failed_ips ctx.(earp_negative_cache) in
       ({| earp_my_mac := ctx.(earp_my_mac);
           earp_my_ip := ctx.(earp_my_ip);
           earp_cache := ctx.(earp_cache);
@@ -3061,7 +3063,7 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
           earp_iface := ctx.(earp_iface);
           earp_flood_table := ctx.(earp_flood_table);
           earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
-          earp_negative_cache := ctx.(earp_negative_cache) |}, rev packets)
+          earp_negative_cache := clean_negative_cache updated_ncache current_time |}, rev packets)
   | _ => (ctx, [])
   end.
 
@@ -3073,23 +3075,26 @@ Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
   | Some mac =>
       (Some mac, ctx, None)
   | None =>
-      let '(new_flood, allowed) := update_flood_table ctx.(earp_flood_table) target_ip current_time in
-      if allowed
-      then
-        let ctx' := add_pending_request ctx target_ip current_time in
-        let ctx'' := {| earp_my_mac := ctx'.(earp_my_mac);
-                       earp_my_ip := ctx'.(earp_my_ip);
-                       earp_cache := ctx'.(earp_cache);
-                       earp_cache_ttl := ctx'.(earp_cache_ttl);
-                       earp_state_data := ctx'.(earp_state_data);
-                       earp_iface := ctx'.(earp_iface);
-                       earp_flood_table := new_flood;
-                       earp_last_cache_cleanup := ctx'.(earp_last_cache_cleanup);
-                       earp_negative_cache := ctx'.(earp_negative_cache) |} in
-        let req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
-        (None, ctx'', Some req)
+      if lookup_negative_cache ctx.(earp_negative_cache) target_ip current_time
+      then (None, ctx, None)
       else
-        (None, ctx, None)
+        let '(new_flood, allowed) := update_flood_table ctx.(earp_flood_table) target_ip current_time in
+        if allowed
+        then
+          let ctx' := add_pending_request ctx target_ip current_time in
+          let ctx'' := {| earp_my_mac := ctx'.(earp_my_mac);
+                         earp_my_ip := ctx'.(earp_my_ip);
+                         earp_cache := ctx'.(earp_cache);
+                         earp_cache_ttl := ctx'.(earp_cache_ttl);
+                         earp_state_data := ctx'.(earp_state_data);
+                         earp_iface := ctx'.(earp_iface);
+                         earp_flood_table := new_flood;
+                         earp_last_cache_cleanup := ctx'.(earp_last_cache_cleanup);
+                         earp_negative_cache := ctx'.(earp_negative_cache) |} in
+          let req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
+          (None, ctx'', Some req)
+        else
+          (None, ctx, None)
   end.
 
 (* Compilation checkpoint *)
@@ -4679,6 +4684,7 @@ Qed.
 
 Theorem resolve_address_cache_miss_allowed : forall ctx target_ip current_time,
   lookup_cache ctx.(earp_cache) target_ip = None ->
+  lookup_negative_cache ctx.(earp_negative_cache) target_ip current_time = false ->
   snd (update_flood_table ctx.(earp_flood_table) target_ip current_time) = true ->
   exists ctx' req,
     resolve_address ctx target_ip current_time = (None, ctx', Some req) /\
@@ -4687,9 +4693,9 @@ Theorem resolve_address_cache_miss_allowed : forall ctx target_ip current_time,
     req.(arp_sha) = ctx.(earp_my_mac) /\
     req.(arp_spa) = ctx.(earp_my_ip).
 Proof.
-  intros ctx target_ip current_time Hlookup Hallowed.
+  intros ctx target_ip current_time Hlookup Hnegative Hallowed.
   unfold resolve_address.
-  rewrite Hlookup.
+  rewrite Hlookup, Hnegative.
   destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
   simpl in Hallowed. subst allowed.
   eexists. eexists.
@@ -4704,12 +4710,13 @@ Qed.
 
 Theorem resolve_address_cache_miss_rejected : forall ctx target_ip current_time,
   lookup_cache ctx.(earp_cache) target_ip = None ->
+  lookup_negative_cache ctx.(earp_negative_cache) target_ip current_time = false ->
   snd (update_flood_table ctx.(earp_flood_table) target_ip current_time) = false ->
   resolve_address ctx target_ip current_time = (None, ctx, None).
 Proof.
-  intros ctx target_ip current_time Hlookup Hrejected.
+  intros ctx target_ip current_time Hlookup Hnegative Hrejected.
   unfold resolve_address.
-  rewrite Hlookup.
+  rewrite Hlookup, Hnegative.
   destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed] eqn:Hflood.
   simpl in Hrejected. subst allowed.
   reflexivity.
@@ -4798,10 +4805,12 @@ Proof.
   unfold resolve_address.
   destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup; simpl.
   - reflexivity.
-  - destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed].
-    destruct allowed; simpl.
-    + rewrite add_pending_request_preserves_mac. reflexivity.
+  - destruct (lookup_negative_cache (earp_negative_cache ctx) target_ip current_time) eqn:Hneg; simpl.
     + reflexivity.
+    + destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed].
+      destruct allowed; simpl.
+      * rewrite add_pending_request_preserves_mac. reflexivity.
+      * reflexivity.
 Qed.
 
 Theorem resolve_address_preserves_ip : forall ctx target_ip current_time,
@@ -4812,10 +4821,12 @@ Proof.
   unfold resolve_address.
   destruct (lookup_cache (earp_cache ctx) target_ip) eqn:Hlookup; simpl.
   - reflexivity.
-  - destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed].
-    destruct allowed; simpl.
-    + rewrite add_pending_request_preserves_ip. reflexivity.
+  - destruct (lookup_negative_cache (earp_negative_cache ctx) target_ip current_time) eqn:Hneg; simpl.
     + reflexivity.
+    + destruct (update_flood_table (earp_flood_table ctx) target_ip current_time) as [new_flood allowed].
+      destruct allowed; simpl.
+      * rewrite add_pending_request_preserves_ip. reflexivity.
+      * reflexivity.
 Qed.
 
 Theorem send_arp_request_with_flood_check_preserves_my_ip : forall ctx target_ip current_time ctx' pkt,
@@ -6075,6 +6086,11 @@ Extraction "arp.ml"
   is_static_cache_entry
   rfc826_merge
   age_cache
+
+  (* Negative cache *)
+  lookup_negative_cache
+  add_negative_cache_entry
+  clean_negative_cache
 
   (* Comparison helpers *)
   mac_eq
