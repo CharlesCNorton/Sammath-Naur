@@ -3161,6 +3161,130 @@ Qed.
 (* Compilation checkpoint *)
 
 (* =============================================================================
+   Per-MAC Rate Limiting
+   ============================================================================= *)
+
+
+Record FloodEntryMAC := {
+  fem_mac : MACAddress;
+  fem_ip : IPv4Address;
+  fem_last_request : N;
+  fem_request_count : N
+}.
+
+Definition FloodTableMAC := list FloodEntryMAC.
+
+Definition mac_flood_eq (mac1 mac2 : MACAddress) : bool :=
+  mac_eq mac1 mac2.
+
+Fixpoint lookup_flood_entry_mac (table : FloodTableMAC) (mac : MACAddress)
+  : option FloodEntryMAC :=
+  match table with
+  | [] => None
+  | entry :: rest =>
+      if mac_flood_eq entry.(fem_mac) mac
+      then Some entry
+      else lookup_flood_entry_mac rest mac
+  end.
+
+Definition update_flood_table_mac (table : FloodTableMAC) (mac : MACAddress)
+                                   (ip : IPv4Address) (current_time : N)
+                                   : FloodTableMAC * bool :=
+  match lookup_flood_entry_mac table mac with
+  | None =>
+      let new_entry := {| fem_mac := mac; fem_ip := ip;
+                          fem_last_request := current_time; fem_request_count := 1 |} in
+      (new_entry :: table, true)
+  | Some entry =>
+      let time_diff := if N.ltb current_time entry.(fem_last_request)
+                       then 0
+                       else current_time - entry.(fem_last_request) in
+      if N.leb time_diff ARP_FLOOD_WINDOW
+      then
+        let new_count := entry.(fem_request_count) + 1 in
+        if N.leb new_count ARP_FLOOD_THRESHOLD
+        then
+          let updated := {| fem_mac := mac; fem_ip := ip;
+                           fem_last_request := current_time;
+                           fem_request_count := new_count |} in
+          let fix replace (t : FloodTableMAC) : FloodTableMAC :=
+            match t with
+            | [] => [updated]
+            | e :: rest => if mac_flood_eq e.(fem_mac) mac then updated :: rest else e :: replace rest
+            end
+          in (replace table, true)
+        else
+          (table, false)
+      else
+        let reset_entry := {| fem_mac := mac; fem_ip := ip;
+                             fem_last_request := current_time; fem_request_count := 1 |} in
+        let fix replace (t : FloodTableMAC) : FloodTableMAC :=
+          match t with
+          | [] => [reset_entry]
+          | e :: rest => if mac_flood_eq e.(fem_mac) mac then reset_entry :: rest else e :: replace rest
+          end
+        in (replace table, true)
+  end.
+
+Theorem per_mac_first_request_allowed : forall table mac ip t,
+  lookup_flood_entry_mac table mac = None ->
+  snd (update_flood_table_mac table mac ip t) = true.
+Proof.
+  intros table mac ip t Hlook.
+  unfold update_flood_table_mac.
+  rewrite Hlook.
+  reflexivity.
+Qed.
+
+Theorem per_mac_new_entry_adds_one : forall table mac ip t,
+  lookup_flood_entry_mac table mac = None ->
+  length (fst (update_flood_table_mac table mac ip t)) = S (length table).
+Proof.
+  intros table mac ip t Hlook.
+  unfold update_flood_table_mac.
+  rewrite Hlook.
+  simpl. reflexivity.
+Qed.
+
+Theorem per_mac_rate_limiting_blocks_flood : forall table mac ip t1 t2 count,
+  lookup_flood_entry_mac table mac = Some {| fem_mac := mac; fem_ip := ip;
+                                             fem_last_request := t1; fem_request_count := count |} ->
+  t1 <= t2 ->
+  t2 - t1 <= ARP_FLOOD_WINDOW ->
+  count + 1 > ARP_FLOOD_THRESHOLD ->
+  snd (update_flood_table_mac table mac ip t2) = false.
+Proof.
+  intros table mac ip t1 t2 count Hlook Htime Hwindow Hcount.
+  unfold update_flood_table_mac.
+  rewrite Hlook.
+  destruct (N.ltb t2 t1) eqn:Hlt.
+  - apply N.ltb_lt in Hlt. lia.
+  - destruct (N.leb (t2 - t1) ARP_FLOOD_WINDOW) eqn:Hwindow_check.
+    + destruct (N.leb (count + 1) ARP_FLOOD_THRESHOLD) eqn:Hthresh.
+      * apply N.leb_le in Hthresh. lia.
+      * reflexivity.
+    + apply N.leb_nle in Hwindow_check. lia.
+Qed.
+
+Theorem per_mac_allows_after_window : forall table mac ip t1 t2,
+  t2 - t1 > ARP_FLOOD_WINDOW ->
+  snd (update_flood_table_mac table mac ip t2) = true.
+Proof.
+  intros table mac ip t1 t2 Hwindow.
+  unfold update_flood_table_mac.
+  destruct (lookup_flood_entry_mac table mac) eqn:Hlook.
+  - destruct (N.ltb t2 (fem_last_request f)) eqn:Hlt.
+    + apply N.ltb_lt in Hlt. lia.
+    + assert (Hdiff: t2 - fem_last_request f > ARP_FLOOD_WINDOW).
+      { destruct f. simpl in *. lia. }
+      destruct (N.leb (t2 - fem_last_request f) ARP_FLOOD_WINDOW) eqn:Hcheck.
+      * apply N.leb_le in Hcheck. lia.
+      * reflexivity.
+  - reflexivity.
+Qed.
+
+
+(* =============================================================================
    Request Queue Semantics
    ============================================================================= *)
 
