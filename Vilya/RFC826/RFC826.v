@@ -2407,6 +2407,63 @@ Definition count_interfaces (table : InterfaceTable) : nat := length table.
 Definition count_up_interfaces (table : InterfaceTable) : nat :=
   length (get_up_interfaces table).
 
+(* IPv4 subnet mask *)
+Definition IPv4Netmask := IPv4Address.
+
+Definition apply_netmask (ip : IPv4Address) (mask : IPv4Netmask) : N :=
+  N.land (N.lor (N.lor (N.lor (N.shiftl (ipv4_a ip) 24) (N.shiftl (ipv4_b ip) 16))
+                       (N.shiftl (ipv4_c ip) 8)) (ipv4_d ip))
+         (N.lor (N.lor (N.lor (N.shiftl (ipv4_a mask) 24) (N.shiftl (ipv4_b mask) 16))
+                       (N.shiftl (ipv4_c mask) 8)) (ipv4_d mask)).
+
+Definition ip_in_subnet (ip : IPv4Address) (network : IPv4Address) (mask : IPv4Netmask) : bool :=
+  N.eqb (apply_netmask ip mask) (apply_netmask network mask).
+
+Record RouteEntry := {
+  route_network : IPv4Address;
+  route_netmask : IPv4Netmask;
+  route_gateway : option IPv4Address;
+  route_interface_id : InterfaceID;
+  route_metric : N
+}.
+
+Definition RoutingTable := list RouteEntry.
+
+Fixpoint longest_prefix_match (table : RoutingTable) (target : IPv4Address)
+  (best : option RouteEntry) : option RouteEntry :=
+  match table with
+  | [] => best
+  | route :: rest =>
+      if ip_in_subnet target route.(route_network) route.(route_netmask)
+      then
+        match best with
+        | None => longest_prefix_match rest target (Some route)
+        | Some best_route =>
+            let current_prefix := apply_netmask route.(route_network) route.(route_netmask) in
+            let best_prefix := apply_netmask best_route.(route_network) best_route.(route_netmask) in
+            if N.ltb (N.sub (N.pow 2 32) current_prefix) (N.sub (N.pow 2 32) best_prefix)
+            then longest_prefix_match rest target (Some route)
+            else longest_prefix_match rest target best
+        end
+      else longest_prefix_match rest target best
+  end.
+
+Definition select_interface_by_routing
+  (iface_table : InterfaceTable)
+  (routing_table : RoutingTable)
+  (target_ip : IPv4Address) : option NetworkInterfaceEx :=
+  match longest_prefix_match routing_table target_ip None with
+  | None => select_interface_for_target iface_table target_ip
+  | Some route => lookup_interface iface_table route.(route_interface_id)
+  end.
+
+Definition default_route (iface_id : InterfaceID) : RouteEntry :=
+  {| route_network := {| ipv4_a := 0; ipv4_b := 0; ipv4_c := 0; ipv4_d := 0 |};
+     route_netmask := {| ipv4_a := 0; ipv4_b := 0; ipv4_c := 0; ipv4_d := 0 |};
+     route_gateway := None;
+     route_interface_id := iface_id;
+     route_metric := 0 |}.
+
 (* Compilation checkpoint *)
 
 (* =============================================================================
@@ -6290,6 +6347,112 @@ Proof.
   intros ctx id.
   unfold single_to_multi.
   simpl.
+  reflexivity.
+Qed.
+
+Lemma apply_netmask_symmetric : forall ip1 ip2 mask,
+  apply_netmask ip1 mask = apply_netmask ip2 mask ->
+  apply_netmask ip2 mask = apply_netmask ip1 mask.
+Proof.
+  intros ip1 ip2 mask H.
+  symmetry. assumption.
+Qed.
+
+Lemma ip_in_subnet_reflexive : forall ip mask,
+  ip_in_subnet ip ip mask = true.
+Proof.
+  intros ip mask.
+  unfold ip_in_subnet.
+  rewrite N.eqb_refl.
+  reflexivity.
+Qed.
+
+Theorem ip_in_subnet_correct : forall ip network mask,
+  ip_in_subnet ip network mask = true <->
+  apply_netmask ip mask = apply_netmask network mask.
+Proof.
+  intros ip network mask.
+  unfold ip_in_subnet.
+  split.
+  - intro H. apply N.eqb_eq. assumption.
+  - intro H. apply N.eqb_eq. assumption.
+Qed.
+
+Lemma longest_prefix_match_with_best : forall table target best route,
+  longest_prefix_match table target best = Some route ->
+  In route table \/ best = Some route.
+Proof.
+  intro table.
+  induction table as [|r rest IH].
+  - intros target best route H. simpl in H. right. assumption.
+  - intros target best route H.
+    unfold longest_prefix_match in H. fold longest_prefix_match in H.
+    destruct (ip_in_subnet target (route_network r) (route_netmask r)) eqn:Hmatch.
+    + destruct best as [b|].
+      * destruct (N.ltb (N.sub (N.pow 2 32) (apply_netmask (route_network r) (route_netmask r)))
+                        (N.sub (N.pow 2 32) (apply_netmask (route_network b) (route_netmask b)))).
+        { apply IH in H as [IHcase | IHcase]. left. right. assumption.
+          injection IHcase as IHcase. subst. left. left. reflexivity. }
+        { apply IH in H as [IHcase | IHcase]. left. right. assumption. right. assumption. }
+      * apply IH in H as [IHcase | IHcase]. left. right. assumption.
+        injection IHcase as IHcase. subst. left. left. reflexivity.
+    + apply IH in H. destruct H. left. right. assumption. right. assumption.
+Qed.
+
+Theorem longest_prefix_match_in_table : forall table target route,
+  longest_prefix_match table target None = Some route ->
+  In route table.
+Proof.
+  intros table target route H.
+  apply longest_prefix_match_with_best in H.
+  destruct H. assumption. discriminate.
+Qed.
+
+Theorem select_interface_by_routing_finds_interface : forall iface_table routing_table target iface,
+  select_interface_by_routing iface_table routing_table target = Some iface ->
+  In iface iface_table.
+Proof.
+  intros iface_table routing_table target iface H.
+  unfold select_interface_by_routing in H.
+  destruct (longest_prefix_match routing_table target None) eqn:Hmatch.
+  - eapply lookup_interface_in. eassumption.
+  - induction iface_table as [|i rest IH].
+    + discriminate.
+    + simpl in H.
+      destruct (ifex_up i) eqn:Hup.
+      * injection H as H'. subst. left. reflexivity.
+      * right. apply IH. assumption.
+Qed.
+
+Theorem select_interface_by_routing_respects_routes : forall iface_table routing_table target iface route,
+  longest_prefix_match routing_table target None = Some route ->
+  select_interface_by_routing iface_table routing_table target = Some iface ->
+  ifex_id iface = route.(route_interface_id).
+Proof.
+  intros iface_table routing_table target iface route Hroute Hselect.
+  unfold select_interface_by_routing in Hselect.
+  rewrite Hroute in Hselect.
+  unfold lookup_interface in Hselect.
+  induction iface_table as [|i rest IH].
+  - discriminate.
+  - simpl in Hselect.
+    destruct (N.eqb (ifex_id i) (route_interface_id route)) eqn:Heq.
+    + injection Hselect as Hselect. subst. apply N.eqb_eq. assumption.
+    + apply IH. assumption.
+Qed.
+
+Theorem default_route_matches_all : forall target iface_id,
+  ip_in_subnet target
+    (route_network (default_route iface_id))
+    (route_netmask (default_route iface_id)) = true.
+Proof.
+  intros target iface_id.
+  unfold default_route, ip_in_subnet, apply_netmask.
+  simpl.
+  repeat rewrite N.shiftl_0_l.
+  repeat rewrite N.lor_0_r.
+  repeat rewrite N.land_0_r.
+  rewrite N.eqb_refl.
   reflexivity.
 Qed.
 
