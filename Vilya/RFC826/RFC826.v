@@ -277,6 +277,178 @@ Definition NegativeCache := list NegativeCacheEntry.
 
 Definition MAX_NEGATIVE_CACHE_SIZE : nat := 256.
 
+
+(* =============================================================================
+   LRU (Least Recently Used) Cache Eviction
+   ============================================================================= *)
+
+
+Record ARPCacheEntryLRU := {
+  ace_lru_ip : IPv4Address;
+  ace_lru_mac : MACAddress;
+  ace_lru_ttl : N;
+  ace_lru_static : bool;
+  ace_lru_last_used : N
+}.
+
+Definition ARPCacheLRU := list ARPCacheEntryLRU.
+
+Fixpoint lookup_cache_lru (cache : ARPCacheLRU) (ip : IPv4Address) (current_time : N)
+  : option (MACAddress * ARPCacheLRU) :=
+  match cache with
+  | [] => None
+  | entry :: rest =>
+      if (N.eqb entry.(ace_lru_ip).(ipv4_a) ip.(ipv4_a)) &&
+         (N.eqb entry.(ace_lru_ip).(ipv4_b) ip.(ipv4_b)) &&
+         (N.eqb entry.(ace_lru_ip).(ipv4_c) ip.(ipv4_c)) &&
+         (N.eqb entry.(ace_lru_ip).(ipv4_d) ip.(ipv4_d))
+      then
+        let updated_entry := {| ace_lru_ip := entry.(ace_lru_ip);
+                                ace_lru_mac := entry.(ace_lru_mac);
+                                ace_lru_ttl := entry.(ace_lru_ttl);
+                                ace_lru_static := entry.(ace_lru_static);
+                                ace_lru_last_used := current_time |} in
+        Some (entry.(ace_lru_mac), updated_entry :: rest)
+      else
+        match lookup_cache_lru rest ip current_time with
+        | None => None
+        | Some (mac, rest') => Some (mac, entry :: rest')
+        end
+  end.
+
+Fixpoint find_lru_entry (cache : ARPCacheLRU) (oldest : option ARPCacheEntryLRU)
+  : option ARPCacheEntryLRU :=
+  match cache with
+  | [] => oldest
+  | entry :: rest =>
+      if entry.(ace_lru_static)
+      then find_lru_entry rest oldest
+      else
+        match oldest with
+        | None => find_lru_entry rest (Some entry)
+        | Some old =>
+            if N.ltb entry.(ace_lru_last_used) old.(ace_lru_last_used)
+            then find_lru_entry rest (Some entry)
+            else find_lru_entry rest oldest
+        end
+  end.
+
+Fixpoint remove_lru_entry (cache : ARPCacheLRU) (target : ARPCacheEntryLRU)
+  : ARPCacheLRU :=
+  match cache with
+  | [] => []
+  | entry :: rest =>
+      if (N.eqb entry.(ace_lru_ip).(ipv4_a) target.(ace_lru_ip).(ipv4_a)) &&
+         (N.eqb entry.(ace_lru_ip).(ipv4_b) target.(ace_lru_ip).(ipv4_b)) &&
+         (N.eqb entry.(ace_lru_ip).(ipv4_c) target.(ace_lru_ip).(ipv4_c)) &&
+         (N.eqb entry.(ace_lru_ip).(ipv4_d) target.(ace_lru_ip).(ipv4_d))
+      then rest
+      else entry :: remove_lru_entry rest target
+  end.
+
+Definition evict_lru (cache : ARPCacheLRU) : ARPCacheLRU :=
+  match find_lru_entry cache None with
+  | None => cache
+  | Some lru => remove_lru_entry cache lru
+  end.
+
+Definition add_with_lru_eviction (cache : ARPCacheLRU) (ip : IPv4Address)
+                                  (mac : MACAddress) (ttl : N) (current_time : N)
+                                  (max_size : nat) : ARPCacheLRU :=
+  let new_entry := {| ace_lru_ip := ip;
+                      ace_lru_mac := mac;
+                      ace_lru_ttl := ttl;
+                      ace_lru_static := false;
+                      ace_lru_last_used := current_time |} in
+  if Nat.ltb (length cache) max_size
+  then new_entry :: cache
+  else new_entry :: evict_lru cache.
+
+Lemma remove_lru_entry_reduces_or_maintains : forall cache target,
+  (length (remove_lru_entry cache target) <= length cache)%nat.
+Proof.
+  intros cache target.
+  induction cache as [|e rest IH].
+  - simpl. lia.
+  - simpl.
+    destruct ((ace_lru_ip e).(ipv4_a) =? (ace_lru_ip target).(ipv4_a));
+    destruct ((ace_lru_ip e).(ipv4_b) =? (ace_lru_ip target).(ipv4_b));
+    destruct ((ace_lru_ip e).(ipv4_c) =? (ace_lru_ip target).(ipv4_c));
+    destruct ((ace_lru_ip e).(ipv4_d) =? (ace_lru_ip target).(ipv4_d));
+    simpl; try lia.
+Qed.
+
+Theorem lru_eviction_maintains_or_reduces : forall cache,
+  (length (evict_lru cache) <= length cache)%nat.
+Proof.
+  intros cache.
+  unfold evict_lru.
+  destruct (find_lru_entry cache None) eqn:Hfind.
+  - apply remove_lru_entry_reduces_or_maintains.
+  - lia.
+Qed.
+
+
+Theorem add_with_lru_bounded : forall cache ip mac ttl time max_size,
+  (length cache <= max_size)%nat ->
+  (length (add_with_lru_eviction cache ip mac ttl time max_size) <= S max_size)%nat.
+Proof.
+  intros cache ip mac ttl time max_size Hbound.
+  unfold add_with_lru_eviction.
+  destruct (Nat.ltb (length cache) max_size) eqn:Hlt.
+  - simpl. lia.
+  - simpl. pose proof (lru_eviction_maintains_or_reduces cache) as Hevict. lia.
+Qed.
+
+Lemma find_lru_with_dynamic_oldest : forall cache oldest,
+  ace_lru_static oldest = false ->
+  match find_lru_entry cache (Some oldest) with
+  | Some lru => ace_lru_static lru = false
+  | None => True
+  end.
+Proof.
+  intros cache. induction cache as [|entry rest IH]; intros oldest Hdyn.
+  - simpl. assumption.
+  - simpl. destruct (ace_lru_static entry) eqn:Hstatic.
+    + apply IH. assumption.
+    + destruct (N.ltb (ace_lru_last_used entry) (ace_lru_last_used oldest)) eqn:Hlt.
+      * apply IH. assumption.
+      * apply IH. assumption.
+Qed.
+
+Theorem lru_evicts_oldest_dynamic : forall cache,
+  (exists e, In e cache /\ ace_lru_static e = false) ->
+  match find_lru_entry cache None with
+  | Some lru => ace_lru_static lru = false
+  | None => True
+  end.
+Proof.
+  intros cache Hex.
+  induction cache as [|entry rest IH].
+  - destruct Hex as [e [Hin _]]. simpl in Hin. contradiction.
+  - simpl. destruct (ace_lru_static entry) eqn:Hstatic.
+    + apply IH. destruct Hex as [e [Hin Hdyn]]. simpl in Hin. destruct Hin as [Heq | Hin].
+      * subst. rewrite Hstatic in Hdyn. discriminate Hdyn.
+      * exists e. split; assumption.
+    + apply find_lru_with_dynamic_oldest. assumption.
+Qed.
+
+Theorem lru_preserves_static_entries : forall cache lru,
+  find_lru_entry cache None = Some lru ->
+  ace_lru_static lru = false.
+Proof.
+  intros cache lru Hfind.
+  induction cache as [|e rest IH].
+  - simpl in Hfind. discriminate.
+  - simpl in Hfind. destruct (ace_lru_static e) eqn:Hstatic.
+    + apply IH. assumption.
+    + pose proof (find_lru_with_dynamic_oldest rest e Hstatic) as Hdyn.
+      cbn in Hfind. destruct (find_lru_entry rest (Some e)) as [a|] eqn:Hrest.
+      * injection Hfind as Heq. subst. assumption.
+      * discriminate.
+Qed.
+
+
 (* Structural equality for IPv4 addresses: compares all four octets *)
 Definition ip_eq (ip1 ip2 : IPv4Address) : bool :=
   (N.eqb ip1.(ipv4_a) ip2.(ipv4_a)) &&
@@ -3262,25 +3434,24 @@ Proof.
   - destruct (N.leb (t2 - t1) ARP_FLOOD_WINDOW) eqn:Hwindow_check.
     + destruct (N.leb (count + 1) ARP_FLOOD_THRESHOLD) eqn:Hthresh.
       * apply N.leb_le in Hthresh. lia.
-      * reflexivity.
+      * simpl. rewrite Hlt, Hwindow_check, Hthresh. reflexivity.
     + apply N.leb_nle in Hwindow_check. lia.
 Qed.
 
-Theorem per_mac_allows_after_window : forall table mac ip t1 t2,
+Theorem per_mac_allows_after_window : forall table mac ip t1 t2 count,
+  lookup_flood_entry_mac table mac = Some {| fem_mac := mac; fem_ip := ip;
+                                             fem_last_request := t1; fem_request_count := count |} ->
   t2 - t1 > ARP_FLOOD_WINDOW ->
   snd (update_flood_table_mac table mac ip t2) = true.
 Proof.
-  intros table mac ip t1 t2 Hwindow.
+  intros table mac ip t1 t2 count Hlook Hwindow.
   unfold update_flood_table_mac.
-  destruct (lookup_flood_entry_mac table mac) eqn:Hlook.
-  - destruct (N.ltb t2 (fem_last_request f)) eqn:Hlt.
-    + apply N.ltb_lt in Hlt. lia.
-    + assert (Hdiff: t2 - fem_last_request f > ARP_FLOOD_WINDOW).
-      { destruct f. simpl in *. lia. }
-      destruct (N.leb (t2 - fem_last_request f) ARP_FLOOD_WINDOW) eqn:Hcheck.
-      * apply N.leb_le in Hcheck. lia.
-      * reflexivity.
-  - reflexivity.
+  rewrite Hlook.
+  destruct (N.ltb t2 t1) eqn:Hlt.
+  - apply N.ltb_lt in Hlt. lia.
+  - simpl. destruct (N.leb (t2 - t1) ARP_FLOOD_WINDOW) eqn:Hcheck.
+    + apply N.leb_le in Hcheck. lia.
+    + simpl. rewrite Hlt, Hcheck. reflexivity.
 Qed.
 
 
