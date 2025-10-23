@@ -1270,6 +1270,215 @@ Definition bind_result {A B} (r : ARPResult A) (f : A -> ARPResult B) : ARPResul
 (* Compilation checkpoint *)
 
 (* =============================================================================
+   Ethernet Frame Construction (802.3)
+   ============================================================================= *)
+
+Definition ETHERTYPE_ARP : N := 0x0806.
+Definition ETHERTYPE_IPV4 : N := 0x0800.
+Definition ETHERTYPE_VLAN : N := 0x8100.
+
+Definition ETHERNET_HEADER_SIZE : nat := 14.
+Definition ETHERNET_FCS_SIZE : nat := 4.
+Definition ETHERNET_MIN_PAYLOAD : nat := 46.
+Definition ETHERNET_MIN_FRAME : nat := 64.
+
+Record EthernetFrame := {
+  eth_dest : MACAddress;
+  eth_src : MACAddress;
+  eth_type : N;
+  eth_payload : list N;
+  eth_fcs : N
+}.
+
+Definition serialize_ethernet_header (dest src : MACAddress) (ethertype : N) : list N :=
+  serialize_mac dest ++ serialize_mac src ++ split_word16 ethertype.
+
+Definition compute_crc32_table_entry (n : N) : N :=
+  let poly := 0xEDB88320 in
+  let rec_step := fix step (crc : N) (i : nat) : N :=
+    match i with
+    | O => crc
+    | S i' =>
+        let b := N.land crc 1 in
+        let crc' := N.shiftr crc 1 in
+        if N.eqb b 1
+        then step (N.lxor crc' poly) i'
+        else step crc' i'
+    end
+  in rec_step n 8%nat.
+
+Definition compute_crc32 (data : list N) : N :=
+  let step := fun (crc : N) (byte : N) =>
+    let idx := N.land (N.lxor crc byte) 0xFF in
+    N.lxor (N.shiftr crc 8) (compute_crc32_table_entry idx)
+  in
+  let initial := 0xFFFFFFFF in
+  let final := fold_left step data initial in
+  N.lxor final 0xFFFFFFFF.
+
+Definition pad_to_minimum (payload : list N) (min_size : nat) : list N :=
+  let len := length payload in
+  if Nat.ltb len min_size
+  then payload ++ repeat 0 (min_size - len)
+  else payload.
+
+Definition serialize_ethernet_frame (dest src : MACAddress) (ethertype : N)
+                                    (payload : list N) : list N :=
+  let header := serialize_ethernet_header dest src ethertype in
+  let padded := pad_to_minimum payload ETHERNET_MIN_PAYLOAD in
+  let frame_no_fcs := header ++ padded in
+  let fcs := compute_crc32 frame_no_fcs in
+  let fcs_bytes := [N.land fcs 0xFF;
+                    N.land (N.shiftr fcs 8) 0xFF;
+                    N.land (N.shiftr fcs 16) 0xFF;
+                    N.land (N.shiftr fcs 24) 0xFF] in
+  frame_no_fcs ++ fcs_bytes.
+
+Definition serialize_arp_frame (dest src : MACAddress) (arp_payload : ARPEthernetIPv4) : list N :=
+  serialize_ethernet_frame dest src ETHERTYPE_ARP (serialize_arp_packet arp_payload).
+
+Definition parse_ethernet_header (data : list N) : option (MACAddress * MACAddress * N * list N) :=
+  match data with
+  | d0::d1::d2::d3::d4::d5::s0::s1::s2::s3::s4::s5::t0::t1::rest =>
+      let dest := {| mac_bytes := [d0;d1;d2;d3;d4;d5]; mac_valid := eq_refl |} in
+      let src := {| mac_bytes := [s0;s1;s2;s3;s4;s5]; mac_valid := eq_refl |} in
+      let etype := combine_word16 t0 t1 in
+      Some (dest, src, etype, rest)
+  | _ => None
+  end.
+
+Definition verify_ethernet_fcs (frame : list N) : bool :=
+  if Nat.ltb (length frame) ETHERNET_MIN_FRAME
+  then false
+  else
+    let frame_len := length frame in
+    let frame_no_fcs := firstn (frame_len - ETHERNET_FCS_SIZE) frame in
+    let fcs_bytes := skipn (frame_len - ETHERNET_FCS_SIZE) frame in
+    match fcs_bytes with
+    | [b0; b1; b2; b3] =>
+        let received_fcs := N.lor (N.lor (N.lor b0 (N.shiftl b1 8))
+                                         (N.shiftl b2 16))
+                                  (N.shiftl b3 24) in
+        let computed_fcs := compute_crc32 frame_no_fcs in
+        N.eqb received_fcs computed_fcs
+    | _ => false
+    end.
+
+Definition parse_ethernet_frame (data : list N) : option EthernetFrame :=
+  match parse_ethernet_header data with
+  | Some (dest, src, etype, payload_with_fcs) =>
+      if verify_ethernet_fcs data
+      then
+        let payload_len := length payload_with_fcs in
+        let payload := firstn (payload_len - ETHERNET_FCS_SIZE) payload_with_fcs in
+        let fcs_bytes := skipn (payload_len - ETHERNET_FCS_SIZE) payload_with_fcs in
+        match fcs_bytes with
+        | [b0; b1; b2; b3] =>
+            let fcs := N.lor (N.lor (N.lor b0 (N.shiftl b1 8))
+                                   (N.shiftl b2 16))
+                            (N.shiftl b3 24) in
+            Some {| eth_dest := dest; eth_src := src; eth_type := etype;
+                    eth_payload := payload; eth_fcs := fcs |}
+        | _ => None
+        end
+      else None
+  | None => None
+  end.
+
+Lemma ethernet_header_size_correct : forall dest src etype,
+  length (serialize_ethernet_header dest src etype) = ETHERNET_HEADER_SIZE.
+Proof.
+  intros dest src etype.
+  unfold serialize_ethernet_header, ETHERNET_HEADER_SIZE.
+  unfold serialize_mac.
+  destruct dest as [[|d1 [|d2 [|d3 [|d4 [|d5 [|d6 [|]]]]]]] Hdv];
+  destruct src as [[|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]] Hsv];
+  try discriminate Hdv; try discriminate Hsv.
+  unfold split_word16.
+  simpl.
+  reflexivity.
+Qed.
+
+Lemma pad_to_minimum_length_sufficient : forall payload min_size,
+  (length (pad_to_minimum payload min_size) >= min_size)%nat.
+Proof.
+  intros payload min_size.
+  unfold pad_to_minimum.
+  destruct (Nat.ltb (length payload) min_size) eqn:Hlt.
+  - apply Nat.ltb_lt in Hlt.
+    rewrite app_length, repeat_length.
+    lia.
+  - apply Nat.ltb_ge in Hlt.
+    assumption.
+Qed.
+
+Lemma pad_preserves_prefix : forall payload min_size,
+  exists suffix,
+    pad_to_minimum payload min_size = payload ++ suffix.
+Proof.
+  intros payload min_size.
+  unfold pad_to_minimum.
+  destruct (Nat.ltb (length payload) min_size) eqn:Hlt.
+  - exists (repeat 0 (min_size - length payload)).
+    reflexivity.
+  - exists [].
+    rewrite app_nil_r.
+    reflexivity.
+Qed.
+
+Theorem ethernet_frame_minimum_size : forall dest src etype payload,
+  (length (serialize_ethernet_frame dest src etype payload) >= ETHERNET_MIN_FRAME)%nat.
+Proof.
+  intros dest src etype payload.
+  unfold serialize_ethernet_frame, ETHERNET_MIN_FRAME, ETHERNET_FCS_SIZE.
+  set (header := serialize_ethernet_header dest src etype).
+  set (padded := pad_to_minimum payload ETHERNET_MIN_PAYLOAD).
+  assert (Hheader: length header = ETHERNET_HEADER_SIZE) by apply ethernet_header_size_correct.
+  assert (Hpadded: (length padded >= ETHERNET_MIN_PAYLOAD)%nat) by apply pad_to_minimum_length_sufficient.
+  unfold ETHERNET_HEADER_SIZE, ETHERNET_MIN_PAYLOAD in *.
+  repeat rewrite app_length.
+  simpl.
+  lia.
+Qed.
+
+Theorem serialize_arp_frame_is_valid_ethernet : forall dest src arp_pkt,
+  (length (serialize_arp_frame dest src arp_pkt) >= ETHERNET_MIN_FRAME)%nat.
+Proof.
+  intros dest src arp_pkt.
+  unfold serialize_arp_frame.
+  apply ethernet_frame_minimum_size.
+Qed.
+
+Lemma pad_idempotent : forall payload min_size,
+  (length payload >= min_size)%nat ->
+  pad_to_minimum payload min_size = payload.
+Proof.
+  intros payload min_size Hlen.
+  unfold pad_to_minimum.
+  destruct (Nat.ltb (length payload) min_size) eqn:Hlt.
+  - apply Nat.ltb_lt in Hlt. lia.
+  - reflexivity.
+Qed.
+
+Lemma ethernet_header_parse_succeeds : forall dest src etype rest,
+  exists dest' src' etype' rest',
+    parse_ethernet_header (serialize_ethernet_header dest src etype ++ rest) =
+    Some (dest', src', etype', rest').
+Proof.
+  intros dest src etype rest.
+  destruct dest as [[|d0 [|d1 [|d2 [|d3 [|d4 [|d5 [|]]]]]]] Hdv];
+  destruct src as [[|s0 [|s1 [|s2 [|s3 [|s4 [|s5 [|]]]]]]] Hsv];
+  try discriminate Hdv; try discriminate Hsv.
+  unfold serialize_ethernet_header, parse_ethernet_header.
+  unfold serialize_mac.
+  simpl.
+  eexists. eexists. eexists. eexists.
+  reflexivity.
+Qed.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
    Packet Validation Semantics
    ============================================================================= *)
 
@@ -6720,6 +6929,16 @@ Extraction "arp.ml"
   serialize_ipv4
   split_word16
   combine_word16
+
+  (* Ethernet frame construction *)
+  serialize_ethernet_header
+  serialize_ethernet_frame
+  serialize_arp_frame
+  parse_ethernet_header
+  parse_ethernet_frame
+  verify_ethernet_fcs
+  compute_crc32
+  pad_to_minimum
 
   (* Validation *)
   validate_arp_packet
