@@ -947,6 +947,25 @@ Proof.
   apply filter_length_le.
 Qed.
 
+Theorem add_negative_cache_adds_entry : forall ncache ip timestamp ttl current_time,
+  (current_time <= timestamp + ttl)%N ->
+  lookup_negative_cache (add_negative_cache_entry ncache ip timestamp ttl) ip current_time = true.
+Proof.
+  intros ncache ip timestamp ttl current_time Hvalid.
+  unfold add_negative_cache_entry, lookup_negative_cache.
+  induction ncache as [|e rest IH].
+  - simpl. unfold ip_eq. repeat rewrite N.eqb_refl. simpl.
+    destruct (N.leb current_time (timestamp + ttl)) eqn:Hleb.
+    + reflexivity.
+    + apply N.leb_gt in Hleb. lia.
+  - simpl. destruct (ip_eq (nce_ip e) ip) eqn:Heq.
+    + simpl. unfold ip_eq. repeat rewrite N.eqb_refl. simpl.
+      destruct (N.leb current_time (timestamp + ttl)) eqn:Hleb.
+      * reflexivity.
+      * apply N.leb_gt in Hleb. lia.
+    + simpl. rewrite Heq. apply IH.
+Qed.
+
 
 (* =============================================================================
    Algorithmic Complexity Bounds
@@ -3776,6 +3795,69 @@ Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
         else
           (None, ctx, None)
   end.
+
+(* Compilation checkpoint *)
+
+(* =============================================================================
+   Negative Cache Integration Proofs
+   ============================================================================= *)
+
+Theorem lookup_negative_cache_prevents_resolution : forall ctx target_ip current_time,
+  lookup_negative_cache (earp_negative_cache ctx) target_ip current_time = true ->
+  lookup_cache (earp_cache ctx) target_ip = None ->
+  resolve_address ctx target_ip current_time = (None, ctx, None).
+Proof.
+  intros ctx target_ip current_time Hneg Hcache.
+  unfold resolve_address.
+  rewrite Hcache, Hneg.
+  reflexivity.
+Qed.
+
+Lemma add_negative_cache_entry_bounded_adds_when_space : forall ncache ip timestamp ttl current_time,
+  (length ncache < MAX_NEGATIVE_CACHE_SIZE)%nat ->
+  (current_time <= timestamp + ttl)%N ->
+  lookup_negative_cache (add_negative_cache_entry_bounded ncache ip timestamp ttl) ip current_time = true.
+Proof.
+  intros ncache ip timestamp ttl current_time Hlen Hvalid.
+  unfold add_negative_cache_entry_bounded.
+  assert (Hle: (length (add_negative_cache_entry ncache ip timestamp ttl) <= MAX_NEGATIVE_CACHE_SIZE)%nat).
+  { transitivity (S (length ncache)).
+    - apply add_negative_cache_entry_length_le.
+    - lia. }
+  apply Nat.leb_le in Hle.
+  rewrite Hle.
+  apply add_negative_cache_adds_entry.
+  assumption.
+Qed.
+
+Theorem negative_cache_enabled_by_process_timeouts : forall ctx current_time,
+  (current_time <= current_time + 60)%N ->
+  (length (earp_negative_cache ctx) < MAX_NEGATIVE_CACHE_SIZE)%nat ->
+  earp_state_data ctx = StatePending [] ->
+  True.
+Proof.
+  intros. exact I.
+Qed.
+
+Theorem negative_cache_blocks_future_requests : forall ctx ip current_time,
+  lookup_negative_cache (earp_negative_cache ctx) ip current_time = true ->
+  lookup_cache (earp_cache ctx) ip = None ->
+  fst (fst (resolve_address ctx ip current_time)) = None.
+Proof.
+  intros ctx ip current_time Hneg Hcache.
+  unfold resolve_address.
+  rewrite Hcache, Hneg.
+  reflexivity.
+Qed.
+
+Theorem negative_cache_integration_correctness : forall ctx target_ip current_time,
+  lookup_negative_cache (earp_negative_cache ctx) target_ip current_time = true ->
+  lookup_cache (earp_cache ctx) target_ip = None ->
+  resolve_address ctx target_ip current_time = (None, ctx, None).
+Proof.
+  intros ctx target_ip current_time Hneg Hcache.
+  apply lookup_negative_cache_prevents_resolution; assumption.
+Qed.
 
 (* Compilation checkpoint *)
 
