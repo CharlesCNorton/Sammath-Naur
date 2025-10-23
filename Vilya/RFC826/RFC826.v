@@ -6984,190 +6984,6 @@ Proof.
   - inversion Hproc. subst. exact Hbound.
 Qed.
 
-
-(* =============================================================================
-   OCaml Extraction
-   ============================================================================= *)
-
-
-Require Extraction.
-Extract Inductive bool => "bool" [ "true" "false" ].
-Extract Inductive list => "list" [ "[]" "(::)" ].
-Extract Inductive prod => "(*)" [ "(,)" ].
-Extract Inductive option => "option" [ "Some" "None" ].
-
-(* Core ARP Processing *)
-Extraction "arp.ml"
-  (* Packet construction *)
-  make_arp_request
-  make_arp_reply
-  make_gratuitous_arp
-  make_arp_probe
-
-  (* Serialization and parsing *)
-  serialize_arp_packet
-  parse_arp_packet
-  serialize_mac
-  serialize_ipv4
-  split_word16
-  combine_word16
-
-  (* Ethernet frame construction *)
-  serialize_ethernet_header
-  serialize_ethernet_frame
-  serialize_arp_frame
-  parse_ethernet_header
-  parse_ethernet_frame
-  verify_ethernet_fcs
-  compute_crc32
-  pad_to_minimum
-
-  (* Validation *)
-  validate_arp_packet
-  validate_arp_packet_detailed
-  validate_rarp_packet
-  is_valid_opcode
-  is_broadcast_mac
-  is_multicast_mac
-  is_gratuitous_arp
-  is_gratuitous_request
-  is_gratuitous_reply
-  classify_gratuitous_arp
-  is_suspicious_arp
-
-  (* Cache operations *)
-  lookup_cache
-  merge_cache_entry
-  update_cache_entry
-  add_cache_entry
-  add_static_entry
-  would_conflict_static_entry
-  is_static_cache_entry
-  rfc826_merge
-  age_cache
-
-  (* Negative cache *)
-  lookup_negative_cache
-  add_negative_cache_entry
-  add_negative_cache_entry_bounded
-  clean_negative_cache
-
-  (* Comparison helpers *)
-  mac_eq
-  ip_eq
-
-  (* Basic ARP protocol *)
-  process_arp_packet
-
-  (* Refinement types and type-safe processing *)
-  mk_validated_arp
-  process_validated_arp_packet
-  parse_validated_arp_packet
-  mk_validated_rarp_client
-  mk_validated_rarp_server
-
-  (* Enhanced ARP with state machine *)
-  process_arp_packet_enhanced
-  resolve_address
-  send_arp_request_with_flood_check
-
-  (* RARP *)
-  lookup_rarp_table
-  validate_rarp_client
-  validate_rarp_server
-  validate_rarp_packet
-  process_rarp_client
-  process_rarp_server
-  process_rarp_packet
-
-  (* Generic ARP processing *)
-  process_generic_arp
-  convert_to_generic
-
-  (* Flood prevention *)
-  update_flood_table
-  clean_flood_table
-  lookup_flood_entry
-
-  (* Request queue and retry *)
-  process_timeouts
-  add_pending_request
-  remove_pending_request
-  retry_pending_request
-
-  (* Duplicate Address Detection (RFC 5227) *)
-  start_dad_probe
-  process_probe_timeout
-  detect_probe_conflict
-
-  (* ARP Announcement *)
-  process_announce_timeout
-
-  (* Conflict detection and defense *)
-  detect_address_conflict
-  process_conflict
-  can_defend
-  make_defend_packet
-
-  (* Timers *)
-  timer_expired
-  start_timer
-  stop_timer
-
-  (* Event processing *)
-  enhanced_process_event
-  process_event
-
-  (* Network interface *)
-  send_arp_on_interface
-
-  (* Configuration API *)
-  flush_cache
-  flush_dynamic_entries
-  update_cache_ttl
-  set_context_ttl
-  flush_context_cache
-  flush_context_dynamic
-  get_cache_size
-  get_static_count
-  get_dynamic_count
-  set_enhanced_context_ttl
-  flush_enhanced_cache
-  flush_enhanced_dynamic
-  disable_dad
-  reset_flood_table
-
-  (* Multi-Interface Support *)
-  lookup_interface
-  lookup_interface_by_mac
-  lookup_interface_by_ip
-  is_local_ip
-  select_interface_for_target
-  get_up_interfaces
-  count_interfaces
-  count_up_interfaces
-  update_interface
-  update_interface_cache
-  update_interface_state
-  set_interface_up
-  remove_interface
-  add_interface
-  process_arp_packet_on_interface
-  process_arp_packet_multi
-  send_arp_request_from_interface
-  resolve_address_multi
-  create_interface
-  bring_interface_up
-  bring_interface_down
-  flush_interface_cache
-  flush_all_interface_caches
-  add_interface_to_context
-  remove_interface_from_context
-  age_all_interface_caches
-  total_cache_entries
-  single_to_multi
-  enhanced_to_multi.
-
 (* =============================================================================
    Multi-Interface Correctness Properties
    ============================================================================= *)
@@ -7944,4 +7760,189 @@ Qed.
 
 Definition adversarial_test_suite_complete : bool := true.
 Compute adversarial_test_suite_complete.
+
+
+(* =============================================================================
+   OCaml Extraction
+   ============================================================================= *)
+
+
+Require Extraction.
+Extract Inductive bool => "bool" [ "true" "false" ].
+Extract Inductive list => "list" [ "[]" "(::)" ].
+Extract Inductive prod => "(*)" [ "(,)" ].
+Extract Inductive option => "option" [ "Some" "None" ].
+
+(* Core ARP Processing *)
+Extraction "arp.ml"
+  (* Packet construction *)
+  make_arp_request
+  make_arp_reply
+  make_gratuitous_arp
+  make_arp_probe
+
+  (* Serialization and parsing *)
+  serialize_arp_packet
+  parse_arp_packet
+  serialize_mac
+  serialize_ipv4
+  split_word16
+  combine_word16
+
+  (* Ethernet frame construction *)
+  serialize_ethernet_header
+  serialize_ethernet_frame
+  serialize_arp_frame
+  parse_ethernet_header
+  parse_ethernet_frame
+  verify_ethernet_fcs
+  compute_crc32
+  pad_to_minimum
+
+  (* Validation *)
+  validate_arp_packet
+  validate_arp_packet_detailed
+  validate_rarp_packet
+  is_valid_opcode
+  is_broadcast_mac
+  is_multicast_mac
+  is_gratuitous_arp
+  is_gratuitous_request
+  is_gratuitous_reply
+  classify_gratuitous_arp
+  is_suspicious_arp
+
+  (* Cache operations *)
+  lookup_cache
+  merge_cache_entry
+  update_cache_entry
+  add_cache_entry
+  add_static_entry
+  would_conflict_static_entry
+  is_static_cache_entry
+  rfc826_merge
+  age_cache
+
+  (* Negative cache *)
+  lookup_negative_cache
+  add_negative_cache_entry
+  add_negative_cache_entry_bounded
+  clean_negative_cache
+
+  (* Comparison helpers *)
+  mac_eq
+  ip_eq
+
+  (* Basic ARP protocol *)
+  process_arp_packet
+
+  (* Refinement types and type-safe processing *)
+  mk_validated_arp
+  process_validated_arp_packet
+  parse_validated_arp_packet
+  mk_validated_rarp_client
+  mk_validated_rarp_server
+
+  (* Enhanced ARP with state machine *)
+  process_arp_packet_enhanced
+  resolve_address
+  send_arp_request_with_flood_check
+
+  (* RARP *)
+  lookup_rarp_table
+  validate_rarp_client
+  validate_rarp_server
+  validate_rarp_packet
+  process_rarp_client
+  process_rarp_server
+  process_rarp_packet
+
+  (* Generic ARP processing *)
+  process_generic_arp
+  convert_to_generic
+
+  (* Flood prevention *)
+  update_flood_table
+  clean_flood_table
+  lookup_flood_entry
+
+  (* Request queue and retry *)
+  process_timeouts
+  add_pending_request
+  remove_pending_request
+  retry_pending_request
+
+  (* Duplicate Address Detection (RFC 5227) *)
+  start_dad_probe
+  process_probe_timeout
+  detect_probe_conflict
+
+  (* ARP Announcement *)
+  process_announce_timeout
+
+  (* Conflict detection and defense *)
+  detect_address_conflict
+  process_conflict
+  can_defend
+  make_defend_packet
+
+  (* Timers *)
+  timer_expired
+  start_timer
+  stop_timer
+
+  (* Event processing *)
+  enhanced_process_event
+  process_event
+
+  (* Network interface *)
+  send_arp_on_interface
+
+  (* Configuration API *)
+  flush_cache
+  flush_dynamic_entries
+  update_cache_ttl
+  set_context_ttl
+  flush_context_cache
+  flush_context_dynamic
+  get_cache_size
+  get_static_count
+  get_dynamic_count
+  set_enhanced_context_ttl
+  flush_enhanced_cache
+  flush_enhanced_dynamic
+  disable_dad
+  reset_flood_table
+
+  (* Multi-Interface Support *)
+  lookup_interface
+  lookup_interface_by_mac
+  lookup_interface_by_ip
+  is_local_ip
+  select_interface_for_target
+  get_up_interfaces
+  count_interfaces
+  count_up_interfaces
+  update_interface
+  update_interface_cache
+  update_interface_state
+  set_interface_up
+  remove_interface
+  add_interface
+  process_arp_packet_on_interface
+  process_arp_packet_multi
+  send_arp_request_from_interface
+  resolve_address_multi
+  create_interface
+  bring_interface_up
+  bring_interface_down
+  flush_interface_cache
+  flush_all_interface_caches
+  add_interface_to_context
+  remove_interface_from_context
+  age_all_interface_caches
+  total_cache_entries
+  single_to_multi
+  enhanced_to_multi.
+
 
