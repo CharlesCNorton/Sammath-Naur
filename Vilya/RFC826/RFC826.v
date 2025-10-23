@@ -2759,7 +2759,8 @@ Record EnhancedARPContext := {
   earp_state_data : ARPStateData;
   earp_iface : NetworkInterface;
   earp_flood_table : FloodTable;
-  earp_last_cache_cleanup : N
+  earp_last_cache_cleanup : N;
+  earp_negative_cache : NegativeCache
 }.
 
 (* Enhanced context configuration API *)
@@ -2771,7 +2772,8 @@ Definition set_enhanced_context_ttl (ctx : EnhancedARPContext) (new_ttl : N) : E
      earp_state_data := ctx.(earp_state_data);
      earp_iface := ctx.(earp_iface);
      earp_flood_table := ctx.(earp_flood_table);
-     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := ctx.(earp_negative_cache) |}.
 
 Definition flush_enhanced_cache (ctx : EnhancedARPContext) : EnhancedARPContext :=
   {| earp_my_mac := ctx.(earp_my_mac);
@@ -2781,7 +2783,8 @@ Definition flush_enhanced_cache (ctx : EnhancedARPContext) : EnhancedARPContext 
      earp_state_data := ctx.(earp_state_data);
      earp_iface := ctx.(earp_iface);
      earp_flood_table := ctx.(earp_flood_table);
-     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |}.
 
 Definition flush_enhanced_dynamic (ctx : EnhancedARPContext) : EnhancedARPContext :=
   {| earp_my_mac := ctx.(earp_my_mac);
@@ -2791,7 +2794,8 @@ Definition flush_enhanced_dynamic (ctx : EnhancedARPContext) : EnhancedARPContex
      earp_state_data := ctx.(earp_state_data);
      earp_iface := ctx.(earp_iface);
      earp_flood_table := ctx.(earp_flood_table);
-     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := ctx.(earp_negative_cache) |}.
 
 Definition disable_dad (ctx : EnhancedARPContext) : EnhancedARPContext :=
   {| earp_my_mac := ctx.(earp_my_mac);
@@ -2801,7 +2805,8 @@ Definition disable_dad (ctx : EnhancedARPContext) : EnhancedARPContext :=
      earp_state_data := StateIdle;
      earp_iface := ctx.(earp_iface);
      earp_flood_table := ctx.(earp_flood_table);
-     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |}.
 
 Definition reset_flood_table (ctx : EnhancedARPContext) : EnhancedARPContext :=
   {| earp_my_mac := ctx.(earp_my_mac);
@@ -2811,7 +2816,8 @@ Definition reset_flood_table (ctx : EnhancedARPContext) : EnhancedARPContext :=
      earp_state_data := ctx.(earp_state_data);
      earp_iface := ctx.(earp_iface);
      earp_flood_table := [];
-     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |}.
 
 (* Conversion: Single interface context to multi-interface *)
 Definition single_to_multi (ctx : ARPContext) (id : InterfaceID)
@@ -2996,7 +3002,8 @@ Definition add_pending_request (ctx : EnhancedARPContext) (target_ip : IPv4Addre
          earp_state_data := StatePending (new_req :: reqs);
          earp_iface := ctx.(earp_iface);
          earp_flood_table := ctx.(earp_flood_table);
-         earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}
+         earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+         earp_negative_cache := ctx.(earp_negative_cache) |}
   | _ =>
       let new_req := {| preq_target_ip := target_ip;
                        preq_retries := 0;
@@ -3008,7 +3015,8 @@ Definition add_pending_request (ctx : EnhancedARPContext) (target_ip : IPv4Addre
          earp_state_data := StatePending [new_req];
          earp_iface := ctx.(earp_iface);
          earp_flood_table := ctx.(earp_flood_table);
-         earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}
+         earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+         earp_negative_cache := ctx.(earp_negative_cache) |}
   end.
 
 Definition remove_pending_request (reqs : list PendingRequest) (target_ip : IPv4Address)
@@ -3052,7 +3060,8 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
                              end;
           earp_iface := ctx.(earp_iface);
           earp_flood_table := ctx.(earp_flood_table);
-          earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}, rev packets)
+          earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+          earp_negative_cache := ctx.(earp_negative_cache) |}, rev packets)
   | _ => (ctx, [])
   end.
 
@@ -3075,7 +3084,8 @@ Definition resolve_address (ctx : EnhancedARPContext) (target_ip : IPv4Address)
                        earp_state_data := ctx'.(earp_state_data);
                        earp_iface := ctx'.(earp_iface);
                        earp_flood_table := new_flood;
-                       earp_last_cache_cleanup := ctx'.(earp_last_cache_cleanup) |} in
+                       earp_last_cache_cleanup := ctx'.(earp_last_cache_cleanup);
+                       earp_negative_cache := ctx'.(earp_negative_cache) |} in
         let req := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
         (None, ctx'', Some req)
       else
@@ -3099,7 +3109,8 @@ Definition start_dad_probe (ctx : EnhancedARPContext) (ip_to_probe : IPv4Address
                                      probe_timer := start_timer ARP_PROBE_WAIT current_time |};
      earp_iface := ctx.(earp_iface);
      earp_flood_table := ctx.(earp_flood_table);
-     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |}.
+     earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |}.
 
 Definition make_arp_probe (my_mac : MACAddress) (target_ip : IPv4Address)
                           : ARPEthernetIPv4 :=
@@ -3126,7 +3137,8 @@ Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
                     earp_state_data := StateProbe new_probe;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
-                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
       (ctx', Some (make_arp_probe ctx.(earp_my_mac) probe.(probe_ip)))
     else
       let announce := {| announce_count := 0;
@@ -3138,7 +3150,8 @@ Definition process_probe_timeout (ctx : EnhancedARPContext) (probe : ProbeState)
                     earp_state_data := StateAnnounce announce;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
-                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
       (ctx', None)
   else
     (ctx, None).
@@ -3170,7 +3183,8 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
                     earp_state_data := StateAnnounce new_announce;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
-                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
       (ctx', Some (make_gratuitous_arp ctx.(earp_my_mac) ctx.(earp_my_ip)))
     else
       let ctx' := {| earp_my_mac := ctx.(earp_my_mac);
@@ -3180,7 +3194,8 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
                     earp_state_data := StateIdle;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
-                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
       (ctx', None)
   else
     (ctx, None).
@@ -3217,7 +3232,8 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                       earp_state_data := StateIdle;
                       earp_iface := ctx.(earp_iface);
                       earp_flood_table := ctx.(earp_flood_table);
-                      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
         (ctx', None)
       else
         (ctx, None)
@@ -3232,7 +3248,8 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                       earp_state_data := StateDefend new_defend;
                       earp_iface := ctx.(earp_iface);
                       earp_flood_table := ctx.(earp_flood_table);
-                      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                      earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
         (ctx', Some (make_defend_packet ctx))
       else
         (ctx, None)
@@ -3245,7 +3262,8 @@ Definition process_conflict (ctx : EnhancedARPContext) (current_time : N)
                     earp_state_data := StateDefend new_defend;
                     earp_iface := ctx.(earp_iface);
                     earp_flood_table := ctx.(earp_flood_table);
-                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                    earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
       (ctx', Some (make_defend_packet ctx))
   end.
 
@@ -3263,7 +3281,8 @@ Definition send_arp_request_with_flood_check (ctx : EnhancedARPContext)
                   earp_state_data := ctx.(earp_state_data);
                   earp_iface := ctx.(earp_iface);
                   earp_flood_table := new_flood_table;
-                  earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                  earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
     let request := make_arp_request ctx.(earp_my_mac) ctx.(earp_my_ip) target_ip in
     (ctx', Some request)
   else
@@ -3274,7 +3293,8 @@ Definition send_arp_request_with_flood_check (ctx : EnhancedARPContext)
                   earp_state_data := ctx.(earp_state_data);
                   earp_iface := ctx.(earp_iface);
                   earp_flood_table := new_flood_table;
-                  earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup) |} in
+                  earp_last_cache_cleanup := ctx.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
     (ctx', None).
 
 Lemma send_arp_request_preserves_cache : forall ctx target_ip current_time ctx' pkt,
@@ -3641,7 +3661,8 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                      earp_state_data := ctx.(earp_state_data);
                      earp_iface := ctx.(earp_iface);
                      earp_flood_table := cleaned_flood;
-                     earp_last_cache_cleanup := current_time |} in
+                     earp_last_cache_cleanup := current_time;
+     earp_negative_cache := [] |} in
 
   (* RFC 826: Reject packets with broadcast sender MAC *)
   if is_broadcast_mac packet.(arp_sha)
@@ -3666,7 +3687,8 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                       earp_state_data := StateConflict probe.(probe_ip) conflict_timer;
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
-                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
+                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
         (ctx', None)
       else
         (* Continue with RFC 826 strict processing with size enforcement *)
@@ -3680,7 +3702,8 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                       earp_state_data := ctx_aged.(earp_state_data);
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
-                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
+                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
         (ctx', None)
   | _ =>
       (* Check for address conflict *)
@@ -3710,7 +3733,8 @@ Definition process_arp_packet_enhanced (ctx : EnhancedARPContext)
                       earp_state_data := new_state;
                       earp_iface := ctx_aged.(earp_iface);
                       earp_flood_table := ctx_aged.(earp_flood_table);
-                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup) |} in
+                      earp_last_cache_cleanup := ctx_aged.(earp_last_cache_cleanup);
+     earp_negative_cache := [] |} in
 
         (* Generate reply if request is for us *)
         if ip_eq packet.(arp_tpa) ctx_aged.(earp_my_ip)
@@ -4939,7 +4963,8 @@ Lemma process_enhanced_probe_conflict_transitions : forall ctx pkt t dt probe ct
        earp_state_data := StateProbe probe;
        earp_iface := earp_iface ctx;
        earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
-       earp_last_cache_cleanup := t |} probe pkt = true ->
+       earp_last_cache_cleanup := t;
+     earp_negative_cache := [] |} probe pkt = true ->
   process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
   earp_cache ctx' = age_cache (earp_cache ctx) dt /\
   (exists conflict_timer, earp_state_data ctx' = StateConflict (probe_ip probe) conflict_timer) /\
@@ -4965,7 +4990,8 @@ Theorem dad_conflict_preempts_cache_update : forall ctx pkt t dt probe ctx' resp
        earp_state_data := StateProbe probe;
        earp_iface := earp_iface ctx;
        earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
-       earp_last_cache_cleanup := t |} probe pkt = true ->
+       earp_last_cache_cleanup := t;
+     earp_negative_cache := [] |} probe pkt = true ->
   is_broadcast_mac (arp_sha pkt) = false ->
   lookup_cache (age_cache (earp_cache ctx) dt) (arp_spa pkt) = None ->
   process_arp_packet_enhanced ctx pkt t dt = (ctx', resp) ->
@@ -4998,7 +5024,8 @@ Proof.
        earp_state_data := StateProbe probe;
        earp_iface := earp_iface ctx;
        earp_flood_table := clean_flood_table (earp_flood_table ctx) t;
-       earp_last_cache_cleanup := t |} probe pkt = true).
+       earp_last_cache_cleanup := t;
+     earp_negative_cache := [] |} probe pkt = true).
   { unfold detect_probe_conflict. rewrite Hspa_match. apply orb_true_l. }
   rewrite <- Hsha_poison in Hnot_bcast.
   assert (Hpreempt := dad_conflict_preempts_cache_update ctx pkt t dt probe ctx' resp Hstate Hconflict Hnot_bcast Hnot_in_cache Hproc).
@@ -5717,7 +5744,8 @@ Lemma enhanced_broadcast_case : forall ctx pkt ctx_aged,
                earp_state_data := earp_state_data ctx;
                earp_iface := earp_iface ctx;
                earp_flood_table := clean_flood_table (earp_flood_table ctx) 0;
-               earp_last_cache_cleanup := 0 |} ->
+               earp_last_cache_cleanup := 0;
+     earp_negative_cache := [] |} ->
   forall ctx_simple,
     arp_my_mac ctx_simple = earp_my_mac ctx ->
     arp_my_ip ctx_simple = earp_my_ip ctx ->
@@ -6916,7 +6944,8 @@ Definition enhanced_ctx_with_gateway : EnhancedARPContext :=
      earp_state_data := StateIdle;
      earp_iface := {| if_mac := alice_mac; if_ip := alice_ip; if_mtu := 1500; if_up := true |};
      earp_flood_table := [];
-     earp_last_cache_cleanup := 0 |}.
+     earp_last_cache_cleanup := 0;
+     earp_negative_cache := [] |}.
 
 Theorem composite_adversarial_resilience_ultimate :
   let honest_reply := make_arp_reply bob_mac bob_ip alice_mac alice_ip in
