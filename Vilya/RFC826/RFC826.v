@@ -5205,6 +5205,51 @@ Proof.
   split; assumption.
 Qed.
 
+Fixpoint process_packet_list (ctx : ARPContext) (packets : list ARPEthernetIPv4)
+  : ARPContext * list (option ARPEthernetIPv4) :=
+  match packets with
+  | [] => (ctx, [])
+  | pkt :: rest =>
+      let (ctx', resp) := process_arp_packet ctx pkt in
+      let (ctx_final, resps) := process_packet_list ctx' rest in
+      (ctx_final, resp :: resps)
+  end.
+
+Theorem process_empty_list_identity : forall ctx,
+  process_packet_list ctx [] = (ctx, []).
+Proof.
+  intros. reflexivity.
+Qed.
+
+Theorem process_list_preserves_length : forall ctx packets ctx' resps,
+  process_packet_list ctx packets = (ctx', resps) ->
+  length resps = length packets.
+Proof.
+  intros ctx packets. revert ctx.
+  induction packets as [|pkt rest IH].
+  - intros ctx ctx' resps Hproc.
+    simpl in Hproc.
+    injection Hproc as _ Hresps. subst. reflexivity.
+  - intros ctx ctx' resps Hproc.
+    simpl in Hproc.
+    destruct (process_arp_packet ctx pkt) as [ctx1 resp1] eqn:Hproc1.
+    destruct (process_packet_list ctx1 rest) as [ctx_final resps_rest] eqn:Hproc_rest.
+    injection Hproc as _ Hresps. subst.
+    simpl. f_equal.
+    apply (IH ctx1 ctx_final resps_rest Hproc_rest).
+Qed.
+
+Theorem process_list_deterministic : forall ctx packets ctx1 resps1 ctx2 resps2,
+  process_packet_list ctx packets = (ctx1, resps1) ->
+  process_packet_list ctx packets = (ctx2, resps2) ->
+  ctx1 = ctx2 /\ resps1 = resps2.
+Proof.
+  intros ctx packets ctx1 resps1 ctx2 resps2 H1 H2.
+  rewrite H1 in H2.
+  injection H2 as Hctx Hresps.
+  split; assumption.
+Qed.
+
 (* Cache monotonicity: lookups for unrelated IPs are preserved *)
 Theorem cache_monotonic_unrelated : forall ctx pkt ctx' resp ip mac,
   process_arp_packet ctx pkt = (ctx', resp) ->
