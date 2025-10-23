@@ -267,6 +267,14 @@ Record ARPCacheEntry := {
 (* ARP cache table: linear list of IP-to-MAC mappings *)
 Definition ARPCache := list ARPCacheEntry.
 
+Record NegativeCacheEntry := {
+  nce_ip : IPv4Address;
+  nce_timestamp : N;
+  nce_ttl : N
+}.
+
+Definition NegativeCache := list NegativeCacheEntry.
+
 (* Structural equality for IPv4 addresses: compares all four octets *)
 Definition ip_eq (ip1 ip2 : IPv4Address) : bool :=
   (N.eqb ip1.(ipv4_a) ip2.(ipv4_a)) &&
@@ -285,6 +293,36 @@ Definition lookup_cache (cache : ARPCache) (ip : IPv4Address) : option MACAddres
         else find rest
     end
   in find cache.
+
+Definition lookup_negative_cache (ncache : NegativeCache) (ip : IPv4Address) (current_time : N)
+  : bool :=
+  let fix find (nc : NegativeCache) : bool :=
+    match nc with
+    | [] => false
+    | entry :: rest =>
+        if ip_eq entry.(nce_ip) ip
+        then if N.leb current_time (entry.(nce_timestamp) + entry.(nce_ttl))
+             then true
+             else find rest
+        else find rest
+    end
+  in find ncache.
+
+Definition add_negative_cache_entry (ncache : NegativeCache) (ip : IPv4Address)
+                                    (timestamp : N) (ttl : N) : NegativeCache :=
+  let entry := {| nce_ip := ip; nce_timestamp := timestamp; nce_ttl := ttl |} in
+  let fix add (nc : NegativeCache) : NegativeCache :=
+    match nc with
+    | [] => [entry]
+    | e :: rest =>
+        if ip_eq e.(nce_ip) ip
+        then entry :: rest
+        else e :: add rest
+    end
+  in add ncache.
+
+Definition clean_negative_cache (ncache : NegativeCache) (current_time : N) : NegativeCache :=
+  filter (fun entry => N.leb current_time (entry.(nce_timestamp) + entry.(nce_ttl))) ncache.
 
 (* Cache uniqueness invariant: no duplicate IP addresses *)
 Definition cache_unique (cache : ARPCache) : Prop :=
@@ -685,6 +723,18 @@ Proof.
 Qed.
 
 (* Compilation checkpoint *)
+
+Theorem negative_cache_empty_returns_false : forall ip t,
+  lookup_negative_cache [] ip t = false.
+Proof.
+  intros. reflexivity.
+Qed.
+
+Theorem clean_negative_cache_empty : forall t,
+  clean_negative_cache [] t = [].
+Proof.
+  intros. reflexivity.
+Qed.
 
 (* =============================================================================
    Packet Construction Primitives
