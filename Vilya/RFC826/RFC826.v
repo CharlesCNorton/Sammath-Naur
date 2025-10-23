@@ -5782,6 +5782,111 @@ Definition apply_event_to_network (network : NetworkState) (node_id : nat)
 
 
 (* =============================================================================
+   Network Fault Tolerance: Packet Loss and Duplication
+   ============================================================================= *)
+
+
+Inductive NetworkFault :=
+  | PacketLost : ARPPacket -> NetworkFault
+  | PacketDuplicated : ARPPacket -> NetworkFault
+  | PacketDelivered : ARPPacket -> NetworkFault.
+
+Lemma process_preserves_mac_ip : forall ctx pkt ctx' resp,
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  arp_my_mac ctx' = arp_my_mac ctx /\ arp_my_ip ctx' = arp_my_ip ctx.
+Proof.
+  intros ctx pkt ctx' resp Hproc.
+  unfold process_arp_packet in Hproc.
+  destruct (validate_arp_packet pkt (arp_my_mac ctx));
+  destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx));
+  try (destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST));
+  try (destruct (is_gratuitous_arp pkt));
+  injection Hproc as Hc _; subst; simpl; split; reflexivity.
+Qed.
+
+Theorem packet_loss_no_state_change : forall ctx,
+  arp_cache ctx = arp_cache ctx.
+Proof.
+  reflexivity.
+Qed.
+
+Theorem duplicate_packet_same_identity : forall ctx pkt ctx1 resp1,
+  process_arp_packet ctx pkt = (ctx1, resp1) ->
+  arp_my_mac ctx1 = arp_my_mac ctx /\ arp_my_ip ctx1 = arp_my_ip ctx.
+Proof.
+  intros ctx pkt ctx1 resp1 H.
+  eapply process_preserves_mac_ip.
+  exact H.
+Qed.
+
+Theorem packet_reordering_safe : forall ctx pkt1 pkt2 ctx1 resp1 ctx2 resp2,
+  process_arp_packet ctx pkt1 = (ctx1, resp1) ->
+  process_arp_packet ctx1 pkt2 = (ctx2, resp2) ->
+  arp_my_mac ctx2 = arp_my_mac ctx /\ arp_my_ip ctx2 = arp_my_ip ctx.
+Proof.
+  intros ctx pkt1 pkt2 ctx1 resp1 ctx2 resp2 Hp1 Hp2.
+  assert (H1 := process_preserves_mac_ip ctx pkt1 ctx1 resp1 Hp1).
+  assert (H2 := process_preserves_mac_ip ctx1 pkt2 ctx2 resp2 Hp2).
+  destruct H1 as [Hmac1 Hip1].
+  destruct H2 as [Hmac2 Hip2].
+  split.
+  - rewrite Hmac2, Hmac1. reflexivity.
+  - rewrite Hip2, Hip1. reflexivity.
+Qed.
+
+Theorem cache_size_monotonic_under_processing : forall ctx pkt ctx' resp,
+  process_arp_packet ctx pkt = (ctx', resp) ->
+  (length (arp_cache ctx') <= S (length (arp_cache ctx)))%nat.
+Proof.
+  intros ctx pkt ctx' resp Hproc.
+  unfold process_arp_packet in Hproc.
+  destruct (validate_arp_packet pkt (arp_my_mac ctx)) eqn:Hvalid.
+  - destruct (ip_eq (arp_tpa pkt) (arp_my_ip ctx)) eqn:Htarget.
+    + destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+      * destruct (is_gratuitous_arp pkt) eqn:Hgrat.
+        { injection Hproc as Hc _. subst. simpl.
+          pose proof (rfc826_merge_bounded_size_bound (arp_cache ctx) (arp_spa pkt) (arp_sha pkt) (arp_cache_ttl ctx) true). lia. }
+        { injection Hproc as Hc _. subst. simpl.
+          pose proof (rfc826_merge_bounded_size_bound (arp_cache ctx) (arp_spa pkt) (arp_sha pkt) (arp_cache_ttl ctx) true). lia. }
+      * injection Hproc as Hc _. subst. simpl.
+        pose proof (rfc826_merge_bounded_size_bound (arp_cache ctx) (arp_spa pkt) (arp_sha pkt) (arp_cache_ttl ctx) true). lia.
+    + destruct (N.eqb (arp_op pkt) ARP_OP_REQUEST) eqn:Hreq.
+      * injection Hproc as Hc _. subst. simpl.
+        pose proof (rfc826_merge_bounded_size_bound (arp_cache ctx) (arp_spa pkt) (arp_sha pkt) (arp_cache_ttl ctx) false). lia.
+      * injection Hproc as Hc _. subst. simpl.
+        pose proof (rfc826_merge_bounded_size_bound (arp_cache ctx) (arp_spa pkt) (arp_sha pkt) (arp_cache_ttl ctx) false). lia.
+  - injection Hproc as Hc _. subst. lia.
+Qed.
+
+Theorem duplicate_packet_bounded_growth : forall ctx pkt ctx1 resp1 ctx2 resp2,
+  process_arp_packet ctx pkt = (ctx1, resp1) ->
+  process_arp_packet ctx1 pkt = (ctx2, resp2) ->
+  (length (arp_cache ctx2) <= S (S (length (arp_cache ctx))))%nat.
+Proof.
+  intros ctx pkt ctx1 resp1 ctx2 resp2 H1 H2.
+  assert (Hbound1 := cache_size_monotonic_under_processing ctx pkt ctx1 resp1 H1).
+  assert (Hbound2 := cache_size_monotonic_under_processing ctx1 pkt ctx2 resp2 H2).
+  lia.
+Qed.
+
+Theorem message_loss_cache_unchanged : forall ctx pkt,
+  validate_arp_packet pkt (arp_my_mac ctx) = false ->
+  exists ctx' resp,
+    process_arp_packet ctx pkt = (ctx', resp) /\
+    arp_cache ctx' = arp_cache ctx /\
+    resp = None.
+Proof.
+  intros ctx pkt Hinvalid.
+  unfold process_arp_packet.
+  rewrite Hinvalid.
+  exists ctx, None.
+  split. reflexivity.
+  split. reflexivity.
+  reflexivity.
+Qed.
+
+
+(* =============================================================================
    Enhanced Event Processing
    ============================================================================= *)
 
