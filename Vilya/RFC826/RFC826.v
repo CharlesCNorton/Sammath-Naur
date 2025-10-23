@@ -3365,6 +3365,16 @@ Proof.
   - simpl. reflexivity.
 Qed.
 
+Theorem age_cache_never_grows : forall cache elapsed,
+  (length (age_cache cache elapsed) <= length cache)%nat.
+Proof.
+  intros cache elapsed.
+  unfold age_cache.
+  transitivity (length (map (fun e => if ace_static e then e else {| ace_ip := ace_ip e; ace_mac := ace_mac e; ace_ttl := ace_ttl e - elapsed; ace_static := ace_static e |}) cache)).
+  - apply filter_length_le.
+  - rewrite map_length. reflexivity.
+Qed.
+
 (* Multi-interface cache aging (defined here after age_cache) *)
 Definition age_all_interface_caches
   (ctx : MultiInterfaceARPContext)
