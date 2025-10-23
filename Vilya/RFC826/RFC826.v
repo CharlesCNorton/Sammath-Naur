@@ -275,6 +275,8 @@ Record NegativeCacheEntry := {
 
 Definition NegativeCache := list NegativeCacheEntry.
 
+Definition MAX_NEGATIVE_CACHE_SIZE : nat := 256.
+
 (* Structural equality for IPv4 addresses: compares all four octets *)
 Definition ip_eq (ip1 ip2 : IPv4Address) : bool :=
   (N.eqb ip1.(ipv4_a) ip2.(ipv4_a)) &&
@@ -323,6 +325,13 @@ Definition add_negative_cache_entry (ncache : NegativeCache) (ip : IPv4Address)
 
 Definition clean_negative_cache (ncache : NegativeCache) (current_time : N) : NegativeCache :=
   filter (fun entry => N.leb current_time (entry.(nce_timestamp) + entry.(nce_ttl))) ncache.
+
+Definition add_negative_cache_entry_bounded (ncache : NegativeCache) (ip : IPv4Address)
+                                            (timestamp : N) (ttl : N) : NegativeCache :=
+  let result := add_negative_cache_entry ncache ip timestamp ttl in
+  if Nat.leb (length result) MAX_NEGATIVE_CACHE_SIZE
+  then result
+  else ncache.
 
 (* Cache uniqueness invariant: no duplicate IP addresses *)
 Definition cache_unique (cache : ARPCache) : Prop :=
@@ -734,6 +743,36 @@ Theorem clean_negative_cache_empty : forall t,
   clean_negative_cache [] t = [].
 Proof.
   intros. reflexivity.
+Qed.
+
+Theorem add_negative_cache_entry_length_le : forall ncache ip timestamp ttl,
+  (length (add_negative_cache_entry ncache ip timestamp ttl) <= S (length ncache))%nat.
+Proof.
+  intros ncache ip timestamp ttl.
+  unfold add_negative_cache_entry.
+  induction ncache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (nce_ip e) ip); simpl; lia.
+Qed.
+
+Theorem add_negative_cache_bounded_respects_limit : forall ncache ip timestamp ttl,
+  (length ncache <= MAX_NEGATIVE_CACHE_SIZE)%nat ->
+  (length (add_negative_cache_entry_bounded ncache ip timestamp ttl) <= MAX_NEGATIVE_CACHE_SIZE)%nat.
+Proof.
+  intros ncache ip timestamp ttl Hlen.
+  unfold add_negative_cache_entry_bounded.
+  destruct (Nat.leb (length (add_negative_cache_entry ncache ip timestamp ttl))
+                    MAX_NEGATIVE_CACHE_SIZE) eqn:Hcheck.
+  - apply Nat.leb_le. assumption.
+  - assumption.
+Qed.
+
+Theorem clean_negative_cache_length_le : forall ncache current_time,
+  (length (clean_negative_cache ncache current_time) <= length ncache)%nat.
+Proof.
+  intros ncache current_time.
+  unfold clean_negative_cache.
+  apply filter_length_le.
 Qed.
 
 (* =============================================================================
@@ -3050,7 +3089,7 @@ Definition process_timeouts (ctx : EnhancedARPContext) (current_time : N)
       in
       let '(acc_reqs, packets, failed_ips) := fold_left process_req reqs ([], [], []) in
       let new_reqs := rev acc_reqs in
-      let updated_ncache := fold_left (fun nc ip => add_negative_cache_entry nc ip current_time 60)
+      let updated_ncache := fold_left (fun nc ip => add_negative_cache_entry_bounded nc ip current_time 60)
                                       failed_ips ctx.(earp_negative_cache) in
       ({| earp_my_mac := ctx.(earp_my_mac);
           earp_my_ip := ctx.(earp_my_ip);
@@ -6024,16 +6063,86 @@ Definition flood_table_memory_bound (table : FloodTable) : nat :=
 Definition pending_requests_memory_bound (reqs : list PendingRequest) : nat :=
   (length reqs * 32)%nat.
 
+Definition negative_cache_memory_bound (ncache : NegativeCache) : nat :=
+  (length ncache * 20)%nat.
+
 Definition total_memory_bound (ctx : EnhancedARPContext) : nat :=
   match earp_state_data ctx with
   | StatePending reqs =>
       (cache_memory_bound (earp_cache ctx) +
        flood_table_memory_bound (earp_flood_table ctx) +
-       pending_requests_memory_bound reqs)%nat
+       pending_requests_memory_bound reqs +
+       negative_cache_memory_bound (earp_negative_cache ctx))%nat
   | _ =>
       (cache_memory_bound (earp_cache ctx) +
-       flood_table_memory_bound (earp_flood_table ctx))%nat
+       flood_table_memory_bound (earp_flood_table ctx) +
+       negative_cache_memory_bound (earp_negative_cache ctx))%nat
   end.
+
+Theorem negative_cache_bounded_memory_safe : forall ncache ip timestamp ttl,
+  (length ncache <= MAX_NEGATIVE_CACHE_SIZE)%nat ->
+  (length (add_negative_cache_entry_bounded ncache ip timestamp ttl) <= MAX_NEGATIVE_CACHE_SIZE)%nat /\
+  (negative_cache_memory_bound (add_negative_cache_entry_bounded ncache ip timestamp ttl) <=
+   negative_cache_memory_bound ncache + 20)%nat.
+Proof.
+  intros ncache ip timestamp ttl Hbound.
+  split.
+  - apply add_negative_cache_bounded_respects_limit. assumption.
+  - unfold negative_cache_memory_bound.
+    assert (Hlen: (length (add_negative_cache_entry_bounded ncache ip timestamp ttl) <= MAX_NEGATIVE_CACHE_SIZE)%nat).
+    { apply add_negative_cache_bounded_respects_limit. assumption. }
+    unfold add_negative_cache_entry_bounded.
+    destruct (Nat.leb (length (add_negative_cache_entry ncache ip timestamp ttl))
+                      MAX_NEGATIVE_CACHE_SIZE) eqn:Hcheck.
+    + assert (Hentry_len: (length (add_negative_cache_entry ncache ip timestamp ttl) <= S (length ncache))%nat).
+      { apply add_negative_cache_entry_length_le. }
+      lia.
+    + lia.
+Qed.
+
+Theorem process_timeouts_preserves_negative_cache_bound : forall ctx current_time ctx' pkts,
+  (length (earp_negative_cache ctx) <= MAX_NEGATIVE_CACHE_SIZE)%nat ->
+  process_timeouts ctx current_time = (ctx', pkts) ->
+  (length (earp_negative_cache ctx') <= MAX_NEGATIVE_CACHE_SIZE)%nat.
+Proof.
+  intros ctx current_time ctx' pkts Hbound Hproc.
+  unfold process_timeouts in Hproc.
+  destruct (earp_state_data ctx) eqn:Hstate.
+  - inversion Hproc. subst. exact Hbound.
+  - destruct (fold_left
+      (fun (acc : list PendingRequest * list ARPEthernetIPv4 * list IPv4Address)
+           (req : PendingRequest) =>
+       let '(kept_reqs, packets, failed_ips) := acc in
+       if timer_expired (preq_timer req) current_time
+       then
+        if (preq_retries req <? ARP_MAX_RETRIES)%N
+        then
+         (retry_pending_request req current_time :: kept_reqs,
+         make_arp_request (earp_my_mac ctx) (earp_my_ip ctx) (preq_target_ip req)
+         :: packets, failed_ips)
+        else (kept_reqs, packets, preq_target_ip req :: failed_ips)
+       else (req :: kept_reqs, packets, failed_ips)) l
+      ([], [], [])) as [[acc_reqs packets_acc] failed_ips] eqn:Hfold.
+    inversion Hproc. subst. simpl.
+    assert (Hfolded: forall ips nc,
+      (length nc <= MAX_NEGATIVE_CACHE_SIZE)%nat ->
+      (length (fold_left (fun nc' ip => add_negative_cache_entry_bounded nc' ip current_time 60)
+                         ips nc) <= MAX_NEGATIVE_CACHE_SIZE)%nat).
+    { induction ips as [|ip rest IHips].
+      - intros. simpl. assumption.
+      - intros. simpl. apply IHips.
+        apply add_negative_cache_bounded_respects_limit. assumption. }
+    apply Nat.le_trans with (m := length (fold_left
+                (fun (nc : NegativeCache) (ip : IPv4Address) =>
+                 add_negative_cache_entry_bounded nc ip current_time 60) failed_ips
+                (earp_negative_cache ctx))).
+    + apply clean_negative_cache_length_le.
+    + apply Hfolded. assumption.
+  - inversion Hproc. subst. exact Hbound.
+  - inversion Hproc. subst. exact Hbound.
+  - inversion Hproc. subst. exact Hbound.
+  - inversion Hproc. subst. exact Hbound.
+Qed.
 
 
 (* =============================================================================
@@ -6090,6 +6199,7 @@ Extraction "arp.ml"
   (* Negative cache *)
   lookup_negative_cache
   add_negative_cache_entry
+  add_negative_cache_entry_bounded
   clean_negative_cache
 
   (* Comparison helpers *)
