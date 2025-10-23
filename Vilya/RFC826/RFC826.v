@@ -775,6 +775,143 @@ Proof.
   apply filter_length_le.
 Qed.
 
+
+(* =============================================================================
+   Algorithmic Complexity Bounds
+   ============================================================================= *)
+
+
+Fixpoint lookup_cache_steps (cache : ARPCache) (target : IPv4Address) : nat :=
+  match cache with
+  | [] => 0
+  | entry :: rest =>
+      1 + (if ip_eq (ace_ip entry) target then 0 else lookup_cache_steps rest target)
+  end.
+
+Theorem lookup_cache_linear_time : forall cache target,
+  (lookup_cache_steps cache target <= length cache)%nat.
+Proof.
+  intros cache target.
+  induction cache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (ace_ip e) target) eqn:Heq.
+    + simpl. lia.
+    + simpl. lia.
+Qed.
+
+Theorem lookup_cache_worst_case : forall cache target,
+  lookup_cache cache target = None ->
+  lookup_cache_steps cache target = length cache.
+Proof.
+  intros cache target Hnone.
+  induction cache as [|e rest IH].
+  - reflexivity.
+  - simpl in Hnone.
+    destruct (ip_eq (ace_ip e) target) eqn:Heq.
+    + discriminate.
+    + simpl. rewrite Heq. simpl. f_equal. apply IH. assumption.
+Qed.
+
+Fixpoint lookup_negative_cache_steps (ncache : NegativeCache) (target : IPv4Address)
+                                      (current_time : N) : nat :=
+  match ncache with
+  | [] => 0
+  | entry :: rest =>
+      if ip_eq (nce_ip entry) target
+      then 1
+      else 1 + lookup_negative_cache_steps rest target current_time
+  end.
+
+Theorem lookup_negative_cache_linear_time : forall ncache target current_time,
+  (lookup_negative_cache_steps ncache target current_time <= length ncache)%nat.
+Proof.
+  intros ncache target current_time.
+  induction ncache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (nce_ip e) target).
+    + lia.
+    + lia.
+Qed.
+
+Theorem lookup_negative_cache_worst_case : forall ncache target current_time,
+  lookup_negative_cache ncache target current_time = false ->
+  (forall e, In e ncache -> ip_eq (nce_ip e) target = false) ->
+  lookup_negative_cache_steps ncache target current_time = length ncache.
+Proof.
+  intros ncache target current_time Hfalse Hallneq.
+  induction ncache as [|e rest IH].
+  - reflexivity.
+  - simpl.
+    assert (Hneq: ip_eq (nce_ip e) target = false).
+    { apply Hallneq. simpl. left. reflexivity. }
+    rewrite Hneq.
+    simpl. f_equal.
+    apply IH.
+    + simpl in Hfalse. rewrite Hneq in Hfalse. assumption.
+    + intros e' Hin. apply Hallneq. simpl. right. assumption.
+Qed.
+
+Fixpoint update_cache_entry_steps (cache : ARPCache) (target : IPv4Address) : nat :=
+  match cache with
+  | [] => 0
+  | e :: rest =>
+      if ip_eq (ace_ip e) target
+      then 1
+      else 1 + update_cache_entry_steps rest target
+  end.
+
+Theorem update_cache_entry_linear_time : forall cache target,
+  (update_cache_entry_steps cache target <= length cache)%nat.
+Proof.
+  intros cache target.
+  induction cache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (ace_ip e) target).
+    + lia.
+    + lia.
+Qed.
+
+Fixpoint merge_cache_entry_steps (cache : ARPCache) (target : IPv4Address) : nat :=
+  match cache with
+  | [] => 1
+  | e :: rest =>
+      if ip_eq (ace_ip e) target
+      then 1
+      else 1 + merge_cache_entry_steps rest target
+  end.
+
+Theorem merge_cache_entry_linear_time : forall cache target,
+  (merge_cache_entry_steps cache target <= S (length cache))%nat.
+Proof.
+  intros cache target.
+  induction cache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (ace_ip e) target).
+    + lia.
+    + lia.
+Qed.
+
+Fixpoint add_cache_entry_steps (cache : ARPCache) (target : IPv4Address) : nat :=
+  match cache with
+  | [] => 1
+  | e :: rest =>
+      if ip_eq (ace_ip e) target
+      then 1
+      else 1 + add_cache_entry_steps rest target
+  end.
+
+Theorem add_cache_entry_linear_time : forall cache target,
+  (add_cache_entry_steps cache target <= S (length cache))%nat.
+Proof.
+  intros cache target.
+  induction cache as [|e rest IH].
+  - simpl. lia.
+  - simpl. destruct (ip_eq (ace_ip e) target).
+    + lia.
+    + lia.
+Qed.
+
+
 (* =============================================================================
    Packet Construction Primitives
    ============================================================================= *)
@@ -6049,6 +6186,18 @@ Proof.
   apply Nat.le_trans with (m := length (map dec cache)).
   - apply filter_length_le.
   - rewrite map_length. lia.
+Qed.
+
+Theorem age_cache_linear_time : forall cache elapsed,
+  (length (age_cache cache elapsed) <= length cache)%nat.
+Proof.
+  apply age_cache_length_le.
+Qed.
+
+Theorem clean_negative_cache_linear_time : forall ncache current_time,
+  (length (clean_negative_cache ncache current_time) <= length ncache)%nat.
+Proof.
+  apply clean_negative_cache_length_le.
 Qed.
 
 Definition MAX_PENDING_REQUESTS : nat := 256.
