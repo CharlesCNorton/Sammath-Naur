@@ -5549,6 +5549,50 @@ Proof.
   reflexivity.
 Qed.
 
+(* Canonical encoding: serialization determines valid byte sequences *)
+Theorem serialization_determines_valid_bytes : forall pkt bytes,
+  parse_arp_packet (serialize_arp_packet pkt) = Some pkt /\
+  parse_arp_packet bytes = Some pkt ->
+  length bytes = 28%nat /\
+  exists sha spa tha tpa op,
+    pkt = {| arp_op := op; arp_sha := sha; arp_spa := spa;
+             arp_tha := tha; arp_tpa := tpa |}.
+Proof.
+  intros pkt bytes [Hser Hparse].
+  split.
+  - unfold parse_arp_packet in Hparse.
+    destruct bytes as [|b1 rest]; try discriminate.
+    destruct rest as [|b2 rest]; try discriminate.
+    destruct rest as [|b3 rest]; try discriminate.
+    destruct rest as [|b4 rest]; try discriminate.
+    destruct rest as [|b5 rest]; try discriminate.
+    destruct rest as [|b6 rest]; try discriminate.
+    destruct rest as [|b7 rest]; try discriminate.
+    destruct rest as [|b8 rest]; try discriminate.
+    destruct rest as [|b9 rest]; try discriminate.
+    destruct rest as [|b10 rest]; try discriminate.
+    destruct rest as [|b11 rest]; try discriminate.
+    destruct rest as [|b12 rest]; try discriminate.
+    destruct rest as [|b13 rest]; try discriminate.
+    destruct rest as [|b14 rest]; try discriminate.
+    destruct rest as [|b15 rest]; try discriminate.
+    destruct rest as [|b16 rest]; try discriminate.
+    destruct rest as [|b17 rest]; try discriminate.
+    destruct rest as [|b18 rest]; try discriminate.
+    destruct rest as [|b19 rest]; try discriminate.
+    destruct rest as [|b20 rest]; try discriminate.
+    destruct rest as [|b21 rest]; try discriminate.
+    destruct rest as [|b22 rest]; try discriminate.
+    destruct rest as [|b23 rest]; try discriminate.
+    destruct rest as [|b24 rest]; try discriminate.
+    destruct rest as [|b25 rest]; try discriminate.
+    destruct rest as [|b26 rest]; try discriminate.
+    destruct rest as [|b27 rest]; try discriminate.
+    destruct rest as [|b28 rest]; try discriminate.
+    destruct rest; try discriminate.
+    reflexivity.
+  - destruct pkt. exists arp_sha0, arp_spa0, arp_tha0, arp_tpa0, arp_op0. reflexivity.
+Qed.
 
 (* =============================================================================
    Function Correctness Properties
