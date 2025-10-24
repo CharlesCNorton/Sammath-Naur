@@ -21,8 +21,7 @@ From Coq Require Import
   Bool
   Arith
   Lia
-  Eqdep_dec
-  ProofIrrelevance.
+  Eqdep_dec.
 
 Import ListNotations.
 Open Scope N_scope.
@@ -171,11 +170,8 @@ Definition is_valid_arp_opcode (op : word16) : bool :=
    ============================================================================= *)
 
 
-(* Ethernet MAC address: 48-bit hardware identifier with length constraint *)
-Record MACAddress := {
-  mac_bytes : list byte;
-  mac_valid : length mac_bytes = 6%nat
-}.
+(* Ethernet MAC address: 48-bit hardware identifier as 6-tuple *)
+Definition MACAddress := (byte * byte * byte * byte * byte * byte)%type.
 
 (* IPv4 address: 32-bit internet protocol address as four octets *)
 Record IPv4Address := {
@@ -186,30 +182,24 @@ Record IPv4Address := {
 }.
 
 (* Ethernet broadcast address: FF:FF:FF:FF:FF:FF *)
-Definition MAC_BROADCAST : MACAddress.
-  refine {| mac_bytes := [255; 255; 255; 255; 255; 255] |}.
-  reflexivity.
-Defined.
+Definition MAC_BROADCAST : MACAddress :=
+  (255, 255, 255, 255, 255, 255).
 
 (* Zero MAC address: 00:00:00:00:00:00 for unknown target in requests *)
-Definition MAC_ZERO : MACAddress.
-  refine {| mac_bytes := [0; 0; 0; 0; 0; 0] |}.
-  reflexivity.
-Defined.
+Definition MAC_ZERO : MACAddress :=
+  (0, 0, 0, 0, 0, 0).
 
 (* Checks if MAC address is broadcast (FF:FF:FF:FF:FF:FF) *)
 Definition is_broadcast_mac (m : MACAddress) : bool :=
-  match m.(mac_bytes) with
-  | [255; 255; 255; 255; 255; 255] => true
+  match m with
+  | (255, 255, 255, 255, 255, 255) => true
   | _ => false
   end.
 
 (* Checks if MAC address is multicast via I/G bit (LSB of first octet) *)
 Definition is_multicast_mac (m : MACAddress) : bool :=
-  match m.(mac_bytes) with
-  | b0 :: _ => N.testbit b0 0
-  | _ => false
-  end.
+  let '(b0, _, _, _, _, _) := m in
+  N.testbit b0 0.
 
 (* Checks if IPv4 address is all zeros (0.0.0.0) *)
 Definition is_zero_ipv4 (ip : IPv4Address) : bool :=
@@ -218,9 +208,10 @@ Definition is_zero_ipv4 (ip : IPv4Address) : bool :=
 
 (* Structural equality for MAC addresses *)
 Definition mac_eq (m1 m2 : MACAddress) : bool :=
-  if list_eq_dec N.eq_dec m1.(mac_bytes) m2.(mac_bytes)
-  then true
-  else false.
+  let '(a1, b1, c1, d1, e1, f1) := m1 in
+  let '(a2, b2, c2, d2, e2, f2) := m2 in
+  (N.eqb a1 a2) && (N.eqb b1 b2) && (N.eqb c1 c2) &&
+  (N.eqb d1 d2) && (N.eqb e1 e2) && (N.eqb f1 f2).
 
 (* Compilation checkpoint *)
 
@@ -1133,7 +1124,9 @@ Definition make_arp_reply (my_mac : MACAddress) (my_ip : IPv4Address)
    ============================================================================= *)
 
 (* Serializes MAC address to 6-byte list *)
-Definition serialize_mac (m : MACAddress) : list byte := m.(mac_bytes).
+Definition serialize_mac (m : MACAddress) : list byte :=
+  let '(b0, b1, b2, b3, b4, b5) := m in
+  [b0; b1; b2; b3; b4; b5].
 
 (* Serializes IPv4 address to 4-byte list in network order *)
 Definition serialize_ipv4 (ip : IPv4Address) : list byte :=
@@ -1177,12 +1170,10 @@ Definition parse_arp_packet (data : list byte) : option ARPEthernetIPv4 :=
        (N.eqb pln IPV4_ADDR_LEN)
     then
       Some {| arp_op := combine_word16 op_hi op_lo;
-              arp_sha := {| mac_bytes := [sha1; sha2; sha3; sha4; sha5; sha6];
-                           mac_valid := eq_refl |};
+              arp_sha := (sha1, sha2, sha3, sha4, sha5, sha6);
               arp_spa := {| ipv4_a := spa1; ipv4_b := spa2;
                            ipv4_c := spa3; ipv4_d := spa4 |};
-              arp_tha := {| mac_bytes := [tha1; tha2; tha3; tha4; tha5; tha6];
-                           mac_valid := eq_refl |};
+              arp_tha := (tha1, tha2, tha3, tha4, tha5, tha6);
               arp_tpa := {| ipv4_a := tpa1; ipv4_b := tpa2;
                            ipv4_c := tpa3; ipv4_d := tpa4 |} |}
     else None
@@ -1211,12 +1202,10 @@ Definition process_generic_arp (packet : ARPPacket)
         [tha1; tha2; tha3; tha4; tha5; tha6],
         [tpa1; tpa2; tpa3; tpa4] =>
           Some {| arp_op := packet.(ar_op);
-                  arp_sha := {| mac_bytes := [sha1; sha2; sha3; sha4; sha5; sha6];
-                               mac_valid := eq_refl |};
+                  arp_sha := (sha1, sha2, sha3, sha4, sha5, sha6);
                   arp_spa := {| ipv4_a := spa1; ipv4_b := spa2;
                                ipv4_c := spa3; ipv4_d := spa4 |};
-                  arp_tha := {| mac_bytes := [tha1; tha2; tha3; tha4; tha5; tha6];
-                               mac_valid := eq_refl |};
+                  arp_tha := (tha1, tha2, tha3, tha4, tha5, tha6);
                   arp_tpa := {| ipv4_a := tpa1; ipv4_b := tpa2;
                                ipv4_c := tpa3; ipv4_d := tpa4 |} |}
       | _, _, _, _ => None
@@ -1359,8 +1348,8 @@ Definition serialize_arp_frame (dest src : MACAddress) (arp_payload : ARPEtherne
 Definition parse_ethernet_header (data : list N) : option (MACAddress * MACAddress * N * list N) :=
   match data with
   | d0::d1::d2::d3::d4::d5::s0::s1::s2::s3::s4::s5::t0::t1::rest =>
-      let dest := {| mac_bytes := [d0;d1;d2;d3;d4;d5]; mac_valid := eq_refl |} in
-      let src := {| mac_bytes := [s0;s1;s2;s3;s4;s5]; mac_valid := eq_refl |} in
+      let dest := (d0, d1, d2, d3, d4, d5) in
+      let src := (s0, s1, s2, s3, s4, s5) in
       let etype := combine_word16 t0 t1 in
       Some (dest, src, etype, rest)
   | _ => None
@@ -1410,9 +1399,8 @@ Proof.
   intros dest src etype.
   unfold serialize_ethernet_header, ETHERNET_HEADER_SIZE.
   unfold serialize_mac.
-  destruct dest as [[|d1 [|d2 [|d3 [|d4 [|d5 [|d6 [|]]]]]]] Hdv];
-  destruct src as [[|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]] Hsv];
-  try discriminate Hdv; try discriminate Hsv.
+  destruct dest as [[[[[d0 d1] d2] d3] d4] d5].
+  destruct src as [[[[[s0 s1] s2] s3] s4] s5].
   unfold split_word16.
   simpl.
   reflexivity.
@@ -1485,9 +1473,8 @@ Lemma ethernet_header_parse_succeeds : forall dest src etype rest,
     Some (dest', src', etype', rest').
 Proof.
   intros dest src etype rest.
-  destruct dest as [[|d0 [|d1 [|d2 [|d3 [|d4 [|d5 [|]]]]]]] Hdv];
-  destruct src as [[|s0 [|s1 [|s2 [|s3 [|s4 [|s5 [|]]]]]]] Hsv];
-  try discriminate Hdv; try discriminate Hsv.
+  destruct dest as [[[[[d0 d1] d2] d3] d4] d5].
+  destruct src as [[[[[s0 s1] s2] s3] s4] s5].
   unfold serialize_ethernet_header, parse_ethernet_header.
   unfold serialize_mac.
   simpl.
@@ -1819,7 +1806,7 @@ Proof.
   - exists {| varp_packet := packet; varp_valid := H |}.
     unfold mk_validated_arp.
     destruct (Bool.bool_dec (validate_arp_packet packet my_mac) true) as [Heq | Hneq].
-    + f_equal. f_equal. apply proof_irrelevance.
+    + f_equal. f_equal. apply UIP_dec. apply Bool.bool_dec.
     + contradiction.
 Qed.
 
@@ -2098,9 +2085,10 @@ Proof.
     + destruct Hin as [Heq_entry | Hin_rest].
       * subst entry. simpl in Heq.
         unfold mac_eq in Heq.
-        destruct (list_eq_dec N.eq_dec (mac_bytes mac) (mac_bytes mac)) eqn:Hdec.
-        { discriminate. }
-        { exfalso. apply n. reflexivity. }
+        destruct mac as [[[[[a b] c] d] e] f].
+        repeat (rewrite N.eqb_refl in Heq).
+        simpl in Heq.
+        discriminate.
       * apply IH. assumption.
 Qed.
 
@@ -2220,9 +2208,9 @@ Lemma mac_eq_refl : forall m, mac_eq m m = true.
 Proof.
   intros m.
   unfold mac_eq.
-  destruct (list_eq_dec N.eq_dec (mac_bytes m) (mac_bytes m)) eqn:Heq.
-  - reflexivity.
-  - exfalso. apply n. reflexivity.
+  destruct m as [[[[[a b] c] d] e] f].
+  repeat (rewrite N.eqb_refl).
+  reflexivity.
 Qed.
 
 (* RARP server generates replies that validate as client packets *)
@@ -2389,11 +2377,7 @@ Definition is_suspicious_arp (cache : ARPCache) (packet : ARPEthernetIPv4) : boo
   | None => false  (* New entry, not suspicious *)
   | Some cached_mac =>
       (* MAC changed for existing IP *)
-      if list_eq_dec N.eq_dec
-                     cached_mac.(mac_bytes)
-                     packet.(arp_sha).(mac_bytes)
-      then false  (* Same MAC, not suspicious *)
-      else true
+      negb (mac_eq cached_mac packet.(arp_sha))
   end.
 
 Theorem cache_detects_mac_conflict : forall cache ip mac1 mac2,
@@ -2407,9 +2391,8 @@ Theorem cache_detects_mac_conflict : forall cache ip mac1 mac2,
 Proof.
   intros cache ip mac1 mac2 Hlookup Hneq.
   unfold is_suspicious_arp. simpl. rewrite Hlookup.
-  destruct (list_eq_dec N.eq_dec (mac_bytes mac1) (mac_bytes mac2)) eqn:Heq.
-  - unfold mac_eq in Hneq. rewrite Heq in Hneq. discriminate.
-  - reflexivity.
+  rewrite Hneq.
+  reflexivity.
 Qed.
 
 (* Compilation checkpoint *)
@@ -3976,9 +3959,7 @@ Definition process_announce_timeout (ctx : EnhancedARPContext) (announce : Annou
 Definition detect_address_conflict (ctx : EnhancedARPContext) (packet : ARPEthernetIPv4)
                                    : bool :=
   ip_eq packet.(arp_spa) ctx.(earp_my_ip) &&
-  (if list_eq_dec N.eq_dec packet.(arp_sha).(mac_bytes) ctx.(earp_my_mac).(mac_bytes)
-   then false
-   else true).
+  negb (mac_eq packet.(arp_sha) ctx.(earp_my_mac)).
 
 Definition can_defend (defend : DefendState) (current_time : N) : bool :=
   N.leb (defend.(defend_last_time) + ARP_DEFEND_INTERVAL) current_time.
@@ -4341,13 +4322,9 @@ Theorem mac_address_equality_decidable : forall m1 m2 : MACAddress,
   {m1 = m2} + {m1 <> m2}.
 Proof.
   intros m1 m2.
-  destruct m1 as [bytes1 valid1].
-  destruct m2 as [bytes2 valid2].
-  destruct (list_eq_dec N.eq_dec bytes1 bytes2) as [Heq|Hneq].
-  - left. subst bytes2.
-    assert (valid1 = valid2) by apply proof_irrelevance.
-    subst. reflexivity.
-  - right. intro Hcontr. injection Hcontr as Heq. contradiction.
+  destruct m1 as [[[[[a1 b1] c1] d1] e1] f1].
+  destruct m2 as [[[[[a2 b2] c2] d2] e2] f2].
+  repeat (decide equality); apply N.eq_dec.
 Qed.
 
 Theorem ipv4_address_equality_decidable : forall ip1 ip2 : IPv4Address,
@@ -5305,9 +5282,7 @@ Qed.
 (* Theorem: Parse validates packet structure *)
 Theorem parse_validates_structure : forall data packet,
   parse_arp_packet data = Some packet ->
-  length data = 28%nat /\
-  length packet.(arp_sha).(mac_bytes) = 6%nat /\
-  length packet.(arp_tha).(mac_bytes) = 6%nat.
+  length data = 28%nat.
 Proof.
   intros data packet Hparse.
   unfold parse_arp_packet in Hparse.
@@ -5321,9 +5296,7 @@ Proof.
   end.
   injection Hparse as Hpacket.
   subst packet.
-  simpl.
-  split; [reflexivity|].
-  split; reflexivity.
+  reflexivity.
 Qed.
 
 
@@ -5400,12 +5373,10 @@ Theorem serialize_parse_identity : forall packet,
 Proof.
   intros packet.
   destruct packet as [op sha spa tha tpa].
-  destruct sha as [sha_bytes sha_valid].
-  destruct tha as [tha_bytes tha_valid].
+  destruct sha as [[[[[s1 s2] s3] s4] s5] s6].
+  destruct tha as [[[[[t1 t2] t3] t4] t5] t6].
   destruct spa as [spa_a spa_b spa_c spa_d].
   destruct tpa as [tpa_a tpa_b tpa_c tpa_d].
-  destruct sha_bytes as [|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]]; try discriminate sha_valid.
-  destruct tha_bytes as [|t1 [|t2 [|t3 [|t4 [|t5 [|t6 [|]]]]]]]; try discriminate tha_valid.
   unfold serialize_arp_packet, parse_arp_packet.
   unfold serialize_mac, serialize_ipv4, split_word16.
   simpl.
@@ -5419,13 +5390,7 @@ Proof.
     rewrite N.shiftr_div_pow2 by lia.
     reflexivity. }
   rewrite Hop.
-  assert (Hsha_eq: {| mac_bytes := [s1; s2; s3; s4; s5; s6]; mac_valid := eq_refl |} =
-                   {| mac_bytes := [s1; s2; s3; s4; s5; s6]; mac_valid := sha_valid |}) by
-    (f_equal; apply UIP_dec; decide equality; decide equality; apply N.eq_dec).
-  assert (Htha_eq: {| mac_bytes := [t1; t2; t3; t4; t5; t6]; mac_valid := eq_refl |} =
-                   {| mac_bytes := [t1; t2; t3; t4; t5; t6]; mac_valid := tha_valid |}) by
-    (f_equal; apply UIP_dec; decide equality; decide equality; apply N.eq_dec).
-  congruence.
+  reflexivity.
 Qed.
 
 
@@ -5489,23 +5454,15 @@ Theorem process_generic_arp_round_trip : forall packet,
 Proof.
   intros packet.
   destruct packet as [op sha spa tha tpa].
-  destruct sha as [sha_bytes sha_valid].
-  destruct tha as [tha_bytes tha_valid].
+  destruct sha as [[[[[s1 s2] s3] s4] s5] s6].
+  destruct tha as [[[[[t1 t2] t3] t4] t5] t6].
   destruct spa as [spa_a spa_b spa_c spa_d].
   destruct tpa as [tpa_a tpa_b tpa_c tpa_d].
-  destruct sha_bytes as [|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]]; try discriminate sha_valid.
-  destruct tha_bytes as [|t1 [|t2 [|t3 [|t4 [|t5 [|t6 [|]]]]]]]; try discriminate tha_valid.
   unfold process_generic_arp, convert_to_generic, is_supported_hw_proto.
   simpl.
   repeat rewrite N.eqb_refl.
   simpl.
-  assert (Hsha_eq: {| mac_bytes := [s1; s2; s3; s4; s5; s6]; mac_valid := eq_refl |} =
-                   {| mac_bytes := [s1; s2; s3; s4; s5; s6]; mac_valid := sha_valid |}) by
-    (f_equal; apply UIP_dec; decide equality; decide equality; apply N.eq_dec).
-  assert (Htha_eq: {| mac_bytes := [t1; t2; t3; t4; t5; t6]; mac_valid := eq_refl |} =
-                   {| mac_bytes := [t1; t2; t3; t4; t5; t6]; mac_valid := tha_valid |}) by
-    (f_equal; apply UIP_dec; decide equality; decide equality; apply N.eq_dec).
-  congruence.
+  reflexivity.
 Qed.
 
 Theorem generic_arp_validates_hw_proto : forall packet result,
@@ -5843,17 +5800,18 @@ Qed.
 Theorem detect_address_conflict_true_means_different_mac : forall ctx packet,
   detect_address_conflict ctx packet = true ->
   ip_eq (arp_spa packet) (earp_my_ip ctx) = true /\
-  (mac_bytes (arp_sha packet)) <> (mac_bytes (earp_my_mac ctx)).
+  (arp_sha packet) <> (earp_my_mac ctx).
 Proof.
   intros ctx packet Hconf.
   unfold detect_address_conflict in Hconf.
   apply andb_true_iff in Hconf.
   destruct Hconf as [Hipsame Hmacdiff].
   split; auto.
-  destruct (list_eq_dec N.eq_dec (mac_bytes (arp_sha packet))
-                        (mac_bytes (earp_my_mac ctx))) eqn:Heq.
-  - discriminate.
-  - assumption.
+  apply negb_true_iff in Hmacdiff.
+  intro Heq.
+  rewrite Heq in Hmacdiff.
+  rewrite mac_eq_refl in Hmacdiff.
+  discriminate.
 Qed.
 
 Theorem process_conflict_preserves_mac : forall ctx current_time ctx' pkt,
@@ -7289,18 +7247,14 @@ Compute compilation_successful.
    Each element compiles independently to avoid edit debt accumulation.
    ============================================================================= *)
 
-Definition alice_mac : MACAddress.
-  refine {| mac_bytes := [170; 187; 204; 221; 238; 255] |}.
-  reflexivity.
-Defined.
+Definition alice_mac : MACAddress :=
+  (170, 187, 204, 221, 238, 255).
 
 Definition alice_ip : IPv4Address :=
   {| ipv4_a := 192; ipv4_b := 168; ipv4_c := 1; ipv4_d := 100 |}.
 
-Definition bob_mac : MACAddress.
-  refine {| mac_bytes := [18; 52; 86; 120; 154; 188] |}.
-  reflexivity.
-Defined.
+Definition bob_mac : MACAddress :=
+  (18, 52, 86, 120, 154, 188).
 
 Definition bob_ip : IPv4Address :=
   {| ipv4_a := 192; ipv4_b := 168; ipv4_c := 1; ipv4_d := 200 |}.
@@ -7411,11 +7365,11 @@ Theorem arp_packet_size_constant : forall pkt,
 Proof.
   intro pkt.
   destruct pkt as [op sha spa tha tpa].
-  destruct sha as [[|s1 [|s2 [|s3 [|s4 [|s5 [|s6 [|]]]]]]] Hsha_valid];
-  destruct tha as [[|t1 [|t2 [|t3 [|t4 [|t5 [|t6 [|]]]]]]] Htha_valid];
-  try discriminate Hsha_valid; try discriminate Htha_valid.
+  destruct sha as [[[[[s1 s2] s3] s4] s5] s6].
+  destruct tha as [[[[[t1 t2] t3] t4] t5] t6].
+  destruct spa, tpa.
   unfold serialize_arp_packet, serialize_mac, serialize_ipv4, split_word16.
-  destruct spa, tpa. simpl. reflexivity.
+  simpl. reflexivity.
 Qed.
 
 Theorem arp_fits_in_ethernet_mtu :
@@ -7669,18 +7623,14 @@ Proof.
   split; reflexivity.
 Qed.
 
-Definition evil_mac : MACAddress.
-  refine {| mac_bytes := [222; 173; 190; 239; 222; 173] |}.
-  reflexivity.
-Defined.
+Definition evil_mac : MACAddress :=
+  (222, 173, 190, 239, 222, 173).
 
 Definition gateway_ip : IPv4Address :=
   {| ipv4_a := 192; ipv4_b := 168; ipv4_c := 1; ipv4_d := 1 |}.
 
-Definition legitimate_gateway_mac : MACAddress.
-  refine {| mac_bytes := [0; 1; 2; 3; 4; 5] |}.
-  reflexivity.
-Defined.
+Definition legitimate_gateway_mac : MACAddress :=
+  (0, 1, 2, 3, 4, 5).
 
 Definition ctx_with_static_gateway : ARPContext :=
   {| arp_my_mac := alice_mac;
