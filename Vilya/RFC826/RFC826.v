@@ -938,6 +938,18 @@ Proof.
   apply filter_length_le.
 Qed.
 
+(* Negative cache cleanup preserves entries within TTL *)
+Theorem clean_negative_cache_preserves_recent : forall ncache current_time entry,
+  In entry ncache ->
+  N.leb current_time (nce_timestamp entry + nce_ttl entry) = true ->
+  In entry (clean_negative_cache ncache current_time).
+Proof.
+  intros ncache current_time entry Hin Hrecent.
+  unfold clean_negative_cache.
+  apply filter_In.
+  split; assumption.
+Qed.
+
 Theorem add_negative_cache_adds_entry : forall ncache ip timestamp ttl current_time,
   (current_time <= timestamp + ttl)%N ->
   lookup_negative_cache (add_negative_cache_entry ncache ip timestamp ttl) ip current_time = true.
@@ -992,6 +1004,14 @@ Proof.
     destruct (ip_eq (ace_ip e) target) eqn:Heq.
     + discriminate.
     + simpl. rewrite Heq. simpl. f_equal. apply IH. assumption.
+Qed.
+
+(* Cache lookup has linear time complexity *)
+Theorem lookup_cache_complexity_linear : forall cache target,
+  (lookup_cache_steps cache target <= length cache)%nat.
+Proof.
+  intros cache target.
+  apply lookup_cache_linear_time.
 Qed.
 
 Fixpoint lookup_negative_cache_steps (ncache : NegativeCache) (target : IPv4Address)
@@ -1595,6 +1615,27 @@ Proof.
   intros dest src tag arp_pkt.
   unfold serialize_arp_vlan_frame.
   apply vlan_frame_minimum_size.
+Qed.
+
+(* Ethernet frame serialization correctness *)
+Theorem ethernet_frame_has_valid_structure : forall dest src etype payload,
+  (length payload >= ETHERNET_MIN_PAYLOAD)%nat ->
+  (length (serialize_ethernet_frame dest src etype payload) >= ETHERNET_MIN_FRAME)%nat.
+Proof.
+  intros dest src etype payload Hlen.
+  apply ethernet_frame_minimum_size.
+Qed.
+
+Lemma ethernet_serialize_header_matches : forall dest src etype payload,
+  exists rest,
+    serialize_ethernet_frame dest src etype payload =
+    serialize_ethernet_header dest src etype ++ rest.
+Proof.
+  intros dest src etype payload.
+  unfold serialize_ethernet_frame.
+  eexists.
+  repeat rewrite <- app_assoc.
+  reflexivity.
 Qed.
 
 (* Compilation checkpoint *)
