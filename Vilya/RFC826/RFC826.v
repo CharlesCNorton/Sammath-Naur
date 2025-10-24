@@ -1285,7 +1285,15 @@ Definition ETHERTYPE_ARP : N := 0x0806.
 Definition ETHERTYPE_IPV4 : N := 0x0800.
 Definition ETHERTYPE_VLAN : N := 0x8100.
 
+(* 802.1Q VLAN Tag (4 bytes: TPID=0x8100, TCI=PCP+DEI+VID) *)
+Record VLANTag := {
+  vlan_pcp : N;     (* Priority Code Point: 0-7 *)
+  vlan_dei : bool;  (* Drop Eligible Indicator *)
+  vlan_id : N       (* VLAN Identifier: 0-4095 *)
+}.
+
 Definition ETHERNET_HEADER_SIZE : nat := 14.
+Definition ETHERNET_VLAN_TAG_SIZE : nat := 4.
 Definition ETHERNET_FCS_SIZE : nat := 4.
 Definition ETHERNET_MIN_PAYLOAD : nat := 46.
 Definition ETHERNET_MIN_FRAME : nat := 64.
@@ -1298,8 +1306,30 @@ Record EthernetFrame := {
   eth_fcs : N
 }.
 
+Record VLANFrame := {
+  vlan_dest : MACAddress;
+  vlan_src : MACAddress;
+  vlan_tag : VLANTag;
+  vlan_type : N;
+  vlan_payload : list N;
+  vlan_fcs : N
+}.
+
 Definition serialize_ethernet_header (dest src : MACAddress) (ethertype : N) : list N :=
   serialize_mac dest ++ serialize_mac src ++ split_word16 ethertype.
+
+(* 802.1Q VLAN tag serialization: TPID (0x8100) + TCI (PCP|DEI|VID) *)
+Definition serialize_vlan_tag (tag : VLANTag) : list N :=
+  let pcp_bits := N.shiftl (N.land tag.(vlan_pcp) 7) 13 in
+  let dei_bit := if tag.(vlan_dei) then N.shiftl 1 12 else 0 in
+  let vid_bits := N.land tag.(vlan_id) 4095 in
+  let tci := N.lor (N.lor pcp_bits dei_bit) vid_bits in
+  split_word16 tci.
+
+Definition serialize_vlan_header (dest src : MACAddress) (tag : VLANTag) (ethertype : N) : list N :=
+  serialize_mac dest ++ serialize_mac src ++
+  split_word16 ETHERTYPE_VLAN ++ serialize_vlan_tag tag ++
+  split_word16 ethertype.
 
 Definition compute_crc32_table_entry (n : N) : N :=
   let poly := 0xEDB88320 in
@@ -1344,6 +1374,22 @@ Definition serialize_ethernet_frame (dest src : MACAddress) (ethertype : N)
 
 Definition serialize_arp_frame (dest src : MACAddress) (arp_payload : ARPEthernetIPv4) : list N :=
   serialize_ethernet_frame dest src ETHERTYPE_ARP (serialize_arp_packet arp_payload).
+
+Definition serialize_vlan_frame (dest src : MACAddress) (tag : VLANTag) (ethertype : N)
+                                (payload : list N) : list N :=
+  let header := serialize_vlan_header dest src tag ethertype in
+  let padded := pad_to_minimum payload ETHERNET_MIN_PAYLOAD in
+  let frame_no_fcs := header ++ padded in
+  let fcs := compute_crc32 frame_no_fcs in
+  let fcs_bytes := [N.land fcs 0xFF;
+                    N.land (N.shiftr fcs 8) 0xFF;
+                    N.land (N.shiftr fcs 16) 0xFF;
+                    N.land (N.shiftr fcs 24) 0xFF] in
+  frame_no_fcs ++ fcs_bytes.
+
+Definition serialize_arp_vlan_frame (dest src : MACAddress) (tag : VLANTag)
+                                    (arp_payload : ARPEthernetIPv4) : list N :=
+  serialize_vlan_frame dest src tag ETHERTYPE_ARP (serialize_arp_packet arp_payload).
 
 Definition parse_ethernet_header (data : list N) : option (MACAddress * MACAddress * N * list N) :=
   match data with
@@ -1480,6 +1526,75 @@ Proof.
   simpl.
   eexists. eexists. eexists. eexists.
   reflexivity.
+Qed.
+
+(* 802.1Q VLAN Theorems *)
+
+Theorem vlan_tag_size_correct : forall tag,
+  length (serialize_vlan_tag tag) = 2%nat.
+Proof.
+  intro tag.
+  unfold serialize_vlan_tag, split_word16.
+  simpl. reflexivity.
+Qed.
+
+Theorem vlan_header_size_correct : forall dest src tag etype,
+  length (serialize_vlan_header dest src tag etype) = (ETHERNET_HEADER_SIZE + ETHERNET_VLAN_TAG_SIZE)%nat.
+Proof.
+  intros dest src tag etype.
+  unfold serialize_vlan_header, ETHERNET_HEADER_SIZE, ETHERNET_VLAN_TAG_SIZE.
+  unfold serialize_mac, split_word16.
+  destruct dest as [[[[[d0 d1] d2] d3] d4] d5].
+  destruct src as [[[[[s0 s1] s2] s3] s4] s5].
+  simpl. unfold serialize_vlan_tag, split_word16. simpl. reflexivity.
+Qed.
+
+Theorem vlan_pcp_bounded : forall pcp,
+  pcp <= 7 ->
+  N.land pcp 7 = pcp.
+Proof.
+  intros pcp Hbound.
+  assert (H7: 7 = N.ones 3) by reflexivity.
+  rewrite H7.
+  rewrite N.land_ones by lia.
+  apply N.mod_small.
+  lia.
+Qed.
+
+Theorem vlan_id_bounded : forall vid,
+  vid <= 4095 ->
+  N.land vid 4095 = vid.
+Proof.
+  intros vid Hbound.
+  assert (H4095: 4095 = N.ones 12) by reflexivity.
+  rewrite H4095.
+  rewrite N.land_ones by lia.
+  apply N.mod_small.
+  lia.
+Qed.
+
+Theorem vlan_frame_minimum_size : forall dest src tag etype payload,
+  (length (serialize_vlan_frame dest src tag etype payload) >= ETHERNET_MIN_FRAME)%nat.
+Proof.
+  intros dest src tag etype payload.
+  unfold serialize_vlan_frame, ETHERNET_MIN_FRAME, ETHERNET_FCS_SIZE.
+  set (header := serialize_vlan_header dest src tag etype).
+  set (padded := pad_to_minimum payload ETHERNET_MIN_PAYLOAD).
+  assert (Hheader: length header = (ETHERNET_HEADER_SIZE + ETHERNET_VLAN_TAG_SIZE)%nat)
+    by apply vlan_header_size_correct.
+  assert (Hpadded: (length padded >= ETHERNET_MIN_PAYLOAD)%nat)
+    by apply pad_to_minimum_length_sufficient.
+  unfold ETHERNET_HEADER_SIZE, ETHERNET_VLAN_TAG_SIZE, ETHERNET_MIN_PAYLOAD in *.
+  repeat rewrite app_length.
+  simpl. lia.
+Qed.
+
+Theorem arp_vlan_frame_valid : forall dest src tag arp_pkt,
+  (length (serialize_arp_vlan_frame dest src tag arp_pkt) >= ETHERNET_MIN_FRAME)%nat.
+Proof.
+  intros dest src tag arp_pkt.
+  unfold serialize_arp_vlan_frame.
+  apply vlan_frame_minimum_size.
 Qed.
 
 (* Compilation checkpoint *)
