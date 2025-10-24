@@ -2956,6 +2956,32 @@ Proof.
   reflexivity.
 Qed.
 
+(* Timer progress guarantee: monotonicity and determinism *)
+Theorem timer_progress_monotonic : forall timer t1 t2,
+  timer_expired timer t1 = true ->
+  t1 <= t2 ->
+  timer_expired timer t2 = true.
+Proof.
+  intros timer t1 t2 Hexp Hle.
+  unfold timer_expired in *.
+  destruct (timer_active timer) eqn:Hactive; try discriminate.
+  apply N.leb_le in Hexp.
+  apply N.leb_le.
+  lia.
+Qed.
+
+Theorem timer_expiration_deterministic : forall timer t,
+  timer_active timer = true ->
+  (timer_expired timer t = true <-> timer_start timer + timer_duration timer <= t).
+Proof.
+  intros timer t Hactive.
+  unfold timer_expired.
+  rewrite Hactive.
+  split; intro H.
+  - apply N.leb_le. assumption.
+  - apply N.leb_le. assumption.
+Qed.
+
 Lemma stop_timer_is_inactive : forall timer,
   timer_active (stop_timer timer) = false.
 Proof.
