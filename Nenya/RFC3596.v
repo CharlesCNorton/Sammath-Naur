@@ -37,11 +37,18 @@ Definition word32  := N.  (* modulo 2^32 via [to_word32] *)
 Definition word128 := (word32 * word32 * word32 * word32)%type.
 
 (* numeric helpers *)
-Definition two4  : N := 16.
-Definition two8  : N := 256.
-Definition two16 : N := 65536.
-Definition two24 : N := 16777216.        (* 2^24 *)
-Definition two32 : N := 4294967296.      (* 2^32 *)
+Definition two (k:N) : N := N.pow 2 k.
+Definition two4  : N := two 4.
+Definition two8  : N := two 8.
+Definition two16 : N := two 16.
+Definition two24 : N := two 24.
+Definition two32 : N := two 32.
+
+Lemma two4_eq : two4 = 16. Proof. reflexivity. Qed.
+Lemma two8_eq : two8 = 256. Proof. reflexivity. Qed.
+Lemma two16_eq : two16 = 65536. Proof. reflexivity. Qed.
+Lemma two24_eq : two24 = 16777216. Proof. reflexivity. Qed.
+Lemma two32_eq : two32 = 4294967296. Proof. reflexivity. Qed.
 
 Definition to_byte   (x:N) : byte   := x mod two8.
 Definition to_word16 (x:N) : word16 := x mod two16.
@@ -169,7 +176,8 @@ Definition lo_nib (b:byte) : N := b mod two4.
 Lemma hi_nib_small : forall b, b < two8 -> (b / two4) < two4.
 Proof.
   intros b Hb.
-  unfold two8, two4 in *.
+  unfold two8, two4, two in *.
+  simpl in *.
   apply N.Div0.div_lt_upper_bound; lia.
 Qed.
 
@@ -178,7 +186,7 @@ Proof.
   intros b Hb.
   rewrite <- (N.div_mod b two4) at 1.
   - reflexivity.
-  - unfold two4; lia.
+  - unfold two4, two; simpl; lia.
 Qed.
 
 Lemma nibbles_reconstruct_byte : forall b,
@@ -222,7 +230,7 @@ Definition label_to_nibble (s:string) : option N :=
 Lemma nibble_to_nat_bound : forall n,
   n < two4 -> (N.to_nat n < 16)%nat.
 Proof.
-  intros n H. unfold two4 in H.
+  intros n H. unfold two4, two in H. simpl in H.
   repeat match goal with
   | H: N.succ _ < _ |- _ => apply N.lt_succ_r in H
   end.
@@ -233,7 +241,7 @@ Lemma label_of_nibble_inverse : forall n,
   n < two4 -> label_to_nibble (nibble_label_of n) = Some n.
 Proof.
   intros n Hlt.
-  unfold two4 in Hlt.
+  unfold two4, two in Hlt. simpl in Hlt.
   destruct (N.eq_dec n 0); [subst; reflexivity|].
   destruct (N.eq_dec n 1); [subst; reflexivity|].
   destruct (N.eq_dec n 2); [subst; reflexivity|].
@@ -263,11 +271,17 @@ Fixpoint sequence {A} (xs:list (option A)) : option (list A) :=
 
 (* Produce the 32 nibbles in the ip6.arpa order:
    low-order nibble of last byte first, then its high nibble, then previous byte, ... *)
-Fixpoint nibbles_rev_of_bytes (bs:list byte) : list N :=
-  match bs with
-  | [] => []
-  | b::tl => nibbles_rev_of_bytes tl ++ [lo_nib b; hi_nib b]
-  end.
+Definition nibbles_rev_of_bytes (bs:list byte) : list N :=
+  List.rev (List.flat_map (fun b => [hi_nib b; lo_nib b]) bs).
+
+Lemma nibbles_rev_of_bytes_cons : forall b bs,
+  nibbles_rev_of_bytes (b :: bs) =
+  (nibbles_rev_of_bytes bs ++ [lo_nib b; hi_nib b])%list.
+Proof.
+  intros b bs. unfold nibbles_rev_of_bytes.
+  cbn [List.flat_map List.rev List.app].
+  repeat rewrite <- app_assoc. reflexivity.
+Qed.
 
 Definition labels_of_nibbles (ns:list N) : list string :=
   map nibble_label_of ns.
@@ -317,7 +331,7 @@ Lemma bytes_from_nibbles_rev_of_bytes :
 Proof.
   induction bs as [|b bs' IH]; intro Hall; [reflexivity|].
   inversion Hall as [|? ? Hb Hbs']; subst.
-  simpl nibbles_rev_of_bytes.
+  rewrite nibbles_rev_of_bytes_cons.
   specialize (IH Hbs').
   assert (H_app: bytes_from_nibbles_rev (nibbles_rev_of_bytes bs' ++ [lo_nib b; hi_nib b])%list =
                  Some (rev bs' ++ [to_byte (two4 * hi_nib b + lo_nib b)])%list).
@@ -361,7 +375,7 @@ Lemma word32_to_bytes_bounds : forall w,
   Forall (fun b => b < two8) (word32_to_bytes w).
 Proof.
   intro w; unfold word32_to_bytes.
-  repeat constructor; apply N.mod_lt; unfold two8; lia.
+  repeat constructor; apply N.mod_lt; unfold two8, two; simpl; lia.
 Qed.
 
 Lemma ipv6_bytes_bounds : forall a b c d,
@@ -372,16 +386,16 @@ Proof.
 Qed.
 
 Lemma word32_byte0_lt : forall w, w / two24 mod two8 < two8.
-Proof. intros; apply N.mod_lt; unfold two8; lia. Qed.
+Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
 Lemma word32_byte1_lt : forall w, w / two16 mod two8 < two8.
-Proof. intros; apply N.mod_lt; unfold two8; lia. Qed.
+Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
 Lemma word32_byte2_lt : forall w, w / two8 mod two8 < two8.
-Proof. intros; apply N.mod_lt; unfold two8; lia. Qed.
+Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
 Lemma word32_byte3_lt : forall w, w mod two8 < two8.
-Proof. intros; apply N.mod_lt; unfold two8; lia. Qed.
+Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
 Lemma mod_small_iff : forall a b, b <> 0 -> a < b -> a mod b = a.
 Proof. intros. apply N.mod_small. lia. Qed.
@@ -586,7 +600,7 @@ Lemma word32_reconstruction : forall w,
   (w / two8 mod two8) * two8 +
   (w mod two8) = w mod two32.
 Proof.
-  intro w. unfold two24, two16, two8, two32.
+  intro w. rewrite two24_eq, two16_eq, two8_eq, two32_eq.
   set (w' := w mod 4294967296).
   assert (Hw': w' < 4294967296) by (apply N.mod_lt; lia).
   assert (E0: w mod 256 = w' mod 256) by (apply byte0_eq).
@@ -608,7 +622,7 @@ Lemma to_word32_of_bytes_eq : forall w,
 Proof.
   intro w. unfold to_word32.
   rewrite word32_reconstruction.
-  apply N.Div0.mod_mod; unfold two32; lia.
+  apply N.Div0.mod_mod; unfold two32, two; simpl; lia.
 Qed.
 
 Lemma word32_bytes_roundtrip : forall w,
@@ -617,7 +631,7 @@ Proof.
   intro w. unfold word32_to_bytes, bytes_to_word32, to_word32.
   repeat rewrite N.mod_small by (apply word32_byte0_lt || apply word32_byte1_lt ||
                                   apply word32_byte2_lt || apply word32_byte3_lt).
-  f_equal. rewrite word32_reconstruction. assert (H: two32 <> 0) by (unfold two32; lia).
+  f_equal. rewrite word32_reconstruction. assert (H: two32 <> 0) by (unfold two32, two; simpl; lia).
   rewrite N.Div0.mod_mod by exact H. reflexivity.
 Qed.
 
@@ -635,7 +649,8 @@ Qed.
 Lemma nibbles_rev_of_bytes_length : forall bs,
   List.length (nibbles_rev_of_bytes bs) = (2 * List.length bs)%nat.
 Proof.
-  induction bs as [|b tl IH]; simpl; [reflexivity|].
+  induction bs as [|b tl IH]; [reflexivity|].
+  rewrite nibbles_rev_of_bytes_cons.
   rewrite app_length, IH. simpl. lia.
 Qed.
 
@@ -654,9 +669,10 @@ Qed.
 Lemma nibbles_rev_of_bytes_bounds :
   forall bs, Forall (fun n => n < two4) (nibbles_rev_of_bytes bs).
 Proof.
-  induction bs as [|b tl IH]; simpl; [constructor|].
+  induction bs as [|b tl IH]; [constructor|].
+  rewrite nibbles_rev_of_bytes_cons.
   rewrite Forall_app; split; [assumption|].
-  repeat constructor; apply N.mod_lt; unfold two4; lia.
+  repeat constructor; apply N.mod_lt; unfold two4, two; simpl; lia.
 Qed.
 
 (* Round-trip property (left-inverse) up to 32-bit normalization *)
@@ -761,10 +777,12 @@ Record IPv6Transport := {
   t6_has_ipv4 : bool
 }.
 
-Definition select_transport (transport : IPv6Transport) 
-                            (has_aaaa has_a : bool) : option bool :=
-  if andb has_aaaa transport.(t6_has_ipv6) then Some true
-  else if andb has_a transport.(t6_has_ipv4) then Some false
+Inductive TransportChoice := UseIPv6 | UseIPv4.
+
+Definition select_transport (transport : IPv6Transport)
+                            (has_aaaa has_a : bool) : option TransportChoice :=
+  if andb has_aaaa transport.(t6_has_ipv6) then Some UseIPv6
+  else if andb has_a transport.(t6_has_ipv4) then Some UseIPv4
   else None.
 
 (* =============================================================================
@@ -822,7 +840,7 @@ Lemma strlen_nibble_label_of :
   forall n, n < two4 -> strlen (nibble_label_of n) = 1%nat.
 Proof.
   intros n Hlt.
-  unfold two4 in Hlt.
+  unfold two4, two in Hlt. simpl in Hlt.
   destruct (N.eq_dec n 0); [subst; reflexivity|].
   destruct (N.eq_dec n 1); [subst; reflexivity|].
   destruct (N.eq_dec n 2); [subst; reflexivity|].
