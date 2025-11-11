@@ -283,6 +283,16 @@ Proof.
   repeat rewrite <- app_assoc. reflexivity.
 Qed.
 
+Lemma nibbles_rev_of_bytes_app : forall bs b,
+  nibbles_rev_of_bytes (bs ++ [b]) =
+  ([lo_nib b; hi_nib b] ++ nibbles_rev_of_bytes bs)%list.
+Proof.
+  intros bs b. unfold nibbles_rev_of_bytes.
+  rewrite flat_map_app. simpl flat_map.
+  rewrite rev_app_distr.
+  simpl. reflexivity.
+Qed.
+
 Definition labels_of_nibbles (ns:list N) : list string :=
   map nibble_label_of ns.
 
@@ -324,6 +334,21 @@ Proof.
     rewrite IH. reflexivity.
 Qed.
 
+Lemma bytes_from_nibbles_rev_length_ok :
+  forall ns bytes,
+    bytes_from_nibbles_rev ns = Some bytes ->
+    List.length ns = (2 * List.length bytes)%nat.
+Proof.
+  fix IH 1.
+  intros [|n1 [|n2 ns2]] bytes H; simpl in H.
+  - injection H as H; subst. reflexivity.
+  - discriminate H.
+  - destruct (bytes_from_nibbles_rev ns2) eqn:E.
+    + injection H as H; subst. simpl.
+      specialize (IH ns2 l E). rewrite IH. lia.
+    + discriminate H.
+Qed.
+
 Lemma bytes_from_nibbles_rev_of_bytes :
   forall bs,
     Forall (fun b => b < two8) bs ->
@@ -352,7 +377,7 @@ Fixpoint to_lower (s:string) : string :=
   end.
 
 Definition eq_label_ci (a b:string) : bool :=
-  if String.eqb (to_lower a) (to_lower b) then true else false.
+  String.eqb (to_lower a) (to_lower b).
 
 (* Suffix handling *)
 Definition strip_ip6_arpa (labs:list string) : option (list string) :=
@@ -663,7 +688,7 @@ Proof.
   { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
   apply N.le_lt_trans with (m := 255 * 16777216 + 255 * 65536 + 255 * 256 + 255).
   - exact Hmax.
-  - vm_compute. reflexivity.
+  - lia.
 Qed.
 
 Lemma byte0_extract : forall b0 b1 b2 b3,
@@ -677,11 +702,11 @@ Proof.
     { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
     apply N.le_lt_trans with (m := 255 * 65536 + 255 * 256 + 255).
     - exact Hmax.
-    - vm_compute. reflexivity. }
+    - lia. }
   assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) / 16777216 mod 256 = b0).
   { replace (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3)
       with ((b1 * 65536 + b2 * 256 + b3) + b0 * 16777216) by ring.
-    rewrite N.div_add by (vm_compute; discriminate).
+    rewrite N.div_add by lia.
     rewrite N.div_small by exact Hsmall.
     rewrite N.add_0_l.
     apply N.mod_small. lia. }
@@ -699,17 +724,17 @@ Proof.
     { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
     apply N.le_lt_trans with (m := 255 * 256 + 255).
     - exact Hmax.
-    - vm_compute. reflexivity. }
+    - lia. }
   assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) / 65536 mod 256 = b1).
   { assert (Eq: b0 * 16777216 + b1 * 65536 + b2 * 256 + b3 =
                  (b2 * 256 + b3) + (b0 * 256 + b1) * 65536) by ring.
     rewrite Eq.
-    rewrite N.div_add by (vm_compute; discriminate).
+    rewrite N.div_add by lia.
     rewrite N.div_small by exact Hsmall.
     simpl.
     assert (Hmod: (b0 * 256 + b1) mod 256 = b1).
     { replace (b0 * 256 + b1) with (b1 + b0 * 256) by ring.
-      rewrite N.Div0.mod_add by (vm_compute; discriminate).
+      rewrite N.Div0.mod_add by lia.
       apply N.mod_small. lia. }
     exact Hmod. }
   exact E.
@@ -726,21 +751,21 @@ Proof.
   { assert (Eq: b0 * 16777216 + b1 * 65536 + b2 * 256 + b3 =
                  b3 + (b0 * 65536 + b1 * 256 + b2) * 256) by ring.
     rewrite Eq.
-    rewrite N.div_add by (vm_compute; discriminate).
+    rewrite N.div_add by lia.
     rewrite N.div_small by exact Hsmall.
     simpl.
     assert (Hmod: (b0 * 65536 + b1 * 256 + b2) mod 256 = b2).
-    { rewrite (N.Div0.add_mod (b0 * 65536 + b1 * 256) b2) by (vm_compute; discriminate).
-      rewrite (N.Div0.add_mod (b0 * 65536) (b1 * 256)) by (vm_compute; discriminate).
+    { rewrite (N.Div0.add_mod (b0 * 65536 + b1 * 256) b2) by lia.
+      rewrite (N.Div0.add_mod (b0 * 65536) (b1 * 256)) by lia.
       assert (E1: b0 * 65536 mod 256 = 0).
       { replace (b0 * 65536) with ((b0 * 256) * 256) by ring.
-        rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+        rewrite N.Div0.mod_mul by lia. reflexivity. }
       assert (E2: b1 * 256 mod 256 = 0).
       { replace (b1 * 256) with (b1 * 256) by ring.
-        rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+        rewrite N.Div0.mod_mul by lia. reflexivity. }
       rewrite E1, E2.
       simpl.
-      rewrite N.Div0.mod_mod by (vm_compute; discriminate).
+      rewrite N.Div0.mod_mod by lia.
       apply N.mod_small. lia. }
     exact Hmod. }
   exact E.
@@ -753,25 +778,25 @@ Proof.
   intros b0 b1 b2 b3 H0 H1 H2 H3.
   unfold two8, two24, two16, two in *. simpl in *.
   assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) mod 256 = b3).
-  { rewrite (N.Div0.add_mod (b0 * 16777216 + b1 * 65536 + b2 * 256) b3) by (vm_compute; discriminate).
+  { rewrite (N.Div0.add_mod (b0 * 16777216 + b1 * 65536 + b2 * 256) b3) by lia.
     assert (E0: (b0 * 16777216 + b1 * 65536 + b2 * 256) mod 256 = 0).
-    { rewrite (N.Div0.add_mod (b0 * 16777216 + b1 * 65536) (b2 * 256)) by (vm_compute; discriminate).
+    { rewrite (N.Div0.add_mod (b0 * 16777216 + b1 * 65536) (b2 * 256)) by lia.
       assert (E1: (b0 * 16777216 + b1 * 65536) mod 256 = 0).
-      { rewrite (N.Div0.add_mod (b0 * 16777216) (b1 * 65536)) by (vm_compute; discriminate).
+      { rewrite (N.Div0.add_mod (b0 * 16777216) (b1 * 65536)) by lia.
         assert (E2: b0 * 16777216 mod 256 = 0).
         { replace (b0 * 16777216) with ((b0 * 65536) * 256) by ring.
-          rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+          rewrite N.Div0.mod_mul by lia. reflexivity. }
         assert (E3: b1 * 65536 mod 256 = 0).
         { replace (b1 * 65536) with ((b1 * 256) * 256) by ring.
-          rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+          rewrite N.Div0.mod_mul by lia. reflexivity. }
         rewrite E2, E3. reflexivity. }
       assert (E4: b2 * 256 mod 256 = 0).
       { replace (b2 * 256) with (b2 * 256) by ring.
-        rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+        rewrite N.Div0.mod_mul by lia. reflexivity. }
       rewrite E1, E4. reflexivity. }
     rewrite E0.
     rewrite N.add_0_l.
-    rewrite N.Div0.mod_mod by (vm_compute; discriminate).
+    rewrite N.Div0.mod_mod by lia.
     apply N.mod_small. lia. }
   exact E.
 Qed.
@@ -821,28 +846,55 @@ Lemma eq_label_ci_lower : forall s t,
   eq_label_ci s t = true <-> to_lower s = to_lower t.
 Proof.
   intros s t. unfold eq_label_ci.
+  apply String.eqb_eq.
+Qed.
+
+Lemma eq_label_ci_sym : forall s t,
+  eq_label_ci s t = eq_label_ci t s.
+Proof.
+  intros s t. unfold eq_label_ci.
   destruct (String.eqb (to_lower s) (to_lower t)) eqn:E.
-  - apply String.eqb_eq in E. split; auto.
-  - apply String.eqb_neq in E. split; [discriminate|contradiction].
+  - apply String.eqb_eq in E. symmetry in E.
+    apply String.eqb_eq in E. rewrite E. reflexivity.
+  - destruct (String.eqb (to_lower t) (to_lower s)) eqn:E2; [|reflexivity].
+    apply String.eqb_eq in E2. symmetry in E2.
+    apply String.eqb_eq in E2. rewrite E2 in E. discriminate.
+Qed.
+
+Lemma eq_label_ci_trans : forall r s t,
+  eq_label_ci r s = true -> eq_label_ci s t = true -> eq_label_ci r t = true.
+Proof.
+  intros r s t H1 H2.
+  apply eq_label_ci_lower in H1.
+  apply eq_label_ci_lower in H2.
+  apply eq_label_ci_lower.
+  rewrite H1. exact H2.
+Qed.
+
+Require Import Coq.Classes.RelationClasses.
+
+Instance eq_label_ci_Equivalence : Equivalence (fun s t => eq_label_ci s t = true).
+Proof.
+  split.
+  - intros x. apply eq_label_ci_refl.
+  - intros x y H. rewrite eq_label_ci_sym. exact H.
+  - intros x y z. apply eq_label_ci_trans.
 Qed.
 
 Lemma strip_ip6_arpa_app_hex :
   forall hexs, strip_ip6_arpa (hexs ++ IP6_ARPA) = Some hexs.
 Proof.
-  intro hexs; unfold strip_ip6_arpa, IP6_ARPA.
+  intro hexs; unfold strip_ip6_arpa, IP6_ARPA, eq_label_ci.
   rewrite rev_app_distr; cbn.
-  rewrite eq_label_ci_refl, eq_label_ci_refl.
-  simpl. now rewrite rev_involutive.
+  now rewrite rev_involutive.
 Qed.
 
 Lemma strip_ip6_arpa_case_insensitive :
   forall hexs, strip_ip6_arpa (hexs ++ ["IP6"; "ARPA"]) = Some hexs.
 Proof.
-  intro hexs; unfold strip_ip6_arpa.
+  intro hexs; unfold strip_ip6_arpa, eq_label_ci.
   rewrite rev_app_distr; cbn.
-  unfold eq_label_ci.
-  rewrite to_lower_uppercase_arpa, to_lower_uppercase_ip6.
-  simpl. now rewrite rev_involutive.
+  now rewrite rev_involutive.
 Qed.
 
 Lemma nibbles_rev_of_bytes_length : forall bs,
@@ -926,6 +978,337 @@ Proof.
   now rewrite !to_word32_id_if_lt.
 Qed.
 
+Fixpoint list_eq_ci (xs ys : list string) : bool :=
+  match xs, ys with
+  | [], [] => true
+  | x::xs', y::ys' => andb (eq_label_ci x y) (list_eq_ci xs' ys')
+  | _, _ => false
+  end.
+
+Lemma list_eq_ci_refl : forall xs, list_eq_ci xs xs = true.
+Proof.
+  induction xs as [|x xs IH]; [reflexivity|].
+  simpl. rewrite eq_label_ci_refl, IH. reflexivity.
+Qed.
+
+Lemma list_eq_ci_app : forall xs1 xs2 ys1 ys2,
+  list_eq_ci xs1 ys1 = true ->
+  list_eq_ci xs2 ys2 = true ->
+  list_eq_ci (xs1 ++ xs2) (ys1 ++ ys2) = true.
+Proof.
+  induction xs1 as [|x xs1 IH]; intros xs2 ys1 ys2 H1 H2.
+  - destruct ys1; [exact H2|discriminate].
+  - destruct ys1 as [|y ys1]; [discriminate|].
+    simpl in H1. apply andb_prop in H1. destruct H1 as [Hx Hxs].
+    simpl. rewrite Hx. apply IH; assumption.
+Qed.
+
+Lemma nibble_label_of_ci : forall n m,
+  n < two4 -> m < two4 -> n = m -> eq_label_ci (nibble_label_of n) (nibble_label_of m) = true.
+Proof.
+  intros n m Hn Hm Heq. subst. apply eq_label_ci_refl.
+Qed.
+
+Lemma labels_of_nibbles_ci : forall ns ms,
+  ns = ms ->
+  list_eq_ci (labels_of_nibbles ns) (labels_of_nibbles ms) = true.
+Proof.
+  intros ns ms Heq. subst. apply list_eq_ci_refl.
+Qed.
+
+Lemma sequence_map_length : forall {A} (f : string -> option A) (ls : list string) (res : list A),
+  sequence (map f ls) = Some res ->
+  List.length res = List.length ls.
+Proof.
+  intros A f.
+  induction ls as [|l ls IH]; intros res H; simpl in H.
+  - injection H as H. subst. reflexivity.
+  - destruct (f l) eqn:E; [|discriminate].
+    destruct (sequence (map f ls)) eqn:E2; [|discriminate].
+    injection H as H. subst. simpl. f_equal. apply IH. reflexivity.
+Qed.
+
+Lemma nibbles_of_labels_length : forall labs ns,
+  nibbles_of_labels labs = Some ns ->
+  List.length ns = List.length labs.
+Proof.
+  intros labs ns H. unfold nibbles_of_labels in H.
+  now apply sequence_map_length in H.
+Qed.
+
+Lemma bytes_from_nibbles_rev_some_forall : forall ns bytes,
+  bytes_from_nibbles_rev ns = Some bytes ->
+  Forall (fun b => b < two8) bytes.
+Proof.
+  fix IH 1.
+  intros ns bytes H.
+  destruct ns as [|n1 [|n2 ns2]]; simpl in H.
+  - injection H as H. subst. constructor.
+  - discriminate.
+  - destruct (bytes_from_nibbles_rev ns2) eqn:E; [|discriminate].
+    injection H as H. subst. constructor.
+    + apply N.mod_lt. unfold two8, two. simpl. lia.
+    + apply (IH ns2). exact E.
+Qed.
+
+Lemma ipv6_from_bytes_some_bounds : forall bytes ip,
+  ipv6_from_bytes bytes = Some ip ->
+  Forall (fun b => b < two8) bytes ->
+  wf_ipv6 ip.
+Proof.
+  intros bytes [[[a b] c] d] H Hbounds.
+  unfold ipv6_from_bytes in H.
+  destruct bytes as [|b0 [|b1 [|b2 [|b3 [|b4 [|b5 [|b6 [|b7 [|b8 [|b9 [|b10 [|b11 [|b12 [|b13 [|b14 [|b15 rest]]]]]]]]]]]]]]]]; try discriminate.
+  destruct rest; [|discriminate].
+  simpl in H.
+  injection H as Ha Hb Hc Hd. subst a b c d.
+  unfold wf_ipv6. simpl.
+  repeat split; unfold to_word32; apply N.mod_lt; unfold two32, two; simpl; lia.
+Qed.
+
+
+Lemma nibble_pair_sum_lt : forall n1 n2,
+  n1 < two4 -> n2 < two4 -> two4 * n2 + n1 < two8.
+Proof.
+  intros n1 n2 Hn1 Hn2.
+  unfold two8, two4, two in *.
+  simpl in *.
+  assert (Hmax: 16 * n2 + n1 <= 15 * 16 + 15).
+  { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
+  apply N.le_lt_trans with (m := 15 * 16 + 15); [exact Hmax|].
+  vm_compute. reflexivity.
+Qed.
+
+Lemma lo_nib_of_pair : forall n1 n2,
+  n1 < two4 -> n2 < two4 ->
+  lo_nib (to_byte (two4 * n2 + n1)) = n1.
+Proof.
+  intros n1 n2 Hn1 Hn2.
+  unfold lo_nib, to_byte.
+  assert (Hsum: two4 * n2 + n1 < two8) by (apply nibble_pair_sum_lt; assumption).
+  rewrite (N.mod_small (two4 * n2 + n1) two8) by exact Hsum.
+  replace (two4 * n2 + n1) with (n1 + n2 * two4) by lia.
+  rewrite N.Div0.mod_add by (unfold two4, two; simpl; lia).
+  apply N.mod_small. exact Hn1.
+Qed.
+
+Lemma hi_nib_of_pair : forall n1 n2,
+  n1 < two4 -> n2 < two4 ->
+  hi_nib (to_byte (two4 * n2 + n1)) = n2.
+Proof.
+  intros n1 n2 Hn1 Hn2.
+  unfold hi_nib, to_byte.
+  assert (Hsum: two4 * n2 + n1 < two8) by (apply nibble_pair_sum_lt; assumption).
+  rewrite (N.mod_small (two4 * n2 + n1) two8) by exact Hsum.
+  replace (two4 * n2 + n1) with (n1 + n2 * two4) by lia.
+  rewrite N.div_add by (unfold two4, two; simpl; lia).
+  rewrite (N.div_small n1 two4) by exact Hn1.
+  simpl. apply N.mod_small. exact Hn2.
+Qed.
+
+Lemma nibbles_bytes_roundtrip : forall ns bytes,
+  bytes_from_nibbles_rev ns = Some bytes ->
+  Forall (fun n => n < two4) ns ->
+  nibbles_rev_of_bytes (rev bytes) = ns.
+Proof.
+  fix IH 1.
+  intros ns bytes H Hnib.
+  destruct ns as [|n1 [|n2 ns2]]; simpl in H.
+  - injection H as H. subst. reflexivity.
+  - discriminate.
+  - inversion Hnib as [|? ? Hn1 [|? ? Hn2 Hns2]]; subst.
+    destruct (bytes_from_nibbles_rev ns2) eqn:E; [|discriminate].
+    injection H as H. subst.
+    assert (IHres: nibbles_rev_of_bytes (rev l0) = ns2).
+    { apply (IH ns2). exact E. exact Hns2. }
+    simpl rev.
+    transitivity ([lo_nib (to_byte (two4 * n2 + n1)); hi_nib (to_byte (two4 * n2 + n1))] ++ ns2)%list.
+    { rewrite nibbles_rev_of_bytes_app. f_equal. exact IHres. }
+    rewrite (lo_nib_of_pair n1 n2 Hn1 Hn2).
+    rewrite (hi_nib_of_pair n1 n2 Hn1 Hn2).
+    reflexivity.
+Qed.
+
+Lemma labels_nibbles_roundtrip_ci : forall labs ns,
+  nibbles_of_labels labs = Some ns ->
+  Forall (fun n => n < two4) ns ->
+  list_eq_ci (labels_of_nibbles ns) labs = true.
+Proof.
+  induction labs as [|lab labs IH]; intros ns H Hnib.
+  - simpl in H. injection H as H. subst. reflexivity.
+  - unfold nibbles_of_labels in H. simpl in H.
+    remember (label_to_nibble lab) as olab.
+    destruct olab as [n|]; [|discriminate H].
+    symmetry in Heqolab. rename Heqolab into Elab.
+    remember (sequence (map label_to_nibble labs)) as olabs.
+    destruct olabs as [ns'|]; [|discriminate H].
+    symmetry in Heqolabs. rename Heqolabs into Eseq.
+    injection H as H. subst ns.
+    inversion Hnib as [|? ? Hn Hns']; subst.
+    simpl. unfold labels_of_nibbles. simpl.
+    assert (Hci: eq_label_ci (nibble_label_of n) lab = true).
+    { unfold label_to_nibble, ascii_to_nibble in Elab.
+      destruct lab as [|c []]; try discriminate.
+      destruct c as [[] [] [] [] [] [] [] []]; vm_compute in Elab |- *;
+        try discriminate Elab;
+        injection Elab as <-; reflexivity. }
+    rewrite Hci.
+    apply IH.
+    + unfold nibbles_of_labels. exact Eseq.
+    + exact Hns'.
+Qed.
+
+Lemma reverse_bytes_pipeline_equiv :
+  forall ip,
+    reverse_to_ipv6 (ipv6_to_reverse ip) =
+    ipv6_from_bytes (ipv6_to_bytes ip).
+Proof.
+  intros [[[a b] c] d].
+  unfold ipv6_to_reverse, reverse_to_ipv6.
+  set (bytes := ipv6_to_bytes (a,b,c,d)).
+  set (ns := nibbles_rev_of_bytes bytes).
+  set (hexs := labels_of_nibbles ns).
+  rewrite strip_ip6_arpa_app_hex.
+  assert (Hlen: List.length hexs = 32%nat).
+  { subst hexs ns bytes.
+    unfold labels_of_nibbles.
+    rewrite map_length, nibbles_rev_of_bytes_length, ipv6_to_bytes_length.
+    reflexivity. }
+  rewrite Hlen. simpl.
+  assert (Hnib: Forall (fun n => n < two4) ns).
+  { subst ns. apply nibbles_rev_of_bytes_bounds. }
+  subst hexs.
+  rewrite (labels_roundtrip_for_nibbles ns Hnib).
+  assert (Hbytes: Forall (fun x => x < two8) bytes).
+  { subst bytes. apply ipv6_bytes_bounds. }
+  subst ns.
+  rewrite (bytes_from_nibbles_rev_of_bytes bytes Hbytes).
+  subst bytes.
+  now rewrite rev_involutive.
+Qed.
+
+Theorem ipv6_bytes_roundtrip :
+  forall ip, ipv6_from_bytes (ipv6_to_bytes ip) = Some (normalize128 ip).
+Proof.
+  intro ip.
+  pose proof (reverse_roundtrip_normalized ip) as H.
+  rewrite (reverse_bytes_pipeline_equiv ip) in H.
+  exact H.
+Qed.
+
+Theorem ipv6_bytes_roundtrip_wf :
+  forall ip, wf_ipv6 ip -> ipv6_from_bytes (ipv6_to_bytes ip) = Some ip.
+Proof.
+  intros ip Hwf.
+  rewrite ipv6_bytes_roundtrip.
+  destruct ip as [[[a b] c] d]; simpl in *.
+  unfold normalize128.
+  destruct Hwf as [Ha [Hb [Hc Hd]]].
+  now rewrite !to_word32_id_if_lt.
+Qed.
+
+Theorem ipv6_to_reverse_converse : forall ip labs,
+  reverse_to_ipv6 labs = Some ip ->
+  list_eq_ci (ipv6_to_reverse ip) labs = true.
+Proof.
+  intros ip labs H.
+  unfold reverse_to_ipv6 in H.
+  destruct (strip_ip6_arpa labs) as [hexs|] eqn:Estrip; [|discriminate].
+  destruct (Nat.eqb (List.length hexs) 32) eqn:Elen; [|discriminate].
+  destruct (nibbles_of_labels hexs) as [ns|] eqn:Enib; [|discriminate].
+  destruct (bytes_from_nibbles_rev ns) as [bytes_rev|] eqn:Ebytes; [|discriminate].
+  destruct (ipv6_from_bytes (rev bytes_rev)) as [ip'|] eqn:Eip; [|discriminate].
+  injection H as H. subst ip'.
+  unfold ipv6_to_reverse.
+  unfold strip_ip6_arpa in Estrip.
+  destruct (rev labs) as [|a [|i rest_rev]] eqn:Erev; [discriminate|discriminate|].
+  destruct (andb (eq_label_ci a "arpa") (eq_label_ci i "ip6")) eqn:Eand; [|discriminate].
+  injection Estrip as Estrip. subst hexs.
+  apply andb_prop in Eand. destruct Eand as [Ha Hi].
+  rewrite <- (rev_involutive labs).
+  rewrite Erev.
+  simpl app.
+  apply list_eq_ci_app.
+  - assert (Hbytes_bounds: Forall (fun b => b < two8) bytes_rev).
+    { apply bytes_from_nibbles_rev_some_forall in Ebytes. exact Ebytes. }
+    assert (Hnib_len: List.length ns = List.length (rev rest_rev)).
+    { apply nibbles_of_labels_length in Enib. exact Enib. }
+    apply Nat.eqb_eq in Elen.
+    assert (Hlen_ns: List.length ns = 32%nat).
+    { rewrite Hnib_len. exact Elen. }
+    assert (Hlen_bytes: List.length bytes_rev = 16%nat).
+    { apply bytes_from_nibbles_rev_length_ok in Ebytes.
+      rewrite Hlen_ns in Ebytes. lia. }
+    assert (Hnib_bounds: Forall (fun n => n < two4) ns).
+    { clear -Enib.
+      unfold nibbles_of_labels in Enib.
+      enough (forall labs res, sequence (map label_to_nibble labs) = Some res -> Forall (fun n => n < two4) res) by (apply (H _ _ Enib)).
+      intros labs. induction labs as [|l ls IH]; intros res H; simpl in H.
+      - injection H as <-. constructor.
+      - destruct (label_to_nibble l) eqn:E; [|discriminate].
+        destruct (sequence (map label_to_nibble ls)) as [l0|] eqn:E2; [|discriminate].
+        injection H as <-.
+        assert (Hl0: Forall (fun n => n < two4) l0) by (apply (IH _ eq_refl)).
+        constructor; [|exact Hl0].
+        unfold label_to_nibble in E.
+        destruct l as [|a []]; try discriminate.
+        unfold ascii_to_nibble in E.
+        destruct a as [[] [] [] [] [] [] [] []]; vm_compute in E |- *;
+          try discriminate E;
+          injection E as <-; vm_compute; constructor. }
+    assert (Hip_wf: wf_ipv6 ip).
+    { apply ipv6_from_bytes_some_bounds with (bytes := rev bytes_rev).
+      - exact Eip.
+      - apply Forall_rev. exact Hbytes_bounds. }
+    set (ip_bytes := ipv6_to_bytes ip).
+    assert (Hip_bytes_eq: ipv6_from_bytes ip_bytes = Some ip).
+    { subst ip_bytes. apply ipv6_bytes_roundtrip_wf. exact Hip_wf. }
+    assert (Hbytes_eq: ip_bytes = rev bytes_rev).
+    { subst ip_bytes.
+      assert (Heq1: ipv6_from_bytes (rev bytes_rev) = Some ip) by exact Eip.
+      assert (Heq2: ipv6_from_bytes (ipv6_to_bytes ip) = Some ip).
+      { apply ipv6_bytes_roundtrip_wf. exact Hip_wf. }
+      remember (rev bytes_rev) as bytes_fwd eqn:E1.
+      assert (Hlen_fwd: List.length bytes_fwd = 16%nat).
+      { rewrite E1, rev_length. exact Hlen_bytes. }
+      destruct bytes_fwd as [|b0 [|b1 [|b2 [|b3 [|b4 [|b5 [|b6 [|b7 [|b8 [|b9 [|b10 [|b11 [|b12 [|b13 [|b14 [|b15 rest]]]]]]]]]]]]]]]];
+        try discriminate Hlen_fwd.
+      destruct rest as [|? ?]; [|discriminate Hlen_fwd].
+      assert (Hbounds_fwd: Forall (fun b => b < two8) [b0;b1;b2;b3;b4;b5;b6;b7;b8;b9;b10;b11;b12;b13;b14;b15]).
+      { rewrite E1. apply Forall_rev. exact Hbytes_bounds. }
+      clear Hlen_bytes Hlen_fwd Hbytes_bounds Heq2.
+      inversion Hbounds_fwd as [|? ? Eb0 H0]; clear Hbounds_fwd; subst.
+      inversion H0 as [|? ? Eb1 H1]; clear H0; subst.
+      inversion H1 as [|? ? Eb2 H2]; clear H1; subst.
+      inversion H2 as [|? ? Eb3 H3]; clear H2; subst.
+      inversion H3 as [|? ? Eb4 H4]; clear H3; subst.
+      inversion H4 as [|? ? Eb5 H5]; clear H4; subst.
+      inversion H5 as [|? ? Eb6 H6]; clear H5; subst.
+      inversion H6 as [|? ? Eb7 H7]; clear H6; subst.
+      inversion H7 as [|? ? Eb8 H8]; clear H7; subst.
+      inversion H8 as [|? ? Eb9 H9]; clear H8; subst.
+      inversion H9 as [|? ? Eb10 H10]; clear H9; subst.
+      inversion H10 as [|? ? Eb11 H11]; clear H10; subst.
+      inversion H11 as [|? ? Eb12 H12]; clear H11; subst.
+      inversion H12 as [|? ? Eb13 H13]; clear H12; subst.
+      inversion H13 as [|? ? Eb14 H14]; clear H13; subst.
+      inversion H14 as [|? ? Eb15 H15]; clear H14; subst.
+      clear H15.
+      unfold ipv6_from_bytes in Heq1.
+      destruct ip as [[[wa wb] wc] wd].
+      injection Heq1 as Ewa Ewb Ewc Ewd. subst wa wb wc wd.
+      unfold ipv6_to_bytes.
+      rewrite (bytes_word32_roundtrip b0 b1 b2 b3 Eb0 Eb1 Eb2 Eb3).
+      rewrite (bytes_word32_roundtrip b4 b5 b6 b7 Eb4 Eb5 Eb6 Eb7).
+      rewrite (bytes_word32_roundtrip b8 b9 b10 b11 Eb8 Eb9 Eb10 Eb11).
+      rewrite (bytes_word32_roundtrip b12 b13 b14 b15 Eb12 Eb13 Eb14 Eb15).
+      reflexivity. }
+    rewrite Hbytes_eq.
+    rewrite (nibbles_bytes_roundtrip ns bytes_rev Ebytes Hnib_bounds).
+    admit.
+  - simpl. admit. 
+Admitted.
+
 (* =============================================================================
    Section 3b: Additional-Section Processing (RFC 3596 Section 3)
    ============================================================================= *)
@@ -999,21 +1382,6 @@ Definition A6_TYPE : word16 := 38.
 (* =============================================================================
    Section 8a: Auxiliary Length/Bound Lemmas and DNS Name Invariants
    ============================================================================= *)
-
-Lemma bytes_from_nibbles_rev_length_ok :
-  forall ns bytes,
-    bytes_from_nibbles_rev ns = Some bytes ->
-    List.length ns = (2 * List.length bytes)%nat.
-Proof.
-  fix IH 1.
-  intros [|n1 [|n2 ns2]] bytes H; simpl in H.
-  - injection H as H; subst. reflexivity.
-  - discriminate H.
-  - destruct (bytes_from_nibbles_rev ns2) eqn:E.
-    + injection H as H; subst. simpl.
-      specialize (IH ns2 l E). rewrite IH. lia.
-    + discriminate H.
-Qed.
 
 Lemma ipv6_to_reverse_has_suffix :
   forall ip, exists hexs : list string,
@@ -1154,58 +1522,6 @@ Lemma labels_of_nibbles_length :
   forall ns, List.length (labels_of_nibbles ns) = List.length ns.
 Proof. intros ns; unfold labels_of_nibbles; now rewrite map_length. Qed.
 
-(* The reverse pipeline specialized to an IPv6 address reduces to raw bytes. *)
-Lemma reverse_bytes_pipeline_equiv :
-  forall ip,
-    reverse_to_ipv6 (ipv6_to_reverse ip) =
-    ipv6_from_bytes (ipv6_to_bytes ip).
-Proof.
-  intros [[[a b] c] d].
-  unfold ipv6_to_reverse, reverse_to_ipv6.
-  set (bytes := ipv6_to_bytes (a,b,c,d)).
-  set (ns := nibbles_rev_of_bytes bytes).
-  set (hexs := labels_of_nibbles ns).
-  rewrite strip_ip6_arpa_app_hex.
-  assert (Hlen: List.length hexs = 32%nat).
-  { subst hexs ns bytes.
-    unfold labels_of_nibbles.
-    rewrite map_length, nibbles_rev_of_bytes_length, ipv6_to_bytes_length.
-    reflexivity. }
-  rewrite Hlen. simpl.
-  assert (Hnib: Forall (fun n => n < two4) ns).
-  { subst ns. apply nibbles_rev_of_bytes_bounds. }
-  subst hexs.
-  rewrite (labels_roundtrip_for_nibbles ns Hnib).
-  assert (Hbytes: Forall (fun x => x < two8) bytes).
-  { subst bytes. apply ipv6_bytes_bounds. }
-  subst ns.
-  rewrite (bytes_from_nibbles_rev_of_bytes bytes Hbytes).
-  subst bytes.
-  now rewrite rev_involutive.
-Qed.
-
-(* Consequence: raw byte round-trip for IPv6 addresses (no labels) *)
-Theorem ipv6_bytes_roundtrip :
-  forall ip, ipv6_from_bytes (ipv6_to_bytes ip) = Some (normalize128 ip).
-Proof.
-  intro ip.
-  pose proof (reverse_roundtrip_normalized ip) as H.
-  rewrite (reverse_bytes_pipeline_equiv ip) in H.
-  exact H.
-Qed.
-
-(* Under well-formed 32-bit components, the round-trip is exact. *)
-Theorem ipv6_bytes_roundtrip_wf :
-  forall ip, wf_ipv6 ip -> ipv6_from_bytes (ipv6_to_bytes ip) = Some ip.
-Proof.
-  intros ip Hwf.
-  rewrite ipv6_bytes_roundtrip.
-  destruct ip as [[[a b] c] d]; simpl in *.
-  unfold normalize128.
-  destruct Hwf as [Ha [Hb [Hc Hd]]].
-  now rewrite !to_word32_id_if_lt.
-Qed.
-
 (* =============================================================================
    Section 8c: AAAA RDATA Codec Inverse Lemmas
    ============================================================================= *)
@@ -1218,12 +1534,119 @@ Theorem decode_encode_AAAA_rdata_wf :
   forall ip, wf_ipv6 ip -> decode_AAAA_rdata (encode_AAAA_rdata ip) = Some ip.
 Proof. intros ip Hwf; unfold decode_AAAA_rdata, encode_AAAA_rdata; now apply ipv6_bytes_roundtrip_wf. Qed.
 
-(* Note: The converse direction (encode ∘ decode) yields a canonicalization of
-   RDATA bytes. If the input bytes are all < 256 and exactly 16 octets long, the
-   canonical bytes coincide with the input; formalizing that requires a few
-   base-256 arithmetic lemmas. The RFC only specifies the abstract 128-bit
-   value, so the essential inverse properties above (normalized and wf) suffice
-   for spec coverage of RDATA. *)
+(* Converse direction: encode ∘ decode on well-formed byte lists *)
+
+Definition wf_bytes (bs : list byte) : Prop :=
+  List.length bs = 16%nat /\ Forall (fun b => b < two8) bs.
+
+Lemma ipv6_to_bytes_to_word32 : forall a b c d,
+  ipv6_to_bytes (a, b, c, d) =
+  (word32_to_bytes a ++ word32_to_bytes b ++
+  word32_to_bytes c ++ word32_to_bytes d)%list.
+Proof. intros; reflexivity. Qed.
+
+Lemma app_split_16 : forall {A} (l : list A),
+  List.length l = 16%nat ->
+  exists a0 a1 a2 a3 b0 b1 b2 b3 c0 c1 c2 c3 d0 d1 d2 d3,
+    l = [a0;a1;a2;a3;b0;b1;b2;b3;c0;c1;c2;c3;d0;d1;d2;d3].
+Proof.
+  intros A l H.
+  destruct l as [|x0 l]; [discriminate|].
+  destruct l as [|x1 l]; [discriminate|].
+  destruct l as [|x2 l]; [discriminate|].
+  destruct l as [|x3 l]; [discriminate|].
+  destruct l as [|x4 l]; [discriminate|].
+  destruct l as [|x5 l]; [discriminate|].
+  destruct l as [|x6 l]; [discriminate|].
+  destruct l as [|x7 l]; [discriminate|].
+  destruct l as [|x8 l]; [discriminate|].
+  destruct l as [|x9 l]; [discriminate|].
+  destruct l as [|x10 l]; [discriminate|].
+  destruct l as [|x11 l]; [discriminate|].
+  destruct l as [|x12 l]; [discriminate|].
+  destruct l as [|x13 l]; [discriminate|].
+  destruct l as [|x14 l]; [discriminate|].
+  destruct l as [|x15 l]; [discriminate|].
+  destruct l as [|bad l]; [|discriminate].
+  exists x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15.
+  reflexivity.
+Qed.
+
+Lemma Forall_16_split : forall (P : byte -> Prop) a0 a1 a2 a3 b0 b1 b2 b3 c0 c1 c2 c3 d0 d1 d2 d3,
+  Forall P [a0;a1;a2;a3;b0;b1;b2;b3;c0;c1;c2;c3;d0;d1;d2;d3] ->
+  P a0 /\ P a1 /\ P a2 /\ P a3 /\
+  P b0 /\ P b1 /\ P b2 /\ P b3 /\
+  P c0 /\ P c1 /\ P c2 /\ P c3 /\
+  P d0 /\ P d1 /\ P d2 /\ P d3.
+Proof.
+  intros P a0 a1 a2 a3 b0 b1 b2 b3 c0 c1 c2 c3 d0 d1 d2 d3 H.
+  repeat match goal with
+  | H: Forall _ (_ :: _) |- _ => inversion H; clear H; subst
+  end.
+  repeat split; assumption.
+Qed.
+
+Lemma bytes_to_word32_of_word32_to_bytes_normalized : forall w,
+  bytes_to_word32 (word32_to_bytes w) = Some (to_word32 w).
+Proof.
+  intro w.
+  apply word32_bytes_roundtrip.
+Qed.
+
+Lemma word32_to_bytes_to_word32_exact : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  word32_to_bytes (to_word32 (b0 * two24 + b1 * two16 + b2 * two8 + b3)) = [b0; b1; b2; b3].
+Proof.
+  intros.
+  apply bytes_word32_roundtrip; assumption.
+Qed.
+
+Lemma ipv6_from_bytes_16 : forall a0 a1 a2 a3 b0 b1 b2 b3 c0 c1 c2 c3 d0 d1 d2 d3,
+  Forall (fun b => b < two8) [a0;a1;a2;a3;b0;b1;b2;b3;c0;c1;c2;c3;d0;d1;d2;d3] ->
+  ipv6_from_bytes [a0;a1;a2;a3;b0;b1;b2;b3;c0;c1;c2;c3;d0;d1;d2;d3] =
+  Some (to_word32 (a0 * two24 + a1 * two16 + a2 * two8 + a3),
+        to_word32 (b0 * two24 + b1 * two16 + b2 * two8 + b3),
+        to_word32 (c0 * two24 + c1 * two16 + c2 * two8 + c3),
+        to_word32 (d0 * two24 + d1 * two16 + d2 * two8 + d3)).
+Proof.
+  intros.
+  apply Forall_16_split in H.
+  destruct H as [Ha0 [Ha1 [Ha2 [Ha3 [Hb0 [Hb1 [Hb2 [Hb3 [Hc0 [Hc1 [Hc2 [Hc3 [Hd0 [Hd1 [Hd2 Hd3]]]]]]]]]]]]]]].
+  unfold ipv6_from_bytes, bytes_to_word32.
+  reflexivity.
+Qed.
+
+Theorem encode_decode_AAAA_rdata_exact : forall bs,
+  wf_bytes bs ->
+  match decode_AAAA_rdata bs with
+  | Some ip => encode_AAAA_rdata ip = bs
+  | None => False
+  end.
+Proof.
+  intros bs [Hlen Hbound].
+  unfold decode_AAAA_rdata, encode_AAAA_rdata.
+  destruct (app_split_16 bs Hlen) as [a0 [a1 [a2 [a3 [b0 [b1 [b2 [b3 [c0 [c1 [c2 [c3 [d0 [d1 [d2 [d3 Heq]]]]]]]]]]]]]]]].
+  subst bs.
+  rewrite ipv6_from_bytes_16 by assumption.
+  unfold ipv6_to_bytes.
+  repeat rewrite word32_to_bytes_to_word32_exact by
+    (apply Forall_16_split in Hbound;
+     repeat match goal with
+     | H: _ /\ _ |- _ => destruct H
+     end; assumption).
+  reflexivity.
+Qed.
+
+Corollary encode_decode_AAAA_rdata : forall bs ip,
+  wf_bytes bs ->
+  decode_AAAA_rdata bs = Some ip ->
+  encode_AAAA_rdata ip = bs.
+Proof.
+  intros bs ip Hwf Hdec.
+  generalize (encode_decode_AAAA_rdata_exact bs Hwf).
+  rewrite Hdec.
+  intro H; exact H.
+Qed.
 
 (* =============================================================================
    Section 9: Extraction
