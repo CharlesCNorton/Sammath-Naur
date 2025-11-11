@@ -2101,8 +2101,203 @@ Proof.
   intro H; exact H.
 Qed.
 
+(* === AAAA RDATA Codec Canonicalization Theorems ===
+
+   These theorems establish that AAAA RDATA encoding and decoding form
+   a bijection on well-formed byte sequences (16 octets, each < 256).
+
+   RFC 3596 §2.2 specifies AAAA RDATA as exactly 16 octets in network order.
+   Wire-format parsers must validate octet ranges before interpretation. *)
+
+Theorem decode_encode_AAAA_canonical : forall bs ip,
+  wf_bytes bs ->
+  decode_AAAA_rdata bs = Some ip ->
+  encode_AAAA_rdata ip = bs.
+Proof.
+  intros bs ip Hwf Hdec.
+  apply encode_decode_AAAA_rdata; assumption.
+Qed.
+
+(* Successful decoding of well-formed bytes produces well-formed IPv6 addresses.
+   All four 32-bit components satisfy the bound x < 2^32. *)
+Theorem decode_AAAA_produces_wf : forall bs ip,
+  wf_bytes bs ->
+  decode_AAAA_rdata bs = Some ip ->
+  wf_ipv6 ip.
+Proof.
+  intros bs ip [Hlen Hbounds] Hdec.
+  unfold decode_AAAA_rdata in Hdec.
+  apply ipv6_from_bytes_some_bounds with (bytes := bs).
+  - exact Hdec.
+  - exact Hbounds.
+Qed.
+
+(* AAAA codec stability: encode(decode(bs)) = bs for well-formed byte sequences.
+   This property ensures that wire-format parsers produce canonical output. *)
+Theorem AAAA_codec_stable : forall bs,
+  wf_bytes bs ->
+  match decode_AAAA_rdata bs with
+  | Some ip => encode_AAAA_rdata ip = bs
+  | None => True
+  end.
+Proof.
+  intros bs Hwf.
+  destruct (decode_AAAA_rdata bs) eqn:E; [|trivial].
+  apply decode_encode_AAAA_canonical; assumption.
+Qed.
+
 (* =============================================================================
-   Section 9: Extraction
+   Section 9: Computational Examples
+   ============================================================================= *)
+
+Definition example_loopback : word128 := (0, 0, 0, 1).
+Definition example_doc : word128 := (0x20010db8, 0, 0, 1).
+Definition example_domain : list string := ["www"; "example"; "com"].
+
+(* AAAA record creation *)
+
+Definition example_aaaa : AAAARecord :=
+  create_aaaa_record example_domain example_doc 3600.
+
+Example aaaa_well_formed :
+  example_aaaa.(aaaa_type) = AAAA_TYPE /\
+  example_aaaa.(aaaa_class) = IN_CLASS /\
+  example_aaaa.(aaaa_rdlength) = 16.
+Proof. split; [|split]; reflexivity. Qed.
+
+(* AAAA RDATA encoding *)
+
+Definition example_rdata : list byte := encode_AAAA_rdata example_doc.
+
+Example rdata_length : List.length example_rdata = 16%nat.
+Proof. reflexivity. Qed.
+
+Example rdata_first_word :
+  match example_rdata with
+  | b0::b1::b2::b3::_ => (b0, b1, b2, b3) = (32, 1, 13, 184)
+  | _ => False
+  end.
+Proof. reflexivity. Qed.
+
+Example rdata_last_word :
+  match List.rev example_rdata with
+  | b3::b2::b1::b0::_ => (b0, b1, b2, b3) = (0, 0, 0, 1)
+  | _ => False
+  end.
+Proof. reflexivity. Qed.
+
+(* AAAA RDATA decoding *)
+
+Definition example_decoded : option word128 := decode_AAAA_rdata example_rdata.
+
+Example decode_succeeds : example_decoded = Some (normalize128 example_doc).
+Proof. reflexivity. Qed.
+
+Example rdata_roundtrip :
+  decode_AAAA_rdata (encode_AAAA_rdata example_doc) = Some (normalize128 example_doc).
+Proof. reflexivity. Qed.
+
+(* IPv6 reverse DNS *)
+
+Definition example_reverse_name : list string := ipv6_to_reverse example_loopback.
+
+Example reverse_name_length : List.length example_reverse_name = 34%nat.
+Proof. reflexivity. Qed.
+
+Example reverse_name_suffix :
+  match List.rev example_reverse_name with
+  | a :: i :: _ => eq_label_ci a "arpa" = true /\ eq_label_ci i "ip6" = true
+  | _ => False
+  end.
+Proof. split; reflexivity. Qed.
+
+Example reverse_name_first :
+  match example_reverse_name with
+  | first :: _ => eq_label_ci first "1" = true
+  | _ => False
+  end.
+Proof. reflexivity. Qed.
+
+Definition example_reverse_decoded : option word128 :=
+  reverse_to_ipv6 example_reverse_name.
+
+Example reverse_decode_succeeds :
+  example_reverse_decoded = Some (normalize128 example_loopback).
+Proof. reflexivity. Qed.
+
+Example reverse_roundtrip :
+  reverse_to_ipv6 (ipv6_to_reverse example_loopback) = Some (normalize128 example_loopback).
+Proof. reflexivity. Qed.
+
+(* Case-insensitive reverse DNS *)
+
+Definition example_reverse_upper : list string :=
+  let nibbles := match List.rev example_reverse_name with
+                 | a :: i :: rest => List.rev rest
+                 | _ => []
+                 end in
+  nibbles ++ ["IP6"; "ARPA"].
+
+Example reverse_case_insensitive :
+  reverse_to_ipv6 example_reverse_upper = Some (normalize128 example_loopback).
+Proof.
+  unfold example_reverse_upper, example_reverse_name, example_loopback.
+  unfold ipv6_to_reverse, reverse_to_ipv6, ipv6_to_bytes.
+  simpl word32_to_bytes. simpl app.
+  unfold labels_of_nibbles, nibbles_rev_of_bytes.
+  simpl flat_map. simpl rev. simpl app.
+  unfold IP6_ARPA, strip_ip6_arpa.
+  simpl rev.
+  unfold eq_label_ci, to_lower.
+  simpl to_lower_ascii. simpl String.eqb. simpl andb. simpl rev.
+  unfold nibbles_of_labels. simpl map.
+  unfold label_to_nibble, ascii_to_nibble. simpl.
+  unfold sequence. simpl.
+  unfold bytes_from_nibbles_rev. simpl.
+  unfold ipv6_from_bytes, bytes_to_word32, to_word32. simpl.
+  unfold normalize128. reflexivity.
+Qed.
+
+(* Additional-section processing *)
+
+Example ns_needs_glue : needs_additional RT_NS = true.
+Proof. reflexivity. Qed.
+
+Example ns_glue_includes_aaaa : In RT_AAAA (additional_glue RT_NS).
+Proof. simpl. auto. Qed.
+
+Example ns_glue_includes_a : In RT_A (additional_glue RT_NS).
+Proof. simpl. auto. Qed.
+
+(* Dual-stack strategy *)
+
+Definition example_dual_stack : DualStackConfig :=
+  {| ds_prefer_ipv6 := true; ds_ipv6_only := false; ds_ipv4_only := false |}.
+
+Example dual_stack_strategy : determine_strategy example_dual_stack = QS_AAAA_THEN_A.
+Proof. reflexivity. Qed.
+
+Definition example_ipv6_only : DualStackConfig :=
+  {| ds_prefer_ipv6 := true; ds_ipv6_only := true; ds_ipv4_only := false |}.
+
+Example ipv6_only_strategy : determine_strategy example_ipv6_only = QS_AAAA_ONLY.
+Proof. reflexivity. Qed.
+
+(* Transport selection *)
+
+Definition example_transport : IPv6Transport :=
+  {| t6_has_ipv6 := true; t6_has_ipv4 := true |}.
+
+Example select_ipv6_when_available :
+  select_transport example_transport true false = Some UseIPv6.
+Proof. reflexivity. Qed.
+
+Example fallback_to_ipv4 :
+  select_transport example_transport false true = Some UseIPv4.
+Proof. reflexivity. Qed.
+
+(* =============================================================================
+   Section 10: Extraction
    ============================================================================= *)
 
 Require Extraction.
