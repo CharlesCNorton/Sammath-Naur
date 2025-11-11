@@ -340,10 +340,26 @@ Proof.
   simpl. reflexivity.
 Qed.
 
+(* ASCII case conversion for DNS labels (RFC 1035 §2.3.3: case-insensitive) *)
+Definition to_lower_ascii (c:ascii) : ascii :=
+  let n := nat_of_ascii c in
+  if (65 <=? n)%nat && (n <=? 90)%nat then ascii_of_nat (n + 32)%nat else c.
+
+Fixpoint to_lower (s:string) : string :=
+  match s with
+  | EmptyString => EmptyString
+  | String c tl => String (to_lower_ascii c) (to_lower tl)
+  end.
+
+Definition eq_label_ci (a b:string) : bool :=
+  if String.eqb (to_lower a) (to_lower b) then true else false.
+
 (* Suffix handling *)
 Definition strip_ip6_arpa (labs:list string) : option (list string) :=
   match rev labs with
-  | "arpa" :: "ip6" :: rest_rev => Some (rev rest_rev)
+  | a :: i :: rest_rev =>
+      if andb (eq_label_ci a "arpa") (eq_label_ci i "ip6")
+      then Some (rev rest_rev) else None
   | _ => None
   end.
 
@@ -635,15 +651,198 @@ Proof.
   rewrite N.Div0.mod_mod by exact H. reflexivity.
 Qed.
 
+(* Helper lemmas for proving bytes_word32_roundtrip *)
+
+Lemma byte_sum_lt_word32 : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  b0 * two24 + b1 * two16 + b2 * two8 + b3 < two32.
+Proof.
+  intros b0 b1 b2 b3 H0 H1 H2 H3.
+  unfold two8, two24, two16, two32, two in *. simpl in *.
+  assert (Hmax: b0 * 16777216 + b1 * 65536 + b2 * 256 + b3 <= 255 * 16777216 + 255 * 65536 + 255 * 256 + 255).
+  { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
+  apply N.le_lt_trans with (m := 255 * 16777216 + 255 * 65536 + 255 * 256 + 255).
+  - exact Hmax.
+  - vm_compute. reflexivity.
+Qed.
+
+Lemma byte0_extract : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  (b0 * two24 + b1 * two16 + b2 * two8 + b3) / two24 mod two8 = b0.
+Proof.
+  intros b0 b1 b2 b3 H0 H1 H2 H3.
+  unfold two8, two24, two16, two in *. simpl in *.
+  assert (Hsmall: b1 * 65536 + b2 * 256 + b3 < 16777216).
+  { assert (Hmax: b1 * 65536 + b2 * 256 + b3 <= 255 * 65536 + 255 * 256 + 255).
+    { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
+    apply N.le_lt_trans with (m := 255 * 65536 + 255 * 256 + 255).
+    - exact Hmax.
+    - vm_compute. reflexivity. }
+  assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) / 16777216 mod 256 = b0).
+  { replace (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3)
+      with ((b1 * 65536 + b2 * 256 + b3) + b0 * 16777216) by ring.
+    rewrite N.div_add by (vm_compute; discriminate).
+    rewrite N.div_small by exact Hsmall.
+    rewrite N.add_0_l.
+    apply N.mod_small. lia. }
+  exact E.
+Qed.
+
+Lemma byte1_extract : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  (b0 * two24 + b1 * two16 + b2 * two8 + b3) / two16 mod two8 = b1.
+Proof.
+  intros b0 b1 b2 b3 H0 H1 H2 H3.
+  unfold two8, two24, two16, two in *. simpl in *.
+  assert (Hsmall: b2 * 256 + b3 < 65536).
+  { assert (Hmax: b2 * 256 + b3 <= 255 * 256 + 255).
+    { repeat apply N.add_le_mono; try apply N.mul_le_mono_nonneg_l; lia. }
+    apply N.le_lt_trans with (m := 255 * 256 + 255).
+    - exact Hmax.
+    - vm_compute. reflexivity. }
+  assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) / 65536 mod 256 = b1).
+  { assert (Eq: b0 * 16777216 + b1 * 65536 + b2 * 256 + b3 =
+                 (b2 * 256 + b3) + (b0 * 256 + b1) * 65536) by ring.
+    rewrite Eq.
+    rewrite N.div_add by (vm_compute; discriminate).
+    rewrite N.div_small by exact Hsmall.
+    simpl.
+    assert (Hmod: (b0 * 256 + b1) mod 256 = b1).
+    { replace (b0 * 256 + b1) with (b1 + b0 * 256) by ring.
+      rewrite N.Div0.mod_add by (vm_compute; discriminate).
+      apply N.mod_small. lia. }
+    exact Hmod. }
+  exact E.
+Qed.
+
+Lemma byte2_extract : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  (b0 * two24 + b1 * two16 + b2 * two8 + b3) / two8 mod two8 = b2.
+Proof.
+  intros b0 b1 b2 b3 H0 H1 H2 H3.
+  unfold two8, two24, two16, two in *. simpl in *.
+  assert (Hsmall: b3 < 256) by exact H3.
+  assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) / 256 mod 256 = b2).
+  { assert (Eq: b0 * 16777216 + b1 * 65536 + b2 * 256 + b3 =
+                 b3 + (b0 * 65536 + b1 * 256 + b2) * 256) by ring.
+    rewrite Eq.
+    rewrite N.div_add by (vm_compute; discriminate).
+    rewrite N.div_small by exact Hsmall.
+    simpl.
+    assert (Hmod: (b0 * 65536 + b1 * 256 + b2) mod 256 = b2).
+    { rewrite (N.Div0.add_mod (b0 * 65536 + b1 * 256) b2) by (vm_compute; discriminate).
+      rewrite (N.Div0.add_mod (b0 * 65536) (b1 * 256)) by (vm_compute; discriminate).
+      assert (E1: b0 * 65536 mod 256 = 0).
+      { replace (b0 * 65536) with ((b0 * 256) * 256) by ring.
+        rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+      assert (E2: b1 * 256 mod 256 = 0).
+      { replace (b1 * 256) with (b1 * 256) by ring.
+        rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+      rewrite E1, E2.
+      simpl.
+      rewrite N.Div0.mod_mod by (vm_compute; discriminate).
+      apply N.mod_small. lia. }
+    exact Hmod. }
+  exact E.
+Qed.
+
+Lemma byte3_extract : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  (b0 * two24 + b1 * two16 + b2 * two8 + b3) mod two8 = b3.
+Proof.
+  intros b0 b1 b2 b3 H0 H1 H2 H3.
+  unfold two8, two24, two16, two in *. simpl in *.
+  assert (E: (b0 * 16777216 + b1 * 65536 + b2 * 256 + b3) mod 256 = b3).
+  { rewrite (N.Div0.add_mod (b0 * 16777216 + b1 * 65536 + b2 * 256) b3) by (vm_compute; discriminate).
+    assert (E0: (b0 * 16777216 + b1 * 65536 + b2 * 256) mod 256 = 0).
+    { rewrite (N.Div0.add_mod (b0 * 16777216 + b1 * 65536) (b2 * 256)) by (vm_compute; discriminate).
+      assert (E1: (b0 * 16777216 + b1 * 65536) mod 256 = 0).
+      { rewrite (N.Div0.add_mod (b0 * 16777216) (b1 * 65536)) by (vm_compute; discriminate).
+        assert (E2: b0 * 16777216 mod 256 = 0).
+        { replace (b0 * 16777216) with ((b0 * 65536) * 256) by ring.
+          rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+        assert (E3: b1 * 65536 mod 256 = 0).
+        { replace (b1 * 65536) with ((b1 * 256) * 256) by ring.
+          rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+        rewrite E2, E3. reflexivity. }
+      assert (E4: b2 * 256 mod 256 = 0).
+      { replace (b2 * 256) with (b2 * 256) by ring.
+        rewrite N.Div0.mod_mul by (vm_compute; discriminate). reflexivity. }
+      rewrite E1, E4. reflexivity. }
+    rewrite E0.
+    rewrite N.add_0_l.
+    rewrite N.Div0.mod_mod by (vm_compute; discriminate).
+    apply N.mod_small. lia. }
+  exact E.
+Qed.
+
+Lemma bytes_word32_roundtrip : forall b0 b1 b2 b3,
+  b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
+  word32_to_bytes (to_word32 (b0 * two24 + b1 * two16 + b2 * two8 + b3)) = [b0; b1; b2; b3].
+Proof.
+  intros b0 b1 b2 b3 H0 H1 H2 H3.
+  unfold word32_to_bytes, to_word32.
+  assert (Hlt: b0 * two24 + b1 * two16 + b2 * two8 + b3 < two32).
+  { apply byte_sum_lt_word32; assumption. }
+  assert (Heq: (b0 * two24 + b1 * two16 + b2 * two8 + b3) mod two32 =
+                b0 * two24 + b1 * two16 + b2 * two8 + b3).
+  { apply N.mod_small. exact Hlt. }
+  rewrite Heq.
+  repeat (f_equal; try reflexivity).
+  - apply byte0_extract; assumption.
+  - apply byte1_extract; assumption.
+  - apply byte2_extract; assumption.
+  - apply byte3_extract; assumption.
+Qed.
+
 (* Normalization on 128-bit tuples (reduces components modulo 2^32) *)
 Definition normalize128 (ip:word128) : word128 :=
   let '(a,b,c,d) := ip in (to_word32 a, to_word32 b, to_word32 c, to_word32 d).
 
+Lemma to_lower_lowercase_arpa : to_lower "arpa" = "arpa".
+Proof. reflexivity. Qed.
+
+Lemma to_lower_uppercase_arpa : to_lower "ARPA" = "arpa".
+Proof. reflexivity. Qed.
+
+Lemma to_lower_lowercase_ip6 : to_lower "ip6" = "ip6".
+Proof. reflexivity. Qed.
+
+Lemma to_lower_uppercase_ip6 : to_lower "IP6" = "ip6".
+Proof. reflexivity. Qed.
+
+Lemma eq_label_ci_refl : forall s, eq_label_ci s s = true.
+Proof.
+  intro s. unfold eq_label_ci.
+  rewrite String.eqb_refl. reflexivity.
+Qed.
+
+Lemma eq_label_ci_lower : forall s t,
+  eq_label_ci s t = true <-> to_lower s = to_lower t.
+Proof.
+  intros s t. unfold eq_label_ci.
+  destruct (String.eqb (to_lower s) (to_lower t)) eqn:E.
+  - apply String.eqb_eq in E. split; auto.
+  - apply String.eqb_neq in E. split; [discriminate|contradiction].
+Qed.
+
 Lemma strip_ip6_arpa_app_hex :
   forall hexs, strip_ip6_arpa (hexs ++ IP6_ARPA) = Some hexs.
 Proof.
+  intro hexs; unfold strip_ip6_arpa, IP6_ARPA.
+  rewrite rev_app_distr; cbn.
+  rewrite eq_label_ci_refl, eq_label_ci_refl.
+  simpl. now rewrite rev_involutive.
+Qed.
+
+Lemma strip_ip6_arpa_case_insensitive :
+  forall hexs, strip_ip6_arpa (hexs ++ ["IP6"; "ARPA"]) = Some hexs.
+Proof.
   intro hexs; unfold strip_ip6_arpa.
-  rewrite rev_app_distr; cbn. now rewrite rev_involutive.
+  rewrite rev_app_distr; cbn.
+  unfold eq_label_ci.
+  rewrite to_lower_uppercase_arpa, to_lower_uppercase_ip6.
+  simpl. now rewrite rev_involutive.
 Qed.
 
 Lemma nibbles_rev_of_bytes_length : forall bs,
