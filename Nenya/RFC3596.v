@@ -2305,10 +2305,8 @@ Extract Inductive bool   => "bool" [ "true" "false" ].
 Extract Inductive list   => "list" [ "[]" "(::)" ].
 Extract Inductive option => "option" [ "Some" "None" ].
 
-(* Optional OCaml tuning (uncomment if targeting OCaml with Zarith & native strings)
 From Coq Require Import ExtrOcamlZBigInt ExtrOcamlString.
 Extraction Language OCaml.
-*)
 
 Extraction "dns_ipv6.ml"
   create_aaaa_record
