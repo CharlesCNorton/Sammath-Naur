@@ -379,6 +379,19 @@ Fixpoint to_lower (s:string) : string :=
 Definition eq_label_ci (a b:string) : bool :=
   String.eqb (to_lower a) (to_lower b).
 
+Lemma nibble_label_roundtrip_ci : forall n lab,
+  n < two4 ->
+  label_to_nibble lab = Some n ->
+  eq_label_ci (nibble_label_of n) lab = true.
+Proof.
+  intros n lab Hn Hlab.
+  unfold label_to_nibble, ascii_to_nibble in Hlab.
+  destruct lab as [|c []]; try discriminate.
+  destruct c as [[] [] [] [] [] [] [] []]; vm_compute in Hlab |- *;
+    try discriminate Hlab;
+    injection Hlab as <-; reflexivity.
+Qed.
+
 (* Suffix handling *)
 Definition strip_ip6_arpa (labs:list string) : option (list string) :=
   match rev labs with
@@ -1147,11 +1160,7 @@ Proof.
     inversion Hnib as [|? ? Hn Hns']; subst.
     simpl. unfold labels_of_nibbles. simpl.
     assert (Hci: eq_label_ci (nibble_label_of n) lab = true).
-    { unfold label_to_nibble, ascii_to_nibble in Elab.
-      destruct lab as [|c []]; try discriminate.
-      destruct c as [[] [] [] [] [] [] [] []]; vm_compute in Elab |- *;
-        try discriminate Elab;
-        injection Elab as <-; reflexivity. }
+    { apply nibble_label_roundtrip_ci; assumption. }
     rewrite Hci.
     apply IH.
     + unfold nibbles_of_labels. exact Eseq.
@@ -1227,7 +1236,9 @@ Proof.
   apply andb_prop in Eand. destruct Eand as [Ha Hi].
   rewrite <- (rev_involutive labs).
   rewrite Erev.
-  simpl app.
+  change (rev (a :: i :: rest_rev)) with ((rev (i :: rest_rev)) ++ [a])%list.
+  change (rev (i :: rest_rev)) with ((rev rest_rev) ++ [i])%list.
+  rewrite <- app_assoc.
   apply list_eq_ci_app.
   - assert (Hbytes_bounds: Forall (fun b => b < two8) bytes_rev).
     { apply bytes_from_nibbles_rev_some_forall in Ebytes. exact Ebytes. }
@@ -1305,9 +1316,14 @@ Proof.
       reflexivity. }
     rewrite Hbytes_eq.
     rewrite (nibbles_bytes_roundtrip ns bytes_rev Ebytes Hnib_bounds).
-    admit.
-  - simpl. admit. 
-Admitted.
+    apply labels_nibbles_roundtrip_ci.
+    + exact Enib.
+    + exact Hnib_bounds.
+  - unfold IP6_ARPA. simpl list_eq_ci.
+    rewrite eq_label_ci_sym. rewrite Hi. simpl.
+    rewrite eq_label_ci_sym. rewrite Ha. simpl.
+    reflexivity.
+Qed.
 
 (* =============================================================================
    Section 3b: Additional-Section Processing (RFC 3596 Section 3)
