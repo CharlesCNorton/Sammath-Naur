@@ -31,51 +31,75 @@ Open Scope string_scope.
    Section 1: Basic Types and Constants
    ============================================================================= *)
 
-Definition byte    := N.  (* 0..255 *)
-Definition word16  := N.  (* 0..65535 *)
-Definition word32  := N.  (* modulo 2^32 via [to_word32] *)
+(* Type alias for 8-bit bytes (values 0..255) *)
+Definition byte    := N.
+
+(* Type alias for 16-bit words (values 0..65535) *)
+Definition word16  := N.
+
+(* Type alias for 32-bit words (modulo 2^32 enforced by [to_word32]) *)
+Definition word32  := N.
+
+(* IPv6 address as four 32-bit words (128 bits total) in network byte order *)
 Definition word128 := (word32 * word32 * word32 * word32)%type.
 
-(* numeric helpers *)
+(* Power-of-two helper: computes 2^k *)
 Definition two (k:N) : N := N.pow 2 k.
-Definition two4  : N := two 4.
-Definition two8  : N := two 8.
-Definition two16 : N := two 16.
-Definition two24 : N := two 24.
-Definition two32 : N := two 32.
 
+(* Common powers of 2 for byte/word arithmetic *)
+Definition two4  : N := two 4.   (* 16 - nibble bound *)
+Definition two8  : N := two 8.   (* 256 - byte bound *)
+Definition two16 : N := two 16.  (* 65536 - word16 bound *)
+Definition two24 : N := two 24.  (* 16777216 - used in byte extraction *)
+Definition two32 : N := two 32.  (* 4294967296 - word32 bound *)
+
+(* Computational proofs that our power-of-two constants have expected values *)
 Lemma two4_eq : two4 = 16. Proof. reflexivity. Qed.
 Lemma two8_eq : two8 = 256. Proof. reflexivity. Qed.
 Lemma two16_eq : two16 = 65536. Proof. reflexivity. Qed.
 Lemma two24_eq : two24 = 16777216. Proof. reflexivity. Qed.
 Lemma two32_eq : two32 = 4294967296. Proof. reflexivity. Qed.
 
+(* Truncation functions: reduce arbitrary N to fit within type bounds via modulo *)
 Definition to_byte   (x:N) : byte   := x mod two8.
 Definition to_word16 (x:N) : word16 := x mod two16.
 Definition to_word32 (x:N) : word32 := x mod two32.
 
+(* If x already fits in a byte, truncation is identity *)
 Lemma to_byte_small : forall x, x < two8 -> to_byte x = x.
 Proof. intros x H; unfold to_byte; apply N.mod_small; exact H. Qed.
 
-(* IPv6 DNS constants (RFC 3596) *)
-Definition AAAA_TYPE : word16 := 28.        (* §2.1 *)
-Definition PTR_TYPE  : word16 := 12.        (* RFC 1035 *)
+(* IPv6 DNS constants from RFC 3596 *)
+
+(* AAAA record type code = 28 (RFC 3596 §2.1) *)
+Definition AAAA_TYPE : word16 := 28.
+
+(* PTR record type code = 12 (RFC 1035, used for reverse DNS) *)
+Definition PTR_TYPE  : word16 := 12.
+
+(* IN (Internet) class code = 1 *)
 Definition IN_CLASS  : word16 := 1.
 
+(* Standard suffix for IPv6 reverse DNS names (RFC 3596 §2.5) *)
 Definition IP6_ARPA : list string := ["ip6"; "arpa"].
-Definition IP6_INT  : list string := ["ip6"; "int"].  (* historical; not used *)
 
-(* strings *)
+(* Historical/deprecated IPv6 reverse suffix; defined for completeness but not used *)
+Definition IP6_INT  : list string := ["ip6"; "int"].
+
+(* Compute the length of a string (number of characters) *)
 Fixpoint strlen (s:string) : nat :=
   match s with
   | EmptyString => 0%nat
   | String _ tl => S (strlen tl)
   end.
 
+(* Compute wire-format length of a domain name per RFC 1035:
+   sum of (1 + label_length) for each label, plus 1 for the root's zero-length label.
+   Example: "ip6.arpa" = (1+3) + (1+4) + 1 = 10 bytes *)
 Definition domain_name_wire_len (labs:list string) : N :=
-  (* sum (1 + |label|) + 1 for root zero-length label; RFC 1035 *)
   N.of_nat (List.fold_right (fun s acc => S (strlen s) + acc)%nat 1%nat labs).
 
+(* Truncate domain name wire length to 16-bit word (RFC 1035 limits names to 255 bytes) *)
 Definition domain_name_length (labs:list string) : word16 :=
   to_word16 (domain_name_wire_len labs).
 
@@ -83,13 +107,18 @@ Definition domain_name_length (labs:list string) : word16 :=
    Section 2: AAAA Resource Record (RFC 3596 Section 2.1/2.2)
    ============================================================================= *)
 
-(* 32-bit big-endian (network order) packing/unpacking *)
+(* Convert a 32-bit word to 4 bytes in big-endian (network) order.
+   Example: 0x12345678 → [0x12, 0x34, 0x56, 0x78]
+   Strategy: Extract bytes via division by powers of 256, then take mod 256 *)
 Definition word32_to_bytes (w:word32) : list byte :=
-  [ (w / two24) mod two8;
+  [ (w / two24) mod two8;   (* most significant byte *)
     (w / two16) mod two8;
     (w / two8 ) mod two8;
-    w mod two8 ].
+    w mod two8 ].           (* least significant byte *)
 
+(* Reconstruct a 32-bit word from 4 bytes in big-endian order.
+   Returns None if input is not exactly 4 bytes.
+   Example: [0x12, 0x34, 0x56, 0x78] → Some 0x12345678 *)
 Definition bytes_to_word32 (bs:list byte) : option word32 :=
   match bs with
   | [b0;b1;b2;b3] =>
@@ -97,12 +126,17 @@ Definition bytes_to_word32 (bs:list byte) : option word32 :=
   | _ => None
   end.
 
-(* IPv6 address representation *)
+(* Serialize an IPv6 address (128-bit tuple) to 16 bytes in network order.
+   An IPv6 address is represented as four 32-bit words (a,b,c,d).
+   Each word is converted to 4 bytes, then concatenated: a || b || c || d *)
 Definition ipv6_to_bytes (addr : word128) : list byte :=
   let '(a,b,c,d) := addr in
   word32_to_bytes a ++ word32_to_bytes b ++
   word32_to_bytes c ++ word32_to_bytes d.
 
+(* Deserialize 16 bytes into an IPv6 address.
+   Returns None unless input is exactly 16 bytes.
+   Bytes are interpreted as four 32-bit words in network order. *)
 Definition ipv6_from_bytes (bytes : list byte) : option word128 :=
   match bytes with
   | a0::a1::a2::a3::
@@ -119,7 +153,14 @@ Definition ipv6_from_bytes (bytes : list byte) : option word128 :=
   | _ => None
   end.
 
-(* AAAA RR as in RFC 3596 *)
+(* AAAA Resource Record structure per RFC 3596 §2.1-2.2.
+   Fields match the DNS wire format:
+   - name: domain name as list of labels
+   - type: RR type (must be 28 for AAAA)
+   - class: RR class (must be 1 for IN)
+   - ttl: time-to-live in seconds
+   - rdlength: RDATA length (must be 16 for AAAA)
+   - address: 128-bit IPv6 address *)
 Record AAAARecord := {
   aaaa_name     : list string;
   aaaa_type     : word16;         (* must be 28 *)
@@ -129,7 +170,11 @@ Record AAAARecord := {
   aaaa_address  : word128         (* 16 octets, network order *)
 }.
 
-(* Smart constructor enforces spec-mandated fields (§2.1/2.2) *)
+(* Smart constructor that enforces RFC-mandated field values.
+   Prevents construction of invalid AAAA records by automatically setting:
+   - type = 28 (AAAA_TYPE)
+   - class = 1 (IN_CLASS)
+   - rdlength = 16 (fixed for all AAAA records) *)
 Definition create_aaaa_record (name : list string) (addr : word128) (ttl : word32)
   : AAAARecord :=
   {| aaaa_name := name;
@@ -139,17 +184,20 @@ Definition create_aaaa_record (name : list string) (addr : word128) (ttl : word3
      aaaa_rdlength := 16;
      aaaa_address := addr |}.
 
+(* The smart constructor always produces records with rdlength = 16 *)
 Lemma aaaa_fixed_size_create : forall name addr ttl,
   (create_aaaa_record name addr ttl).(aaaa_rdlength) = 16.
 Proof. reflexivity. Qed.
 
-(* Optional well-formedness predicate useful for generic AAAA RRs *)
+(* Well-formedness predicate for validating AAAA records from untrusted sources.
+   A record is well-formed if type=28, class=1, and rdlength=16. *)
 Record AAAA_wf (r:AAAARecord) : Prop := {
   WF_type  : r.(aaaa_type) = AAAA_TYPE;
   WF_class : r.(aaaa_class) = IN_CLASS;
   WF_len   : r.(aaaa_rdlength) = 16
 }.
 
+(* Any well-formed AAAA record has rdlength = 16 *)
 Theorem aaaa_fixed_size_wf : forall r, AAAA_wf r -> r.(aaaa_rdlength) = 16.
 Proof. intros r H; exact (WF_len _ H). Qed.
 
@@ -157,22 +205,35 @@ Proof. intros r H; exact (WF_len _ H). Qed.
    Section 2b: AAAA RDATA Codec (RDATA = 16-octet IPv6 address)
    ============================================================================= *)
 
+(* Encode an IPv6 address as 16 bytes of AAAA RDATA (RFC 3596 §2.2).
+   This is the binary format stored in the RDATA field of an AAAA record. *)
 Definition encode_AAAA_rdata (addr:word128) : list byte :=
   ipv6_to_bytes addr.
 
+(* Decode 16 bytes of AAAA RDATA into an IPv6 address.
+   Returns None if input is not exactly 16 bytes. *)
 Definition decode_AAAA_rdata (bs:list byte) : option word128 :=
   ipv6_from_bytes bs.
 
-(* We will prove inverse properties in Section 8c after developing shared lemmas. *)
+(* Round-trip correctness proofs (encode ∘ decode = id) appear in Section 8c
+   after we develop the necessary arithmetic and byte-manipulation lemmas. *)
 
 (* =============================================================================
    Section 3: IPv6 Reverse Mapping (RFC 3596 Section 2.5)
    ============================================================================= *)
 
-(* nibbles *)
+(* === Nibble (4-bit) Extraction from Bytes === *)
+
+(* Extract the high nibble (upper 4 bits) of a byte.
+   Example: hi_nib(0xAB) = 0xA = 10 *)
 Definition hi_nib (b:byte) : N := (b / two4) mod two4.
+
+(* Extract the low nibble (lower 4 bits) of a byte.
+   Example: lo_nib(0xAB) = 0xB = 11 *)
 Definition lo_nib (b:byte) : N := b mod two4.
 
+(* The high nibble (b / 16) of any byte b < 256 is itself < 16.
+   Proof strategy: Division by 16 reduces magnitude by factor of 16. *)
 Lemma hi_nib_small : forall b, b < two8 -> (b / two4) < two4.
 Proof.
   intros b Hb.
@@ -181,6 +242,9 @@ Proof.
   apply N.Div0.div_lt_upper_bound; lia.
 Qed.
 
+(* Any byte can be reconstructed from its quotient and remainder modulo 16:
+   b = 16 * (b / 16) + (b mod 16)
+   This is the division algorithm specialized to base-16. *)
 Lemma byte_decompose : forall b, b < two8 -> two4 * (b / two4) + (b mod two4) = b.
 Proof.
   intros b Hb.
@@ -189,6 +253,9 @@ Proof.
   - unfold two4, two; simpl; lia.
 Qed.
 
+(* Combining high and low nibbles reconstructs the original byte.
+   Proof: Unfold definitions and apply byte_decompose.
+   This is a key lemma for proving nibble ↔ byte round-trips. *)
 Lemma nibbles_reconstruct_byte : forall b,
   b < two8 -> to_byte (two4 * hi_nib b + lo_nib b) = b.
 Proof.
@@ -201,9 +268,15 @@ Proof.
   now rewrite N.mod_small.
 Qed.
 
-(* hex digit <-> one-char label *)
+(* === Nibble ↔ DNS Label Conversion (for ip6.arpa names) === *)
+
+(* Helper: create a single-character string from an ASCII character *)
 Definition singleton (c:ascii) : string := String c EmptyString.
 
+(* Convert a nibble (0-15) to its hexadecimal DNS label ("0".."9", "a".."f").
+   Per RFC 3596 §2.5, nibbles in ip6.arpa names use lowercase hex.
+   Example: nibble_label_of(10) = "a", nibble_label_of(15) = "f"
+   Note: Exhaustive matching makes the inverse lemma trivial via vm_compute. *)
 Definition nibble_label_of (n:N) : string :=
   match N.to_nat n with
   | 0%nat => "0"%string | 1%nat => "1"%string | 2%nat => "2"%string | 3%nat => "3"%string
@@ -214,6 +287,12 @@ Definition nibble_label_of (n:N) : string :=
   | _ => "0"%string (* unreachable for n<16 *)
   end.
 
+(* Parse an ASCII character as a hexadecimal nibble (case-insensitive).
+   Accepts:
+   - '0'..'9' (ASCII 48-57) → 0..9
+   - 'a'..'f' (ASCII 97-102) → 10..15
+   - 'A'..'F' (ASCII 65-70) → 10..15
+   Returns None for non-hex characters. *)
 Definition ascii_to_nibble (c:ascii) : option N :=
   let n := nat_of_ascii c in
   if (48 <=? n)%nat && (n <=? 57)%nat then Some (N.of_nat (n - 48)%nat) else
@@ -221,12 +300,17 @@ Definition ascii_to_nibble (c:ascii) : option N :=
   if (65 <=? n)%nat && (n <=? 70)%nat then Some (N.of_nat (n - 55)%nat) else
   None.
 
+(* Parse a single-character DNS label as a hexadecimal nibble.
+   RFC 3596 §2.5 specifies ip6.arpa labels are single hex digits.
+   Returns None if label is not exactly one character or not valid hex. *)
 Definition label_to_nibble (s:string) : option N :=
   match s with
   | String c EmptyString => ascii_to_nibble c
   | _ => None
   end.
 
+(* Any nibble n < 16 has N.to_nat(n) < 16.
+   This bridges between Coq's N type and nat for exhaustive case analysis. *)
 Lemma nibble_to_nat_bound : forall n,
   n < two4 -> (N.to_nat n < 16)%nat.
 Proof.
@@ -237,6 +321,10 @@ Proof.
   destruct n; cbn; lia.
 Qed.
 
+(* Round-trip property: nibble → label → nibble is identity.
+   Proof: Exhaustive case analysis on all 16 possible nibbles (0..15).
+   Each case verified via vm_compute on the definitions.
+   This is a key correctness guarantee for ip6.arpa name generation. *)
 Lemma label_of_nibble_inverse : forall n,
   n < two4 -> label_to_nibble (nibble_label_of n) = Some n.
 Proof.
@@ -261,7 +349,12 @@ Proof.
   lia.
 Qed.
 
-(* option list utilities *)
+(* === Option List Utilities === *)
+
+(* Convert a list of options into an option of a list (monadic sequence).
+   Returns None if any element is None, otherwise Some of the unwrapped values.
+   Example: sequence [Some 1; Some 2] = Some [1; 2]
+            sequence [Some 1; None] = None *)
 Fixpoint sequence {A} (xs:list (option A)) : option (list A) :=
   match xs with
   | [] => Some []
@@ -269,11 +362,21 @@ Fixpoint sequence {A} (xs:list (option A)) : option (list A) :=
   | None :: _ => None
   end.
 
-(* Produce the 32 nibbles in the ip6.arpa order:
-   low-order nibble of last byte first, then its high nibble, then previous byte, ... *)
+(* === Core Reverse DNS Conversion (RFC 3596 §2.5) === *)
+
+(* Extract all nibbles from a byte list in ip6.arpa order.
+   RFC 3596 §2.5: "low-order nibble is listed first", working backwards from last byte.
+
+   Example: [0xAB, 0xCD] → rev([hi(0xAB); lo(0xAB); hi(0xCD); lo(0xCD)])
+                          = [lo(0xCD); hi(0xCD); lo(0xAB); hi(0xAB)]
+                          = [0xD, 0xC, 0xB, 0xA]
+
+   Strategy: Extract nibbles in normal order, then reverse to match RFC. *)
 Definition nibbles_rev_of_bytes (bs:list byte) : list N :=
   List.rev (List.flat_map (fun b => [hi_nib b; lo_nib b]) bs).
 
+(* Prepending a byte adds its nibbles (reversed) to the end.
+   Key property for inductive proofs about nibble extraction. *)
 Lemma nibbles_rev_of_bytes_cons : forall b bs,
   nibbles_rev_of_bytes (b :: bs) =
   (nibbles_rev_of_bytes bs ++ [lo_nib b; hi_nib b])%list.
@@ -283,6 +386,8 @@ Proof.
   repeat rewrite <- app_assoc. reflexivity.
 Qed.
 
+(* Appending a byte prepends its nibbles (reversed) to the result.
+   Dual property to the cons lemma. *)
 Lemma nibbles_rev_of_bytes_app : forall bs b,
   nibbles_rev_of_bytes (bs ++ [b]) =
   ([lo_nib b; hi_nib b] ++ nibbles_rev_of_bytes bs)%list.
@@ -293,12 +398,20 @@ Proof.
   simpl. reflexivity.
 Qed.
 
+(* Convert a list of nibbles to DNS labels (hex digit strings).
+   Example: [10, 11, 12] → ["a", "b", "c"] *)
 Definition labels_of_nibbles (ns:list N) : list string :=
   map nibble_label_of ns.
 
+(* Parse a list of DNS labels as nibbles.
+   Returns None if any label is invalid (not a single hex digit).
+   Example: ["a", "b", "c"] → Some [10, 11, 12] *)
 Definition nibbles_of_labels (ls:list string) : option (list N) :=
   sequence (map label_to_nibble ls).
 
+(* If all nibbles are valid (<16), then labels → nibbles → labels is identity.
+   Proof: Induction on nibble list, using label_of_nibble_inverse at each step.
+   This guarantees that DNS labels faithfully represent nibble values. *)
 Lemma labels_roundtrip_for_nibbles : forall ns,
   Forall (fun n => n < two4) ns ->
   nibbles_of_labels (labels_of_nibbles ns) = Some ns.
@@ -310,7 +423,16 @@ Proof.
   now rewrite IH.
 Qed.
 
-(* bytes <-> nibbles (in the ip6.arpa ordering) *)
+(* === Reverse Conversion: Nibbles → Bytes === *)
+
+(* Reconstruct bytes from nibbles in ip6.arpa order (pairs of lo, hi nibbles).
+   Consumes nibbles two at a time: lo_nib, then hi_nib.
+   Returns None if the nibble count is not even.
+
+   Example: [0xD, 0xC, 0xB, 0xA] → Some [to_byte(16*0xC + 0xD), to_byte(16*0xA + 0xB)]
+                                  = Some [0xCD, 0xAB]
+
+   Note: This processes nibbles from the ip6.arpa end (low-order first). *)
 Fixpoint bytes_from_nibbles_rev (ns:list N) : option (list byte) :=
   match ns with
   | [] => Some []
@@ -319,6 +441,9 @@ Fixpoint bytes_from_nibbles_rev (ns:list N) : option (list byte) :=
   | _ => None
   end.
 
+(* Appending a nibble pair to the end produces the expected byte appended.
+   Proof strategy: Structural induction using fix, handling all three cases
+   (empty, singleton, pair+tail). *)
 Lemma bytes_from_nibbles_rev_app : forall ns lo hi bs,
   bytes_from_nibbles_rev ns = Some bs ->
   bytes_from_nibbles_rev (ns ++ [lo; hi])%list =
@@ -334,6 +459,8 @@ Proof.
     rewrite IH. reflexivity.
 Qed.
 
+(* Successful nibble→byte conversion produces exactly half as many bytes as nibbles.
+   This length invariant is critical for ensuring 32 nibbles → 16 bytes. *)
 Lemma bytes_from_nibbles_rev_length_ok :
   forall ns bytes,
     bytes_from_nibbles_rev ns = Some bytes ->
@@ -349,6 +476,11 @@ Proof.
     + discriminate H.
 Qed.
 
+(* Round-trip theorem: bytes → nibbles → bytes (in reverse order) is identity.
+   This is one direction of the full ip6.arpa bijection proof.
+
+   Proof strategy: Induction on byte list, using nibbles_reconstruct_byte
+   to show that lo_nib and hi_nib correctly reconstruct each byte. *)
 Lemma bytes_from_nibbles_rev_of_bytes :
   forall bs,
     Forall (fun b => b < two8) bs ->
@@ -365,20 +497,31 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* ASCII case conversion for DNS labels (RFC 1035 §2.3.3: case-insensitive) *)
+(* === Case-Insensitive DNS Label Comparison (RFC 1035 §2.3.3) === *)
+
+(* Convert an ASCII uppercase letter (A-Z) to lowercase (a-z).
+   ASCII codes: 'A'=65, 'Z'=90, 'a'=97, 'z'=122.
+   Conversion: add 32 to uppercase letters, leave others unchanged. *)
 Definition to_lower_ascii (c:ascii) : ascii :=
   let n := nat_of_ascii c in
   if (65 <=? n)%nat && (n <=? 90)%nat then ascii_of_nat (n + 32)%nat else c.
 
+(* Convert an entire string to lowercase character-by-character. *)
 Fixpoint to_lower (s:string) : string :=
   match s with
   | EmptyString => EmptyString
   | String c tl => String (to_lower_ascii c) (to_lower tl)
   end.
 
+(* Case-insensitive label equality check.
+   Per RFC 1035, DNS labels are case-insensitive:
+   "foo.com", "FOO.COM", and "Foo.Com" are all equivalent. *)
 Definition eq_label_ci (a b:string) : bool :=
   String.eqb (to_lower a) (to_lower b).
 
+(* If a label parses to nibble n, then nibble_label_of(n) is case-insensitively
+   equal to the original label.
+   Proof: Exhaustive vm_compute on all possible single-character hex labels. *)
 Lemma nibble_label_roundtrip_ci : forall n lab,
   n < two4 ->
   label_to_nibble lab = Some n ->
@@ -392,7 +535,15 @@ Proof.
     injection Hlab as <-; reflexivity.
 Qed.
 
-(* Suffix handling *)
+(* === ip6.arpa Suffix Handling === *)
+
+(* Remove the ".ip6.arpa" suffix from a domain name (case-insensitive).
+   Returns Some(prefix) if the name ends with "ip6.arpa", None otherwise.
+
+   Example: strip_ip6_arpa(["8", "b", "d", "0", "1", "0", "0", "2", "ip6", "arpa"])
+            = Some ["8", "b", "d", "0", "1", "0", "0", "2"]
+
+   Strategy: Reverse the label list to check suffix, then reverse result. *)
 Definition strip_ip6_arpa (labs:list string) : option (list string) :=
   match rev labs with
   | a :: i :: rest_rev =>
@@ -401,12 +552,35 @@ Definition strip_ip6_arpa (labs:list string) : option (list string) :=
   | _ => None
   end.
 
-(* Convert IPv6 address to reverse DNS name (RFC 3596 §2.5) *)
+(* === Main Public API: IPv6 ↔ Reverse DNS Conversion === *)
+
+(* Convert an IPv6 address to its reverse DNS name (RFC 3596 §2.5).
+
+   Algorithm:
+   1. Serialize address to 16 bytes
+   2. Extract all 32 nibbles in ip6.arpa order (low nibble of last byte first)
+   3. Convert each nibble to a hex digit label
+   4. Append ".ip6.arpa"
+
+   Example: ::1 (0x00000000000000000000000000000001)
+            → [... "1", "0", "0", ... "0", "ip6", "arpa"]
+            = 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa *)
 Definition ipv6_to_reverse (addr : word128) : list string :=
   let bytes := ipv6_to_bytes addr in
   labels_of_nibbles (nibbles_rev_of_bytes bytes) ++ IP6_ARPA.
 
-(* Decode reverse name back to IPv6 *)
+(* Decode a reverse DNS name back to an IPv6 address.
+   Returns None if:
+   - Name doesn't end with ".ip6.arpa" (case-insensitive)
+   - Nibble count ≠ 32 (must represent exactly 128 bits)
+   - Any label is not a valid hex digit
+
+   Algorithm (inverse of ipv6_to_reverse):
+   1. Strip and verify ".ip6.arpa" suffix
+   2. Check that we have exactly 32 hex labels
+   3. Parse labels as nibbles
+   4. Reconstruct 16 bytes from nibble pairs
+   5. Reverse byte order and deserialize to IPv6 address *)
 Definition reverse_to_ipv6 (labs : list string) : option word128 :=
   match strip_ip6_arpa labs with
   | None => None
@@ -424,7 +598,10 @@ Definition reverse_to_ipv6 (labs : list string) : option word128 :=
       else None
   end.
 
-(* helper: all bytes from word32_to_bytes are < 256 *)
+(* === Arithmetic Foundations for word32 ↔ bytes Conversion === *)
+
+(* All four bytes extracted from a word32 are valid (<256).
+   This is immediate from the mod operation but crucial for type safety. *)
 Lemma word32_to_bytes_bounds : forall w,
   Forall (fun b => b < two8) (word32_to_bytes w).
 Proof.
@@ -432,6 +609,7 @@ Proof.
   repeat constructor; apply N.mod_lt; unfold two8, two; simpl; lia.
 Qed.
 
+(* All 16 bytes of an IPv6 serialization are valid (<256). *)
 Lemma ipv6_bytes_bounds : forall a b c d,
   Forall (fun x => x < two8) (ipv6_to_bytes (a,b,c,d)).
 Proof.
@@ -439,35 +617,57 @@ Proof.
   repeat rewrite Forall_app; repeat split; apply word32_to_bytes_bounds.
 Qed.
 
+(* Individual byte extraction bounds (used in reconstruction proofs): *)
+
+(* Byte 0 (most significant): (w / 2^24) mod 256 < 256 *)
 Lemma word32_byte0_lt : forall w, w / two24 mod two8 < two8.
 Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
+(* Byte 1: (w / 2^16) mod 256 < 256 *)
 Lemma word32_byte1_lt : forall w, w / two16 mod two8 < two8.
 Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
+(* Byte 2: (w / 2^8) mod 256 < 256 *)
 Lemma word32_byte2_lt : forall w, w / two8 mod two8 < two8.
 Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
+(* Byte 3 (least significant): w mod 256 < 256 *)
 Lemma word32_byte3_lt : forall w, w mod two8 < two8.
 Proof. intros; apply N.mod_lt; unfold two8, two; simpl; lia. Qed.
 
+(* === Modular Arithmetic Lemmas for Byte Extraction ===
+
+   This section provides the algebraic foundation for proving that
+   bytes_to_word32 ∘ word32_to_bytes is the identity (modulo 2^32).
+
+   Key strategy: Show that nested mod operations collapse, and that
+   division/mod commute in controlled ways. *)
+
+(* If a < b, then a mod b = a (mod is identity for small values). *)
 Lemma mod_small_iff : forall a b, b <> 0 -> a < b -> a mod b = a.
 Proof. intros. apply N.mod_small. lia. Qed.
 
+(* Result of mod is always strictly smaller than the modulus. *)
 Lemma mod_of_mod_small : forall a b, b <> 0 -> a mod b < b.
 Proof. intros. apply N.mod_lt. lia. Qed.
 
+(* Adding multiples of the modulus doesn't change the remainder.
+   (a + k*m) mod m = a mod m *)
 Lemma add_mod_cancel_mult : forall a k m, m <> 0 -> (a + k * m) mod m = a mod m.
 Proof.
   intros. apply N.Div0.mod_add; lia.
 Qed.
 
+(* Variant with multiplication on the left: (k*m + a) mod m = a mod m *)
 Lemma add_mod_cancel_mult_l : forall a k m, m <> 0 -> (k * m + a) mod m = a mod m.
 Proof.
   intros. replace (k * m + a) with (a + k * m) by lia.
   apply add_mod_cancel_mult. lia.
 Qed.
 
+(* Nested modulo collapse: (a mod (n*m)) mod m = a mod m
+   Example: (x mod 65536) mod 256 = x mod 256
+   This is crucial for showing byte extraction is consistent. *)
 Lemma mod_mod_cancel : forall a n m,
   m <> 0 -> n <> 0 -> (a mod (n * m)) mod m = a mod m.
 Proof.
@@ -479,6 +679,8 @@ Proof.
   symmetry. apply add_mod_cancel_mult_l. lia.
 Qed.
 
+(* Concrete instantiation: (w mod 65536) mod 256 = w mod 256
+   Used for extracting the least significant byte. *)
 Lemma mod256_of_mod65536 : forall w,
   (w mod 65536) mod 256 = w mod 256.
 Proof.
@@ -486,12 +688,22 @@ Proof.
   apply mod_mod_cancel; lia.
 Qed.
 
+(* Division with additive offset: (k*m + a) / m = k + (a / m)
+   The k*m term contributes exactly k to the quotient. *)
 Lemma div_add_cancel : forall a k m, m <> 0 -> (k * m + a) / m = k + a / m.
 Proof.
   intros. replace (k * m + a) with (a + k * m) by lia.
   rewrite N.div_add by lia. lia.
 Qed.
 
+(* Division and modulo swap for nested operations:
+   (a mod (n*m)) / m = (a / m) mod n
+
+   Intuition: Taking a mod (n*m) keeps the lower (log₂(n*m)) bits.
+   Dividing by m then shifts right by log₂(m) bits.
+   The result is the middle log₂(n) bits, which is (a/m) mod n.
+
+   This is the key lemma for multi-level byte extraction. *)
 Lemma div_mod_swap : forall a n m,
   m <> 0 -> n <> 0 -> (a mod (n * m)) / m = a / m mod n.
 Proof.
@@ -512,6 +724,8 @@ Proof.
   apply N.Div0.div_lt_upper_bound; try apply N.mod_lt; lia.
 Qed.
 
+(* Concrete instantiation: (w mod 65536) / 256 = (w / 256) mod 256
+   Used for extracting byte 1 (second-least significant byte). *)
 Lemma div256_of_mod65536 : forall w,
   (w mod 65536) / 256 = w / 256 mod 256.
 Proof.
@@ -519,6 +733,7 @@ Proof.
   apply div_mod_swap; lia.
 Qed.
 
+(* Similar lemma for next power: (w mod 2^24) mod 2^16 = w mod 2^16 *)
 Lemma mod65536_of_mod16777216 : forall w,
   (w mod 16777216) mod 65536 = w mod 65536.
 Proof.
@@ -526,6 +741,7 @@ Proof.
   apply mod_mod_cancel; lia.
 Qed.
 
+(* Extract byte 2: (w mod 2^24) / 2^16 = (w / 2^16) mod 256 *)
 Lemma div65536_of_mod16777216 : forall w,
   (w mod 16777216) / 65536 = w / 65536 mod 256.
 Proof.
@@ -533,9 +749,11 @@ Proof.
   apply div_mod_swap; lia.
 Qed.
 
+(* If w < 2^32, then w / 2^24 < 256 (most significant byte fits). *)
 Lemma div16777216_lt256 : forall w, w < 4294967296 -> w / 16777216 < 256.
 Proof. intros. apply N.Div0.div_lt_upper_bound; lia. Qed.
 
+(* Generalized div/mod compatibility with nested modulo. *)
 Lemma div_mod_compat_256 : forall w d,
   d <> 0 -> 256 <> 0 ->
   w / d mod 256 = (w mod (256 * d)) / d mod 256.
@@ -546,6 +764,13 @@ Proof.
   reflexivity.
 Qed.
 
+(* === Word32 Byte Reconstruction (proving decode ∘ encode = id) ===
+
+   These lemmas hierarchically decompose a 32-bit word into its 4 bytes,
+   proving that the extraction strategy in word32_to_bytes is reversible. *)
+
+(* Step 1: Split into byte0 (most significant) and lower 24 bits.
+   w = byte0 * 2^24 + (w mod 2^24) *)
 Lemma byte_reconstruction_step1 : forall w,
   w < 4294967296 ->
   w = (w / 16777216) * 16777216 + w mod 16777216.
@@ -555,6 +780,8 @@ Proof.
   apply N.div_mod. lia.
 Qed.
 
+(* Step 2: Split lower 24 bits into byte1 and lower 16 bits.
+   (w mod 2^24) = byte1 * 2^16 + (w mod 2^16) *)
 Lemma byte_reconstruction_step2 : forall w,
   w mod 16777216 = (w / 65536 mod 256) * 65536 + w mod 65536.
 Proof.
@@ -565,6 +792,8 @@ Proof.
   reflexivity.
 Qed.
 
+(* Step 3: Split lower 16 bits into byte2 and byte3.
+   (w mod 2^16) = byte2 * 2^8 + byte3 *)
 Lemma byte_reconstruction_step3 : forall w,
   w mod 65536 = (w / 256 mod 256) * 256 + w mod 256.
 Proof.
@@ -575,6 +804,13 @@ Proof.
   reflexivity.
 Qed.
 
+(* === Byte Extraction Commutes with word32 Truncation ===
+
+   These lemmas show that extracting bytes from an arbitrary N value
+   gives the same result as extracting from (N mod 2^32).
+   This is crucial for proving to_word32 normalizes correctly. *)
+
+(* Byte 3 (LSB) extraction commutes with to_word32 truncation. *)
 Lemma mod_256_of_mod_2_32 : forall w,
   w mod 256 = (w mod 4294967296) mod 256.
 Proof.
@@ -582,6 +818,7 @@ Proof.
   symmetry. apply mod_mod_cancel; lia.
 Qed.
 
+(* Byte 2 extraction commutes with to_word32 truncation. *)
 Lemma div_256_mod_256_of_mod_2_32 : forall w,
   w / 256 mod 256 = (w mod 4294967296) / 256 mod 256.
 Proof.
@@ -592,6 +829,7 @@ Proof.
   symmetry. apply mod_mod_cancel; lia.
 Qed.
 
+(* Byte 1 extraction commutes with to_word32 truncation. *)
 Lemma div_65536_mod_256_of_mod_2_32 : forall w,
   w / 65536 mod 256 = (w mod 4294967296) / 65536 mod 256.
 Proof.
@@ -602,11 +840,13 @@ Proof.
   symmetry. apply mod_mod_cancel; lia.
 Qed.
 
+(* Double modulo is idempotent: (a mod m) mod m = a mod m *)
 Lemma mod_mod_same : forall a m, m <> 0 -> (a mod m) mod m = a mod m.
 Proof.
   intros. apply N.mod_small. apply N.mod_lt. assumption.
 Qed.
 
+(* Byte 0 (MSB) extraction commutes with to_word32 truncation. *)
 Lemma div_16777216_mod_256_of_mod_2_32 : forall w,
   w / 16777216 mod 256 = (w mod 4294967296) / 16777216 mod 256.
 Proof.
@@ -615,23 +855,41 @@ Proof.
   symmetry. apply mod_mod_same. lia.
 Qed.
 
+(* === Convenient Restatements for Each Byte === *)
+
+(* These lemmas are convenient restatements of the above commutation properties. *)
+
+(* Byte 3 (LSB) equality under truncation *)
 Lemma byte0_eq : forall w, w mod 256 = (w mod 4294967296) mod 256.
 Proof. intros. apply mod_256_of_mod_2_32. Qed.
 
+(* Byte 2 equality under truncation *)
 Lemma byte1_eq : forall w, w / 256 mod 256 = (w mod 4294967296) / 256 mod 256.
 Proof. intros. apply div_256_mod_256_of_mod_2_32. Qed.
 
+(* Byte 1 equality under truncation *)
 Lemma byte2_eq : forall w, w / 65536 mod 256 = (w mod 4294967296) / 65536 mod 256.
 Proof. intros. apply div_65536_mod_256_of_mod_2_32. Qed.
 
+(* Byte 0 (MSB) equality under truncation *)
 Lemma byte3_eq : forall w, w / 16777216 mod 256 = (w mod 4294967296) / 16777216 mod 256.
 Proof. intros. apply div_16777216_mod_256_of_mod_2_32. Qed.
 
+(* If w fits in 32 bits, its MSB fits in 8 bits *)
 Lemma byte3_normalized : forall w, w < 4294967296 -> w / 16777216 < 256.
 Proof. intros. apply div16777216_lt256. assumption. Qed.
 
+(* For normalized word32, MSB extraction doesn't need mod *)
 Lemma byte3_mod_small : forall w, w < 4294967296 -> w / 16777216 mod 256 = w / 16777216.
 Proof. intros. apply N.mod_small. apply byte3_normalized. assumption. Qed.
+
+(* === Main Word32 Reconstruction Theorem ===
+
+   Combining the extracted bytes via the standard formula reconstructs
+   the original word (for values < 2^32).
+
+   This is the algebraic heart of the bytes_to_word32 ∘ word32_to_bytes
+   round-trip proof. *)
 
 Lemma w32_from_bytes : forall w, w < 4294967296 ->
   w / 16777216 * 16777216 +
@@ -647,6 +905,12 @@ Proof.
   { apply byte_reconstruction_step3. }
   rewrite H2 in H1. rewrite H3 in H1. symmetry. exact H1.
 Qed.
+
+(* Reconstruction theorem with symbolic constants (two8, two16, etc.).
+   This is the same as w32_from_bytes but with abstract notation.
+
+   Proof strategy: Reduce symbolic constants to concrete numbers, then
+   apply the byte commutation lemmas and w32_from_bytes. *)
 
 Lemma word32_reconstruction : forall w,
   (w / two24 mod two8) * two24 +
@@ -668,6 +932,9 @@ Proof.
   apply w32_from_bytes. exact Hw'.
 Qed.
 
+(* Truncating the reconstructed byte sum equals truncating the original.
+   This shows to_word32 commutes with byte reconstruction. *)
+
 Lemma to_word32_of_bytes_eq : forall w,
   to_word32 ((w / two24 mod two8) * two24 +
              (w / two16 mod two8) * two16 +
@@ -679,6 +946,9 @@ Proof.
   apply N.Div0.mod_mod; unfold two32, two; simpl; lia.
 Qed.
 
+(* word32 to bytes and back preserves value (modulo 2^32).
+   Foundation for AAAA RDATA codec correctness. *)
+
 Lemma word32_bytes_roundtrip : forall w,
   bytes_to_word32 (word32_to_bytes w) = Some (to_word32 w).
 Proof.
@@ -689,7 +959,13 @@ Proof.
   rewrite N.Div0.mod_mod by exact H. reflexivity.
 Qed.
 
-(* Helper lemmas for proving bytes_word32_roundtrip *)
+(* === Byte Extraction from Reconstructed Word (Reverse Direction) ===
+
+   These lemmas prove that extracting bytes from a reconstructed word32
+   yields the original bytes. This is the other half of the round-trip proof. *)
+
+(* Four valid bytes (<256) combine to a valid word32 (<2^32).
+   Proof: Maximum value is 255*2^24 + 255*2^16 + 255*2^8 + 255 = 4294967295 < 2^32 *)
 
 Lemma byte_sum_lt_word32 : forall b0 b1 b2 b3,
   b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
@@ -703,6 +979,15 @@ Proof.
   - exact Hmax.
   - lia.
 Qed.
+
+(* Extract byte 0 (MSB) from reconstructed word: isolating the b0 coefficient.
+   Formula: (b0*2^24 + lower_bits) / 2^24 mod 256 = b0
+
+   Proof strategy:
+   1. Show lower_bits < 2^24 (so they don't contribute to quotient)
+   2. Use division distributivity: (a + k*m) / m = k + a/m
+   3. Since lower_bits / 2^24 = 0, we get b0 + 0 = b0
+   4. Apply mod 256, which is identity since b0 < 256 *)
 
 Lemma byte0_extract : forall b0 b1 b2 b3,
   b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
@@ -725,6 +1010,14 @@ Proof.
     apply N.mod_small. lia. }
   exact E.
 Qed.
+
+(* Extract byte 1 from reconstructed word: isolating the b1 coefficient.
+   Formula: (b0*2^24 + b1*2^16 + lower_bits) / 2^16 mod 256 = b1
+
+   Proof strategy:
+   1. Rewrite as (lower_bits + (b0*256 + b1) * 2^16) to isolate b1's contribution
+   2. Division: lower_bits / 2^16 = 0, leaving (b0*256 + b1)
+   3. Modulo 256 cancels b0's contribution: (b0*256 + b1) mod 256 = b1 *)
 
 Lemma byte1_extract : forall b0 b1 b2 b3,
   b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
@@ -752,6 +1045,15 @@ Proof.
     exact Hmod. }
   exact E.
 Qed.
+
+(* Extract byte 2 from reconstructed word: isolating the b2 coefficient.
+   Formula: (higher_bits + b2*2^8 + b3) / 2^8 mod 256 = b2
+
+   Proof strategy:
+   1. Rewrite as b3 + (b0*65536 + b1*256 + b2) * 256
+   2. Division: b3 / 256 = 0, leaving (b0*65536 + b1*256 + b2)
+   3. Modulo 256: Higher terms (b0*65536, b1*256) are multiples of 256, so mod = 0
+   4. Result: b2 *)
 
 Lemma byte2_extract : forall b0 b1 b2 b3,
   b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
@@ -784,6 +1086,15 @@ Proof.
   exact E.
 Qed.
 
+(* Extract byte 3 (LSB) from reconstructed word: isolating the b3 coefficient.
+   Formula: (higher_bits + b3) mod 256 = b3
+
+   Proof strategy:
+   1. All higher terms (b0*2^24, b1*2^16, b2*2^8) are multiples of 256
+   2. Their sum mod 256 = 0
+   3. Therefore (higher_bits + b3) mod 256 = (0 + b3) mod 256 = b3
+   4. Since b3 < 256, final mod is identity *)
+
 Lemma byte3_extract : forall b0 b1 b2 b3,
   b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
   (b0 * two24 + b1 * two16 + b2 * two8 + b3) mod two8 = b3.
@@ -814,6 +1125,10 @@ Proof.
   exact E.
 Qed.
 
+(* Reconstructing a word32 from bytes and extracting bytes yields originals.
+   Combined with word32_bytes_roundtrip, proves bijection between word32 and bytes.
+   Proof applies byte0_extract through byte3_extract. *)
+
 Lemma bytes_word32_roundtrip : forall b0 b1 b2 b3,
   b0 < two8 -> b1 < two8 -> b2 < two8 -> b3 < two8 ->
   word32_to_bytes (to_word32 (b0 * two24 + b1 * two16 + b2 * two8 + b3)) = [b0; b1; b2; b3].
@@ -833,28 +1148,41 @@ Proof.
   - apply byte3_extract; assumption.
 Qed.
 
-(* Normalization on 128-bit tuples (reduces components modulo 2^32) *)
+(* === IPv6 Address Normalization ===
+
+   Since word32 components are represented as arbitrary N values but semantically
+   should be in range [0, 2^32), we define normalization that truncates each
+   component modulo 2^32. *)
+
 Definition normalize128 (ip:word128) : word128 :=
   let '(a,b,c,d) := ip in (to_word32 a, to_word32 b, to_word32 c, to_word32 d).
 
+(* === Case-Insensitive Label Equality Properties === *)
+
+(* Lowercasing an already-lowercase "arpa" is identity *)
 Lemma to_lower_lowercase_arpa : to_lower "arpa" = "arpa".
 Proof. reflexivity. Qed.
 
+(* Lowercasing "ARPA" yields "arpa" *)
 Lemma to_lower_uppercase_arpa : to_lower "ARPA" = "arpa".
 Proof. reflexivity. Qed.
 
+(* Lowercasing "ip6" is identity *)
 Lemma to_lower_lowercase_ip6 : to_lower "ip6" = "ip6".
 Proof. reflexivity. Qed.
 
+(* Lowercasing "IP6" yields "ip6" *)
 Lemma to_lower_uppercase_ip6 : to_lower "IP6" = "ip6".
 Proof. reflexivity. Qed.
 
+(* Case-insensitive equality is reflexive *)
 Lemma eq_label_ci_refl : forall s, eq_label_ci s s = true.
 Proof.
   intro s. unfold eq_label_ci.
   rewrite String.eqb_refl. reflexivity.
 Qed.
 
+(* Case-insensitive equality iff lowercase forms are equal *)
 Lemma eq_label_ci_lower : forall s t,
   eq_label_ci s t = true <-> to_lower s = to_lower t.
 Proof.
@@ -862,6 +1190,7 @@ Proof.
   apply String.eqb_eq.
 Qed.
 
+(* Case-insensitive equality is symmetric *)
 Lemma eq_label_ci_sym : forall s t,
   eq_label_ci s t = eq_label_ci t s.
 Proof.
@@ -874,6 +1203,7 @@ Proof.
     apply String.eqb_eq in E2. rewrite E2 in E. discriminate.
 Qed.
 
+(* Case-insensitive equality is transitive *)
 Lemma eq_label_ci_trans : forall r s t,
   eq_label_ci r s = true -> eq_label_ci s t = true -> eq_label_ci r t = true.
 Proof.
@@ -886,6 +1216,8 @@ Qed.
 
 Require Import Coq.Classes.RelationClasses.
 
+(* Case-insensitive equality forms an equivalence relation.
+   This allows using it in rewriting and other Coq automation. *)
 Instance eq_label_ci_Equivalence : Equivalence (fun s t => eq_label_ci s t = true).
 Proof.
   split.
@@ -894,6 +1226,10 @@ Proof.
   - intros x y z. apply eq_label_ci_trans.
 Qed.
 
+(* === Suffix Stripping Lemmas === *)
+
+(* Stripping ".ip6.arpa" from a name ending with it yields the prefix.
+   This is a key property for the reverse DNS round-trip proof. *)
 Lemma strip_ip6_arpa_app_hex :
   forall hexs, strip_ip6_arpa (hexs ++ IP6_ARPA) = Some hexs.
 Proof.
@@ -902,6 +1238,7 @@ Proof.
   now rewrite rev_involutive.
 Qed.
 
+(* strip_ip6_arpa is case-insensitive: "IP6.ARPA" works too *)
 Lemma strip_ip6_arpa_case_insensitive :
   forall hexs, strip_ip6_arpa (hexs ++ ["IP6"; "ARPA"]) = Some hexs.
 Proof.
@@ -910,6 +1247,10 @@ Proof.
   now rewrite rev_involutive.
 Qed.
 
+(* === Length Invariants for Reverse DNS Conversion === *)
+
+(* Extracting nibbles from N bytes yields 2*N nibbles.
+   This is fundamental for ensuring 16 bytes → 32 nibbles. *)
 Lemma nibbles_rev_of_bytes_length : forall bs,
   List.length (nibbles_rev_of_bytes bs) = (2 * List.length bs)%nat.
 Proof.
@@ -918,10 +1259,12 @@ Proof.
   rewrite app_length, IH. simpl. lia.
 Qed.
 
+(* word32_to_bytes always produces exactly 4 bytes *)
 Lemma word32_to_bytes_length : forall w,
   List.length (word32_to_bytes w) = 4%nat.
 Proof. intros; reflexivity. Qed.
 
+(* IPv6 serialization always produces exactly 16 bytes (4 words × 4 bytes) *)
 Lemma ipv6_to_bytes_length : forall a b c d,
   List.length (ipv6_to_bytes (a,b,c,d)) = 16%nat.
 Proof.
@@ -930,6 +1273,8 @@ Proof.
   now rewrite !word32_to_bytes_length.
 Qed.
 
+(* All nibbles extracted from bytes are valid (< 16).
+   This is because hi_nib and lo_nib both apply mod 16. *)
 Lemma nibbles_rev_of_bytes_bounds :
   forall bs, Forall (fun n => n < two4) (nibbles_rev_of_bytes bs).
 Proof.
@@ -939,7 +1284,19 @@ Proof.
   repeat constructor; apply N.mod_lt; unfold two4, two; simpl; lia.
 Qed.
 
-(* Round-trip property (left-inverse) up to 32-bit normalization *)
+(* IPv6 address to reverse DNS name and back yields normalized address.
+   Main correctness guarantee for RFC 3596 §2.5.
+
+   Proof outline:
+   1. ipv6_to_reverse produces nibble_labels ++ ".ip6.arpa"
+   2. Strip suffix with strip_ip6_arpa_app_hex
+   3. Verify 32 nibble labels (16 bytes × 2 nibbles/byte)
+   4. Parse labels to nibbles (labels_roundtrip_for_nibbles)
+   5. Reconstruct bytes from nibbles (bytes_from_nibbles_rev_of_bytes)
+   6. Reverse byte list to restore original order
+   7. Deserialize to IPv6 (word32_bytes_roundtrip per word)
+   8. Result equals normalize128(ip) by to_word32_of_bytes_eq *)
+
 Theorem reverse_roundtrip_normalized :
   forall ip, reverse_to_ipv6 (ipv6_to_reverse ip) = Some (normalize128 ip).
 Proof.
@@ -975,12 +1332,21 @@ Proof.
   - apply to_word32_of_bytes_eq.
 Qed.
 
-(* If each component is already within 32-bit bounds, we get exact bijection *)
+(* === Well-Formedness for IPv6 Addresses ===
+
+   An IPv6 address is well-formed if each 32-bit component is actually
+   within the range [0, 2^32). This ensures no overflow/truncation occurs. *)
+
 Definition wf_ipv6 (ip:word128) : Prop :=
   let '(a,b,c,d) := ip in a < two32 /\ b < two32 /\ c < two32 /\ d < two32.
 
+(* If x is already less than 2^32, truncation is identity *)
 Lemma to_word32_id_if_lt : forall x, x < two32 -> to_word32 x = x.
 Proof. intros x H; unfold to_word32; apply N.mod_small; exact H. Qed.
+
+(* For well-formed IPv6 addresses (all components < 2^32), reverse DNS
+   round-trip is exact—no normalization needed.
+   ipv6_to_reverse and reverse_to_ipv6 are perfect inverses on well-formed inputs. *)
 
 Theorem reverse_bijective :
   forall ip, wf_ipv6 ip -> reverse_to_ipv6 (ipv6_to_reverse ip) = Some ip.
@@ -991,6 +1357,12 @@ Proof.
   now rewrite !to_word32_id_if_lt.
 Qed.
 
+(* === Case-Insensitive List Equality ===
+
+   Extend case-insensitive comparison to lists of labels.
+   Two domain names are equal if all corresponding labels match
+   case-insensitively. *)
+
 Fixpoint list_eq_ci (xs ys : list string) : bool :=
   match xs, ys with
   | [], [] => true
@@ -998,12 +1370,15 @@ Fixpoint list_eq_ci (xs ys : list string) : bool :=
   | _, _ => false
   end.
 
+(* list_eq_ci is reflexive *)
 Lemma list_eq_ci_refl : forall xs, list_eq_ci xs xs = true.
 Proof.
   induction xs as [|x xs IH]; [reflexivity|].
   simpl. rewrite eq_label_ci_refl, IH. reflexivity.
 Qed.
 
+(* list_eq_ci distributes over list append.
+   If xs1 ≈ ys1 and xs2 ≈ ys2, then (xs1++xs2) ≈ (ys1++ys2). *)
 Lemma list_eq_ci_app : forall xs1 xs2 ys1 ys2,
   list_eq_ci xs1 ys1 = true ->
   list_eq_ci xs2 ys2 = true ->
@@ -1016,12 +1391,15 @@ Proof.
     simpl. rewrite Hx. apply IH; assumption.
 Qed.
 
+(* If two nibbles are equal, their label representations are case-insensitively equal.
+   (Trivial since they map to the same label.) *)
 Lemma nibble_label_of_ci : forall n m,
   n < two4 -> m < two4 -> n = m -> eq_label_ci (nibble_label_of n) (nibble_label_of m) = true.
 Proof.
   intros n m Hn Hm Heq. subst. apply eq_label_ci_refl.
 Qed.
 
+(* Equal nibble lists produce case-insensitively equal label lists *)
 Lemma labels_of_nibbles_ci : forall ns ms,
   ns = ms ->
   list_eq_ci (labels_of_nibbles ns) (labels_of_nibbles ms) = true.
@@ -1029,6 +1407,9 @@ Proof.
   intros ns ms Heq. subst. apply list_eq_ci_refl.
 Qed.
 
+(* === Helper Lemmas for Option List Processing === *)
+
+(* If sequence succeeds, the result has the same length as the input *)
 Lemma sequence_map_length : forall {A} (f : string -> option A) (ls : list string) (res : list A),
   sequence (map f ls) = Some res ->
   List.length res = List.length ls.
@@ -1041,6 +1422,7 @@ Proof.
     injection H as H. subst. simpl. f_equal. apply IH. reflexivity.
 Qed.
 
+(* Parsing labels as nibbles preserves length *)
 Lemma nibbles_of_labels_length : forall labs ns,
   nibbles_of_labels labs = Some ns ->
   List.length ns = List.length labs.
@@ -1049,6 +1431,10 @@ Proof.
   now apply sequence_map_length in H.
 Qed.
 
+(* === Bounds Preservation Through Nibble/Byte Conversion === *)
+
+(* If nibbles successfully convert to bytes, all bytes are valid (<256).
+   This follows from the to_byte call in bytes_from_nibbles_rev. *)
 Lemma bytes_from_nibbles_rev_some_forall : forall ns bytes,
   bytes_from_nibbles_rev ns = Some bytes ->
   Forall (fun b => b < two8) bytes.
@@ -1064,6 +1450,11 @@ Proof.
     + apply (IH ns2). exact E.
 Qed.
 
+(* If 16 valid bytes successfully deserialize to an IPv6 address,
+   the resulting address is well-formed (all components < 2^32).
+
+   This is because bytes_to_word32 applies to_word32, which enforces
+   the mod 2^32 bound. *)
 Lemma ipv6_from_bytes_some_bounds : forall bytes ip,
   ipv6_from_bytes bytes = Some ip ->
   Forall (fun b => b < two8) bytes ->
@@ -1080,6 +1471,10 @@ Proof.
 Qed.
 
 
+(* === Nibble Pair Reconstruction (Reverse Direction) === *)
+
+(* Two valid nibbles combine to a valid byte: 16*n2 + n1 < 256
+   Maximum: 16*15 + 15 = 255 < 256 *)
 Lemma nibble_pair_sum_lt : forall n1 n2,
   n1 < two4 -> n2 < two4 -> two4 * n2 + n1 < two8.
 Proof.
@@ -1092,6 +1487,10 @@ Proof.
   vm_compute. reflexivity.
 Qed.
 
+(* Extracting the low nibble from a reconstructed byte yields the original low nibble.
+   Formula: lo_nib(to_byte(16*n2 + n1)) = n1
+
+   Proof: Since 16*n2 + n1 < 256, to_byte is identity. Then modulo 16 isolates n1. *)
 Lemma lo_nib_of_pair : forall n1 n2,
   n1 < two4 -> n2 < two4 ->
   lo_nib (to_byte (two4 * n2 + n1)) = n1.
@@ -1105,6 +1504,10 @@ Proof.
   apply N.mod_small. exact Hn1.
 Qed.
 
+(* Extracting the high nibble from a reconstructed byte yields the original high nibble.
+   Formula: hi_nib(to_byte(16*n2 + n1)) = n2
+
+   Proof: Division by 16 isolates n2, then mod 16 is identity since n2 < 16. *)
 Lemma hi_nib_of_pair : forall n1 n2,
   n1 < two4 -> n2 < two4 ->
   hi_nib (to_byte (two4 * n2 + n1)) = n2.
@@ -1118,6 +1521,17 @@ Proof.
   rewrite (N.div_small n1 two4) by exact Hn1.
   simpl. apply N.mod_small. exact Hn2.
 Qed.
+
+(* === Nibbles ↔ Bytes Round-Trip (Reverse Direction) ===
+
+   If nibbles successfully convert to bytes, extracting nibbles from those
+   bytes (in reverse order) yields the original nibbles.
+
+   This is the other half of the nibble/byte bijection proof.
+
+   Proof strategy: Structural induction on nibbles (pairs at a time).
+   Use lo_nib_of_pair and hi_nib_of_pair to show each byte reconstructs
+   its two nibbles correctly. *)
 
 Lemma nibbles_bytes_roundtrip : forall ns bytes,
   bytes_from_nibbles_rev ns = Some bytes ->
@@ -1141,6 +1555,15 @@ Proof.
     rewrite (hi_nib_of_pair n1 n2 Hn1 Hn2).
     reflexivity.
 Qed.
+
+(* === Labels ↔ Nibbles Round-Trip (Reverse Direction, Case-Insensitive) ===
+
+   If labels successfully parse to nibbles, converting those nibbles back
+   to labels yields case-insensitively equal labels.
+
+   This completes the label ↔ nibble bijection (up to case).
+
+   Proof: Induction on labels, using nibble_label_roundtrip_ci at each step. *)
 
 Lemma labels_nibbles_roundtrip_ci : forall labs ns,
   nibbles_of_labels labs = Some ns ->
@@ -1166,6 +1589,14 @@ Proof.
     + unfold nibbles_of_labels. exact Eseq.
     + exact Hns'.
 Qed.
+
+(* === Equivalence Lemma: Reverse DNS Pipeline ===
+
+   The reverse DNS round-trip is equivalent to the direct byte serialization
+   round-trip. This bridges the two perspectives.
+
+   Proof: Mechanically unfold both sides and show they follow the same
+   pipeline through nibbles and bytes. *)
 
 Lemma reverse_bytes_pipeline_equiv :
   forall ip,
@@ -1196,6 +1627,9 @@ Proof.
   now rewrite rev_involutive.
 Qed.
 
+(* IPv6 address to bytes and back yields normalized address.
+   Derived from reverse_roundtrip_normalized via equivalence lemma. *)
+
 Theorem ipv6_bytes_roundtrip :
   forall ip, ipv6_from_bytes (ipv6_to_bytes ip) = Some (normalize128 ip).
 Proof.
@@ -1204,6 +1638,9 @@ Proof.
   rewrite (reverse_bytes_pipeline_equiv ip) in H.
   exact H.
 Qed.
+
+(* For well-formed addresses, byte serialization is a perfect bijection.
+   Practical guarantee: valid IPv6 addresses survive serialization. *)
 
 Theorem ipv6_bytes_roundtrip_wf :
   forall ip, wf_ipv6 ip -> ipv6_from_bytes (ipv6_to_bytes ip) = Some ip.
