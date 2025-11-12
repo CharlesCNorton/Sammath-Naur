@@ -11,13 +11,13 @@ Mathematical formalization of Internet RFCs in Coq. Complete type definitions, s
 
 ## Purpose
 
-RFCs specify protocols in natural language. Natural language admits multiple interpretations. Implementation divergence creates vulnerabilities. Mathematical specifications eliminate ambiguity. Protocol semantics become provable facts rather than negotiated agreements.
+RFCs specify protocols in natural language, which admits multiple interpretations. Implementation divergence from these interpretations creates most protocol vulnerabilities. Mathematical specifications eliminate this ambiguity, converting protocol semantics from negotiated agreements into provable facts.
 
 ## Effect
 
-Transfers semantic authority from standards bodies to mathematics. First comprehensive formalization becomes canonical reference through coordination economics. Mathematical specifications cannot be amended through institutional consensus.
+Comprehensive formalization transfers semantic authority from standards bodies to mathematics. The first complete formalization becomes canonical through coordination economics - verified implementations must share semantics. Mathematical specifications cannot be amended through institutional consensus.
 
-Verified specifications provide axioms for AI reasoning about network infrastructure. AI systems generate provably correct implementations, detect specification violations mathematically, and operate network infrastructure with deductive guarantees rather than probabilistic inference.
+Verified specifications provide deductive substrate for AI reasoning about network infrastructure. AI systems generate provably correct implementations, detect specification violations through mathematical proof, and manipulate network infrastructure with correctness guarantees. This transitions networks from human institutional control to mathematical substrate accessible to machine reasoning.
 
 ## Technical
 
