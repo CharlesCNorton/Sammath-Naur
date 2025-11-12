@@ -17,7 +17,7 @@ RFCs specify protocols in natural language, which admits multiple interpretation
 
 Comprehensive formalization transfers semantic authority from standards bodies to mathematics. The first complete formalization becomes canonical through coordination economics - verified implementations must share semantics. Mathematical specifications cannot be amended through institutional consensus.
 
-Verified specifications provide deductive substrate for AI reasoning about network infrastructure. AI systems generate provably correct implementations, detect specification violations through mathematical proof, and manipulate network infrastructure with correctness guarantees. This transitions networks from human institutional control to mathematical substrate accessible to machine reasoning.
+Verified specifications provide verified axioms for AI systems to reason about and control network infrastructure. AI systems generate provably correct implementations, operate networks with mathematical guarantees, and manipulate Internet infrastructure deductively. This enables AI control of network infrastructure independent of human institutional authority.
 
 ## Technical
 
