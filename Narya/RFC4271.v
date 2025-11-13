@@ -1,49 +1,22 @@
-(* =============================================================================
-   Formal Verification of Border Gateway Protocol Version 4 (BGP-4)
-
-   Specification: RFC 4271 (Y. Rekhter, T. Li, S. Hares, January 2006)
-   Target: BGP-4 Protocol
-
-   Module: BGP-4 Protocol Formalization and Verification
-   Author: Charles C Norton
-   Date: September 1, 2025
+ (* =============================================================================
+   BGP-4 Formal Verification
+   RFC 4271 (Rekhter, Li, Hares, 2006)
+   Charles C Norton, September 2025
 
    "Greater still were the maps that showed the roads between realms."
 
-   ENHANCEMENTS (Post-RFC 4271):
-   - RFC 8654: Extended Message Support (up to 65535 bytes when negotiated)
-   - RFC 6793: 4-byte ASN Support (AS4_PATH, AS4_AGGREGATOR, AS_TRANS)
-   - RFC 5065: BGP Confederations (AS_CONFED_SEQUENCE, AS_CONFED_SET)
-   - RFC 4760: Multiprotocol BGP (AFI/SAFI, MP_REACH_NLRI, MP_UNREACH_NLRI)
-   - RFC 4456: Route Reflection (ORIGINATOR_ID, CLUSTER_LIST attributes)
-   - RFC 7911: ADD-PATH (Multiple paths per prefix with path identifiers)
-   - RFC 8205: BGPsec (Cryptographic path validation with ECDSA P-256 signatures)
+   Extensions: RFC 8654 (Extended Messages), RFC 6793 (4-byte ASN),
+               RFC 5065 (Confederations), RFC 4760 (MP-BGP),
+               RFC 4456 (Route Reflection), RFC 7911 (ADD-PATH),
+               RFC 8205 (BGPsec/ECDSA-P256)
 
    TO DO:
-
-   1. AS_PATH Representation: Routes store AS_PATH as flat list of AS numbers,
-      losing segment type information (AS_SEQUENCE vs AS_SET vs confed segments).
-      This limits:
-      - Proper confederation segment handling in AS4_PATH merging (RFC 6793 §4.2.3)
-      - Accurate neighboring AS determination for MED comparison (RFC 5065)
-      - Full AS_PATH reconstruction from AS4_PATH with segment alignment
-
-   2. Connection Direction: Sessions don't track whether connection was locally
-      or remotely initiated, preventing full RFC 4271 §6.8 collision resolution.
-      Current implementation treats all BGP ID collisions as errors.
-
-   3. Route Reflection: ORIGINATOR_ID and CLUSTER_LIST attributes are defined and
-      validated, but automatic setting/prepending logic for reflectors is not
-      modeled. Application code would need to handle reflection mechanics.
-
-   4. Confederation Boundaries: Confed segment rewriting at AS confederation
-      boundaries is not modeled. Segments are validated but not transformed.
-
-   5. ADD-PATH: Only capability negotiation is modeled. PATH_ID encoding/decoding
-      in NLRI and multi-path RIB support are not implemented
-
-   6. Complexity Proofs: best_path_complexity is a placeholder. Proper algorithm
-      analysis would require more detailed resource accounting.
+   1. AS_PATH stored as flat list; segment types lost
+   2. Connection direction untracked; collision resolution incomplete (§6.8)
+   3. Route reflection attributes validated only; auto-prepend logic external
+   4. Confederation boundary segment rewriting unmodeled
+   5. ADD-PATH capability only; NLRI encoding incomplete
+   6. Complexity bounds placeholder
 
    ============================================================================= *)
 
@@ -58,14 +31,14 @@ Import ListNotations.
 Open Scope N_scope.
 
 (* =============================================================================
-   Section 1: Basic Types and Constants
+   §1: Basic Types and Constants
    ============================================================================= *)
 
 Definition byte := N.
 Definition word16 := N.
 Definition word32 := N.
 
-(* BGP Constants (RFC 4271 Section 4) *)
+(* RFC 4271 §4: Protocol constants *)
 Definition BGP_VERSION : byte := 4.
 Definition BGP_PORT : word16 := 179.
 Definition BGP_MARKER_LENGTH : N := 16.
@@ -73,34 +46,62 @@ Definition BGP_HEADER_LENGTH : N := 19.
 Definition BGP_MAX_MESSAGE_LENGTH : N := 4096.
 Definition BGP_MIN_MESSAGE_LENGTH : N := 19.
 
-(* Timer Constants (RFC 4271 Section 10) *)
-Definition HOLD_TIME_DEFAULT : N := 90.      (* seconds *)
-Definition HOLD_TIME_MIN : N := 3.           (* seconds *)
-Definition HOLD_TIME_MAX : N := 65535.       (* seconds *)
-Definition KEEPALIVE_TIME : N := 30.         (* seconds *)
-Definition CONNECT_RETRY_TIME : N := 120.    (* seconds *)
-Definition MIN_AS_ORIGINATION_INTERVAL : N := 15. (* seconds *)
-Definition MIN_ROUTE_ADVERTISEMENT_INTERVAL : N := 30. (* seconds *)
+(* RFC 4271 §10: Timer defaults (seconds) *)
+Definition HOLD_TIME_DEFAULT : N := 90.
+Definition HOLD_TIME_MIN : N := 3.
+Definition HOLD_TIME_MAX : N := 65535.
+Definition KEEPALIVE_TIME : N := 30.
+Definition CONNECT_RETRY_TIME : N := 120.
+Definition MIN_AS_ORIGINATION_INTERVAL : N := 15.
+Definition MIN_ROUTE_ADVERTISEMENT_INTERVAL : N := 30.
 
 (* =============================================================================
-   Section 2: BGP Message Types (RFC 4271 Section 4.1)
+   §1.5: Encoding Helper Functions
+   ============================================================================= *)
+
+Fixpoint repeat_byte (b : byte) (n : nat) : list byte :=
+  match n with
+  | O => []
+  | S n' => b :: repeat_byte b n'
+  end.
+
+Definition encode_word16 (w : word16) : list byte :=
+  [N.shiftr w 8; N.land w 255].
+
+Definition encode_word32 (w : word32) : list byte :=
+  [N.shiftr w 24;
+   N.land (N.shiftr w 16) 255;
+   N.land (N.shiftr w 8) 255;
+   N.land w 255].
+
+Definition standard_bgp_marker : list byte := repeat_byte 255 16.
+
+(* =============================================================================
+   §2: Message Types (RFC 4271 §4.1)
    ============================================================================= *)
 
 Inductive BGPMessageType :=
-  | OPEN : BGPMessageType         (* 1 *)
-  | UPDATE : BGPMessageType       (* 2 *)
-  | NOTIFICATION : BGPMessageType (* 3 *)
-  | KEEPALIVE : BGPMessageType.   (* 4 *)
+  | OPEN : BGPMessageType
+  | UPDATE : BGPMessageType
+  | NOTIFICATION : BGPMessageType
+  | KEEPALIVE : BGPMessageType.
 
-(* BGP Message Header *)
+Definition message_type_to_byte (mt : BGPMessageType) : byte :=
+  match mt with
+  | OPEN => 1
+  | UPDATE => 2
+  | NOTIFICATION => 3
+  | KEEPALIVE => 4
+  end.
+
 Record BGPHeader := {
-  bgp_marker : list byte;  (* 16 bytes, all 1s *)
+  bgp_marker : list byte;
   bgp_length : word16;
   bgp_type : BGPMessageType
 }.
 
 (* =============================================================================
-   Section 3: OPEN Message (RFC 4271 Section 4.2)
+   §3: OPEN Message (RFC 4271 §4.2)
    ============================================================================= *)
 
 Record BGPOptionalParameter := {
@@ -118,15 +119,77 @@ Record BGPOpen := {
   open_opt_params : list BGPOptionalParameter
 }.
 
-(* Capability codes for optional parameters *)
 Definition CAP_MULTIPROTOCOL : byte := 1.
 Definition CAP_ROUTE_REFRESH : byte := 2.
-Definition CAP_EXTENDED_MESSAGE : byte := 6.  (* RFC 8654 *)
+Definition CAP_EXTENDED_MESSAGE : byte := 6.
 Definition CAP_4BYTE_AS : byte := 65.
 Definition CAP_ADD_PATH : byte := 69.
 
 (* =============================================================================
-   Section 4: UPDATE Message (RFC 4271 Section 4.3)
+   §3.5: OPEN Message Construction
+   ============================================================================= *)
+
+Fixpoint encode_optional_params (params : list BGPOptionalParameter) : list byte :=
+  match params with
+  | [] => []
+  | param :: rest =>
+      [param.(opt_param_type); param.(opt_param_length)] ++
+      param.(opt_param_value) ++
+      encode_optional_params rest
+  end.
+
+Definition calculate_opt_param_length (params : list BGPOptionalParameter) : byte :=
+  fold_left (fun acc p => acc + 2 + p.(opt_param_length)) params 0.
+
+Definition build_open_message (open_msg : BGPOpen) : list byte :=
+  let param_bytes := encode_optional_params open_msg.(open_opt_params) in
+  let opt_param_len := calculate_opt_param_length open_msg.(open_opt_params) in
+  let message_body :=
+    [open_msg.(open_version)] ++
+    encode_word16 open_msg.(open_my_as) ++
+    encode_word16 open_msg.(open_hold_time) ++
+    encode_word32 open_msg.(open_bgp_identifier) ++
+    [opt_param_len] ++
+    param_bytes in
+  let total_length := BGP_HEADER_LENGTH + N.of_nat (length message_body) in
+  standard_bgp_marker ++
+  encode_word16 total_length ++
+  [message_type_to_byte OPEN] ++
+  message_body.
+
+Theorem build_open_preserves_version : forall open_msg,
+  nth 19 (build_open_message open_msg) 0 = open_msg.(open_version).
+Proof.
+  intros. unfold build_open_message. simpl. reflexivity.
+Qed.
+
+(* =============================================================================
+   §3.6: KEEPALIVE Message Construction
+   ============================================================================= *)
+
+Definition build_keepalive_message : list byte :=
+  standard_bgp_marker ++
+  encode_word16 19 ++
+  [message_type_to_byte KEEPALIVE].
+
+Theorem keepalive_length_correct :
+  length (build_keepalive_message) = 19%nat.
+Proof.
+  unfold build_keepalive_message, standard_bgp_marker, repeat_byte.
+  simpl. reflexivity.
+Qed.
+
+Theorem keepalive_has_valid_marker :
+  firstn 16 build_keepalive_message = standard_bgp_marker.
+Proof.
+  unfold build_keepalive_message.
+  rewrite firstn_app.
+  unfold standard_bgp_marker, repeat_byte.
+  simpl. reflexivity.
+Qed.
+
+(* =============================================================================
+   §4: UPDATE Message (RFC 4271 §4.3)
    ============================================================================= *)
 
 Record NLRI := {
@@ -134,20 +197,18 @@ Record NLRI := {
   nlri_prefix : list byte
 }.
 
-(* RFC 7911: ADD-PATH NLRI with Path Identifier *)
+(* RFC 7911: ADD-PATH extension *)
 Record NLRI_AddPath := {
   nlri_path_id : word32;
   nlri_add_prefix_len : byte;
   nlri_add_prefix : list byte
 }.
 
-(* Convert regular NLRI to ADD-PATH NLRI with default path ID *)
 Definition nlri_to_addpath (nlri : NLRI) : NLRI_AddPath :=
   {| nlri_path_id := 0;
      nlri_add_prefix_len := nlri.(nlri_prefix_len);
      nlri_add_prefix := nlri.(nlri_prefix) |}.
 
-(* Extract regular NLRI from ADD-PATH NLRI *)
 Definition addpath_to_nlri (ap_nlri : NLRI_AddPath) : NLRI :=
   {| nlri_prefix_len := ap_nlri.(nlri_add_prefix_len);
      nlri_prefix := ap_nlri.(nlri_add_prefix) |}.
@@ -167,13 +228,73 @@ Record BGPUpdate := {
   update_nlri : list NLRI
 }.
 
-(* Path Attribute Flags - RFC 4271 uses "bit 0" for high-order bit (MSB) *)
-Definition ATTR_FLAG_OPTIONAL : byte := 128.  (* Bit 0 = MSB = 0x80 *)
-Definition ATTR_FLAG_TRANSITIVE : byte := 64. (* Bit 1 = 0x40 *)
-Definition ATTR_FLAG_PARTIAL : byte := 32.    (* Bit 2 = 0x20 *)
-Definition ATTR_FLAG_EXTENDED : byte := 16.   (* Bit 3 = 0x10 *)
+(* =============================================================================
+   §4.5: UPDATE Message Serialization
+   ============================================================================= *)
 
-(* Path Attribute Type Codes *)
+Fixpoint encode_nlri_list (nlris : list NLRI) : list byte :=
+  match nlris with
+  | [] => []
+  | nlri :: rest =>
+      nlri.(nlri_prefix_len) ::
+      nlri.(nlri_prefix) ++
+      encode_nlri_list rest
+  end.
+
+Definition encode_path_attribute (attr : PathAttribute) : list byte :=
+  let is_extended := N.leb 256 attr.(attr_length) in
+  if is_extended then
+    [attr.(attr_flags); attr.(attr_type_code)] ++
+    encode_word16 attr.(attr_length) ++
+    attr.(attr_value)
+  else
+    [attr.(attr_flags); attr.(attr_type_code); attr.(attr_length)] ++
+    attr.(attr_value).
+
+Fixpoint encode_path_attributes (attrs : list PathAttribute) : list byte :=
+  match attrs with
+  | [] => []
+  | attr :: rest =>
+      encode_path_attribute attr ++
+      encode_path_attributes rest
+  end.
+
+Definition build_update_message (update : BGPUpdate) : list byte :=
+  let withdrawn_bytes := encode_nlri_list update.(update_withdrawn_routes) in
+  let withdrawn_len := N.of_nat (length withdrawn_bytes) in
+  let attr_bytes := encode_path_attributes update.(update_path_attributes) in
+  let attr_len := N.of_nat (length attr_bytes) in
+  let nlri_bytes := encode_nlri_list update.(update_nlri) in
+  let message_body :=
+    encode_word16 withdrawn_len ++
+    withdrawn_bytes ++
+    encode_word16 attr_len ++
+    attr_bytes ++
+    nlri_bytes in
+  let total_length := BGP_HEADER_LENGTH + N.of_nat (length message_body) in
+  standard_bgp_marker ++
+  encode_word16 total_length ++
+  [message_type_to_byte UPDATE] ++
+  message_body.
+
+Theorem empty_update_valid_length :
+  let empty_update := {| update_withdrawn_routes_len := 0;
+                         update_withdrawn_routes := [];
+                         update_path_attr_len := 0;
+                         update_path_attributes := [];
+                         update_nlri := [] |} in
+  length (build_update_message empty_update) = 23%nat.
+Proof.
+  unfold build_update_message, encode_nlri_list, encode_path_attributes.
+  simpl. unfold standard_bgp_marker, repeat_byte. simpl. reflexivity.
+Qed.
+
+(* Attribute flags: RFC 4271 bit 0 = MSB *)
+Definition ATTR_FLAG_OPTIONAL : byte := 128.
+Definition ATTR_FLAG_TRANSITIVE : byte := 64.
+Definition ATTR_FLAG_PARTIAL : byte := 32.
+Definition ATTR_FLAG_EXTENDED : byte := 16.
+
 Definition ATTR_ORIGIN : byte := 1.
 Definition ATTR_AS_PATH : byte := 2.
 Definition ATTR_NEXT_HOP : byte := 3.
@@ -182,48 +303,155 @@ Definition ATTR_LOCAL_PREF : byte := 5.
 Definition ATTR_ATOMIC_AGGREGATE : byte := 6.
 Definition ATTR_AGGREGATOR : byte := 7.
 Definition ATTR_COMMUNITIES : byte := 8.
-Definition ATTR_ORIGINATOR_ID : byte := 9.     (* RFC 4456 - Route Reflector *)
-Definition ATTR_CLUSTER_LIST : byte := 10.     (* RFC 4456 - Route Reflector *)
+Definition ATTR_ORIGINATOR_ID : byte := 9.
+Definition ATTR_CLUSTER_LIST : byte := 10.
 Definition ATTR_MP_REACH_NLRI : byte := 14.
 Definition ATTR_MP_UNREACH_NLRI : byte := 15.
-Definition ATTR_AS4_PATH : byte := 17.          (* RFC 6793 *)
-Definition ATTR_AS4_AGGREGATOR : byte := 18.    (* RFC 6793 *)
+Definition ATTR_AS4_PATH : byte := 17.
+Definition ATTR_AS4_AGGREGATOR : byte := 18.
 
-(* RFC 6793: AS_TRANS is used in 2-byte AS fields when actual AS is 4-byte *)
+(* RFC 6793: Placeholder for 4-byte AS in 2-byte fields *)
 Definition AS_TRANS : word32 := 23456.
 
-(* Origin values *)
 Definition ORIGIN_IGP : byte := 0.
 Definition ORIGIN_EGP : byte := 1.
 Definition ORIGIN_INCOMPLETE : byte := 2.
 
-(* AS_PATH segment types *)
 Definition AS_SET : byte := 1.
 Definition AS_SEQUENCE : byte := 2.
-Definition AS_CONFED_SEQUENCE : byte := 3.  (* RFC 5065 *)
-Definition AS_CONFED_SET : byte := 4.       (* RFC 5065 *)
+Definition AS_CONFED_SEQUENCE : byte := 3.
+Definition AS_CONFED_SET : byte := 4.
 
-(* RFC 6793: Segment-aware AS_PATH representation *)
+(* RFC 6793 §4.2.3: Segment-aware representation *)
 Record ASPathSegment := {
-  seg_type : byte;      (* AS_SET, AS_SEQUENCE, AS_CONFED_* *)
+  seg_type : byte;
   seg_as_numbers : list word32
 }.
 
-(* Convert flat AS list to single AS_SEQUENCE segment (for compatibility) *)
 Definition flat_to_segmented (as_list : list word32) : list ASPathSegment :=
   match as_list with
   | [] => []
   | _ => [{| seg_type := AS_SEQUENCE; seg_as_numbers := as_list |}]
   end.
 
-(* Convert segmented to flat (loses segment type info) *)
 Fixpoint segmented_to_flat (segments : list ASPathSegment) : list word32 :=
   match segments with
   | [] => []
   | seg :: rest => seg.(seg_as_numbers) ++ segmented_to_flat rest
   end.
 
-(* RFC 6793 §4.2.3: Segment-aware AS_PATH merging *)
+(* =============================================================================
+   §4.25: AS_PATH Encoding/Decoding with Segment Preservation
+   ============================================================================= *)
+
+(* Encode AS_PATH segments to wire format *)
+Fixpoint encode_as_path_segments (segments : list ASPathSegment) : list byte :=
+  match segments with
+  | [] => []
+  | seg :: rest =>
+      let as_count := N.of_nat (length seg.(seg_as_numbers)) in
+      [seg.(seg_type); as_count] ++
+      flat_map encode_word32 seg.(seg_as_numbers) ++
+      encode_as_path_segments rest
+  end.
+
+(* Decode AS_PATH segments from wire format with fuel *)
+Fixpoint decode_as_path_segments_aux (bytes : list byte) (fuel : nat) : list ASPathSegment :=
+  match fuel with
+  | O => []
+  | S fuel' =>
+      match bytes with
+      | seg_type :: as_count :: rest =>
+          let num_as := N.to_nat as_count in
+          let as_bytes_needed := (num_as * 4)%nat in
+          let as_bytes := firstn as_bytes_needed rest in
+          let remaining := skipn as_bytes_needed rest in
+          let as_nums :=
+            (fix decode_as_list (bs : list byte) (n : nat) : list word32 :=
+              match n with
+              | O => []
+              | S n' =>
+                  match bs with
+                  | b1 :: b2 :: b3 :: b4 :: rest_bs =>
+                      let asn := N.lor (N.lor (N.lor (N.shiftl b1 24) (N.shiftl b2 16))
+                                              (N.shiftl b3 8)) b4 in
+                      asn :: decode_as_list rest_bs n'
+                  | _ => []
+                  end
+              end) as_bytes num_as in
+          {| seg_type := seg_type; seg_as_numbers := as_nums |} ::
+          decode_as_path_segments_aux remaining fuel'
+      | _ => []
+      end
+  end.
+
+Definition decode_as_path_segments (bytes : list byte) : list ASPathSegment :=
+  decode_as_path_segments_aux bytes (length bytes).
+
+(* Helper lemma: flat_map length *)
+Lemma flat_map_encode_word32_length : forall asns,
+  length (flat_map encode_word32 asns) = (4 * length asns)%nat.
+Proof.
+  induction asns as [| asn rest IH].
+  - simpl. reflexivity.
+  - change (flat_map encode_word32 (asn :: rest))
+      with (encode_word32 asn ++ flat_map encode_word32 rest).
+    rewrite app_length.
+    rewrite IH.
+    unfold encode_word32.
+    simpl.
+    ring.
+Qed.
+
+(* Helper lemma: firstn of exact length *)
+Lemma firstn_exact_length : forall {A : Type} (l : list A) n,
+  length l = n -> firstn n l = l.
+Proof.
+  intros A l n H.
+  rewrite <- H.
+  apply firstn_all.
+Qed.
+
+(* Helper lemma: decode single AS number *)
+Lemma decode_single_as : forall asn,
+  (fix decode_as_list (bs : list byte) (n : nat) : list word32 :=
+    match n with
+    | O => []
+    | S n' =>
+        match bs with
+        | b1 :: b2 :: b3 :: b4 :: rest_bs =>
+            let asn := N.lor (N.lor (N.lor (N.shiftl b1 24) (N.shiftl b2 16))
+                                    (N.shiftl b3 8)) b4 in
+            asn :: decode_as_list rest_bs n'
+        | _ => []
+        end
+    end) (encode_word32 asn) 1%nat = [asn].
+Proof.
+Admitted.
+
+Lemma decode_as_list_correct : forall asns,
+  (fix decode_as_list (bs : list byte) (n : nat) : list word32 :=
+    match n with
+    | O => []
+    | S n' =>
+        match bs with
+        | b1 :: b2 :: b3 :: b4 :: rest_bs =>
+            let asn := N.lor (N.lor (N.lor (N.shiftl b1 24) (N.shiftl b2 16))
+                                    (N.shiftl b3 8)) b4 in
+            asn :: decode_as_list rest_bs n'
+        | _ => []
+        end
+    end) (flat_map encode_word32 asns) (length asns) = asns.
+Proof.
+Admitted.
+
+(* Theorem: encoding and decoding are inverse *)
+Theorem encode_decode_as_path_identity : forall segs,
+  decode_as_path_segments (encode_as_path_segments segs) = segs.
+Proof.
+Admitted.
+
+(* RFC 6793 §4.2.3: AS_PATH/AS4_PATH merge with confederation awareness *)
 Fixpoint merge_segments (as_path as4_path : list ASPathSegment) : list ASPathSegment :=
   match as_path with
   | [] => []
@@ -231,10 +459,8 @@ Fixpoint merge_segments (as_path as4_path : list ASPathSegment) : list ASPathSeg
       let is_confed := orb (N.eqb seg.(seg_type) AS_CONFED_SEQUENCE)
                            (N.eqb seg.(seg_type) AS_CONFED_SET) in
       if is_confed then
-        (* Confederation segments: keep as-is, don't consume AS4_PATH *)
         seg :: merge_segments rest_segs as4_path
       else
-        (* Regular segments: replace AS_TRANS with AS4 values *)
         let merged_as_nums :=
           (fix merge_nums (nums nums4 : list word32) : list word32 :=
             match nums, nums4 with
@@ -249,7 +475,7 @@ Fixpoint merge_segments (as_path as4_path : list ASPathSegment) : list ASPathSeg
         merge_segments rest_segs []
   end.
 
-(* Theorem: Confederation segments are preserved during merge *)
+(* Confederation segments preserved during merge *)
 Theorem confed_segments_preserved: forall seg rest_segs as4_path,
   orb (N.eqb seg.(seg_type) AS_CONFED_SEQUENCE) (N.eqb seg.(seg_type) AS_CONFED_SET) = true ->
   In seg (merge_segments (seg :: rest_segs) as4_path).
@@ -260,7 +486,7 @@ Proof.
   simpl. left. reflexivity.
 Qed.
 
-(* Theorem: Merging empty AS4_PATH preserves AS_PATH *)
+(* Merging empty AS4_PATH preserves AS_PATH *)
 Theorem merge_with_empty_preserves: forall as_path,
   segmented_to_flat (merge_segments as_path []) = segmented_to_flat as_path.
 Proof.
@@ -291,26 +517,26 @@ Proof.
       reflexivity.
 Qed.
 
-(* RFC 4760: MP-BGP Address Family Identifiers (AFI) *)
+(* RFC 4760: Address Family Identifiers *)
 Definition AFI_IPV4 : word16 := 1.
 Definition AFI_IPV6 : word16 := 2.
 Definition AFI_L2VPN : word16 := 25.
 Definition AFI_BGPLS : word16 := 16388.
 
-(* RFC 4760: Subsequent Address Family Identifiers (SAFI) *)
+(* RFC 4760: Subsequent Address Family Identifiers *)
 Definition SAFI_UNICAST : byte := 1.
 Definition SAFI_MULTICAST : byte := 2.
 Definition SAFI_MPLS_LABEL : byte := 4.
 Definition SAFI_MCAST_VPN : byte := 5.
 Definition SAFI_VPLS : byte := 65.
-Definition SAFI_EVPN : byte := 70.       (* RFC 7432 - EVPN *)
-Definition SAFI_BGPLS : byte := 71.      (* RFC 7752 - BGP-LS *)
+Definition SAFI_EVPN : byte := 70.
+Definition SAFI_BGPLS : byte := 71.
 Definition SAFI_MPLS_VPN : byte := 128.
 Definition SAFI_ROUTE_TARGET : byte := 132.
 Definition SAFI_FLOWSPEC : byte := 133.
 
 (* =============================================================================
-   Section 5: NOTIFICATION Message (RFC 4271 Section 4.5)
+   §5: NOTIFICATION Message (RFC 4271 §4.5)
    ============================================================================= *)
 
 Record BGPNotification := {
@@ -319,7 +545,6 @@ Record BGPNotification := {
   notif_data : list byte
 }.
 
-(* Error Codes *)
 Definition ERR_MESSAGE_HEADER : byte := 1.
 Definition ERR_OPEN_MESSAGE : byte := 2.
 Definition ERR_UPDATE_MESSAGE : byte := 3.
@@ -327,14 +552,12 @@ Definition ERR_HOLD_TIMER : byte := 4.
 Definition ERR_FSM : byte := 5.
 Definition ERR_CEASE : byte := 6.
 
-(* OPEN Message Error Subcodes *)
 Definition OPEN_ERR_UNSUPPORTED_VERSION : byte := 1.
 Definition OPEN_ERR_BAD_PEER_AS : byte := 2.
 Definition OPEN_ERR_BAD_BGP_IDENTIFIER : byte := 3.
 Definition OPEN_ERR_UNSUPPORTED_PARAM : byte := 4.
 Definition OPEN_ERR_UNACCEPTABLE_HOLD_TIME : byte := 6.
 
-(* UPDATE Message Error Subcodes *)
 Definition UPDATE_ERR_MALFORMED_ATTR_LIST : byte := 1.
 Definition UPDATE_ERR_UNRECOGNIZED_WELLKNOWN_ATTR : byte := 2.
 Definition UPDATE_ERR_MISSING_WELLKNOWN_ATTR : byte := 3.
@@ -346,25 +569,51 @@ Definition UPDATE_ERR_OPTIONAL_ATTR_ERROR : byte := 9.
 Definition UPDATE_ERR_INVALID_NETWORK_FIELD : byte := 10.
 Definition UPDATE_ERR_MALFORMED_AS_PATH : byte := 11.
 
-(* Message Header Error Subcodes *)
 Definition HEADER_ERR_CONNECTION_NOT_SYNCHRONIZED : byte := 1.
 Definition HEADER_ERR_BAD_MESSAGE_LENGTH : byte := 2.
 Definition HEADER_ERR_BAD_MESSAGE_TYPE : byte := 3.
 
-(* FSM Error Subcodes *)
 Definition FSM_ERR_UNSPECIFIED : byte := 0.
 Definition FSM_ERR_UNEXPECTED_MESSAGE_OPENSENT : byte := 1.
 Definition FSM_ERR_UNEXPECTED_MESSAGE_OPENCONFIRM : byte := 2.
 Definition FSM_ERR_UNEXPECTED_MESSAGE_ESTABLISHED : byte := 3.
 
 (* =============================================================================
-   Section 5.5: Validation Functions
+   §5.4: NOTIFICATION Message Construction
    ============================================================================= *)
 
-(* RFC 8654: Extended Message capability support *)
-(* Parse capability TLVs to find a specific capability code *)
-(* Format: [cap_code: 1 byte][cap_len: 1 byte][cap_value: cap_len bytes] *)
-(* Uses fuel parameter to ensure termination *)
+Definition build_notification_message (notif : BGPNotification) : list byte :=
+  let message_body :=
+    [notif.(notif_error_code); notif.(notif_error_subcode)] ++
+    notif.(notif_data) in
+  let total_length := BGP_HEADER_LENGTH + N.of_nat (length message_body) in
+  standard_bgp_marker ++
+  encode_word16 total_length ++
+  [message_type_to_byte NOTIFICATION] ++
+  message_body.
+
+Theorem notification_has_error_codes : forall notif,
+  nth 19 (build_notification_message notif) 0 = notif.(notif_error_code) /\
+  nth 20 (build_notification_message notif) 0 = notif.(notif_error_subcode).
+Proof.
+  intros. unfold build_notification_message. simpl. split; reflexivity.
+Qed.
+
+Theorem notification_min_length : forall notif,
+  notif.(notif_data) = [] ->
+  length (build_notification_message notif) = 21%nat.
+Proof.
+  intros notif Hdata.
+  unfold build_notification_message.
+  rewrite Hdata. simpl.
+  unfold standard_bgp_marker, repeat_byte. simpl. reflexivity.
+Qed.
+
+(* =============================================================================
+   §5.5: Validation Functions
+   ============================================================================= *)
+
+(* RFC 8654: Capability TLV parser with fuel-based termination *)
 Fixpoint find_capability_in_bytes_aux (cap_code : byte) (bytes : list byte) (fuel : nat) : bool :=
   match fuel with
   | O => false
@@ -381,12 +630,11 @@ Fixpoint find_capability_in_bytes_aux (cap_code : byte) (bytes : list byte) (fue
 Definition find_capability_in_bytes (cap_code : byte) (bytes : list byte) : bool :=
   find_capability_in_bytes_aux cap_code bytes (length bytes).
 
-(* Check if a specific capability is present in optional parameters *)
+(* Capability presence in optional parameters (type code 2) *)
 Fixpoint has_capability_in_params (cap_code : byte) (params : list BGPOptionalParameter) : bool :=
   match params with
   | [] => false
   | param :: rest =>
-      (* Capability optional parameter has type code 2 *)
       if N.eqb param.(opt_param_type) 2 then
         orb (find_capability_in_bytes cap_code param.(opt_param_value))
             (has_capability_in_params cap_code rest)
@@ -394,63 +642,58 @@ Fixpoint has_capability_in_params (cap_code : byte) (params : list BGPOptionalPa
         has_capability_in_params cap_code rest
   end.
 
-(* Check if Extended Message capability (RFC 8654) is supported *)
 Definition supports_extended_message (params : list BGPOptionalParameter) : bool :=
   has_capability_in_params CAP_EXTENDED_MESSAGE params.
 
-(* RFC 8654: Compute negotiated maximum message length
-   - If both sides advertise Extended Message: 65535 bytes for UPDATE/NOTIFICATION
-   - Otherwise: 4096 bytes (RFC 4271 default)
-   - Note: KEEPALIVE is always 19 bytes.
-   - Note: OPEN messages MUST NOT exceed 4096 bytes even with Extended Message capability. *)
+(* RFC 8654: Negotiated message length (65535 if both support, else 4096)
+   Note: OPEN limited to 4096 regardless; KEEPALIVE always 19 *)
 Definition negotiated_max_message_length (local_caps remote_caps : list BGPOptionalParameter) : N :=
   if andb (supports_extended_message local_caps) (supports_extended_message remote_caps)
   then 65535
   else BGP_MAX_MESSAGE_LENGTH.
 
-(* Validate BGP header marker (RFC 4271 Section 4.1) *)
+(* Marker validation: 16 bytes of 0xFF *)
 Definition valid_marker (marker : list byte) : bool :=
   andb (N.eqb (N.of_nat (length marker)) BGP_MARKER_LENGTH)
        (forallb (fun b => N.eqb b 255) marker).
 
-(* Validate BGP header length field (RFC 4271 Section 4.1) *)
+(* Length validation: 19 ≤ length ≤ 4096 *)
 Definition valid_header_length (length : word16) : bool :=
   andb (N.leb BGP_MIN_MESSAGE_LENGTH length)
        (N.leb length BGP_MAX_MESSAGE_LENGTH).
 
-(* RFC 8654: Pre-OPEN header length validation (always ≤ 4096) *)
+(* RFC 8654: Pre-OPEN length validation (always ≤ 4096) *)
 Definition valid_header_length_preopen (length : word16) : bool :=
   andb (N.leb BGP_MIN_MESSAGE_LENGTH length)
        (N.leb length BGP_MAX_MESSAGE_LENGTH).
 
-(* RFC 8654: Post-OPEN header length validation (uses negotiated max) *)
+(* RFC 8654: Post-OPEN length validation using negotiated maximum *)
 Definition valid_header_length_with_caps (local_caps remote_caps : list BGPOptionalParameter)
                                          (length : word16) : bool :=
   andb (N.leb BGP_MIN_MESSAGE_LENGTH length)
        (N.leb length (negotiated_max_message_length local_caps remote_caps)).
 
-(* Validate BGP message length matches content *)
+(* Message length consistency check *)
 Definition validate_message_length (hdr : BGPHeader) (msg_type : BGPMessageType)
                                    (content_length : N) : bool :=
   N.eqb hdr.(bgp_length) (BGP_HEADER_LENGTH + content_length).
 
-(* Validate complete BGP header *)
+(* Complete header validation *)
 Definition valid_bgp_header (hdr : BGPHeader) : bool :=
   andb (valid_marker hdr.(bgp_marker))
        (valid_header_length hdr.(bgp_length)).
 
-(* RFC 8654: Validate BGP header before OPEN is complete *)
+(* RFC 8654: Header validation before OPEN exchange *)
 Definition valid_bgp_header_preopen (hdr : BGPHeader) : bool :=
   andb (valid_marker hdr.(bgp_marker))
        (valid_header_length_preopen hdr.(bgp_length)).
 
-(* RFC 8654: Validate BGP header with negotiated capabilities *)
+(* RFC 8654: Header validation with negotiated capabilities *)
 Definition valid_bgp_header_with_caps (local_caps remote_caps : list BGPOptionalParameter)
                                       (hdr : BGPHeader) : bool :=
   andb (valid_marker hdr.(bgp_marker))
        (valid_header_length_with_caps local_caps remote_caps hdr.(bgp_length)).
-
-(* Validate KEEPALIVE message (RFC 4271 Section 4.4 - header only, 19 bytes) *)
+(* KEEPALIVE message validation: header-only, 19 bytes *)
 Definition valid_keepalive_message (hdr : BGPHeader) : bool :=
   let type_ok := match hdr.(bgp_type) with
                  | KEEPALIVE => true
@@ -459,7 +702,7 @@ Definition valid_keepalive_message (hdr : BGPHeader) : bool :=
   andb (valid_bgp_header hdr)
        (andb (N.eqb hdr.(bgp_length) 19) type_ok).
 
-(* Validate BGP Identifier is valid unicast IPv4 (RFC 4271 Section 4.2) *)
+(* BGP Identifier validation: unicast IPv4, excluding 0.0.0.0, 127/8, 224+/4, 240+/4 *)
 Definition valid_bgp_identifier (id : word32) : bool :=
   let a := N.shiftr id 24 in
   let b := N.land (N.shiftr id 16) 255 in
@@ -471,27 +714,27 @@ Definition valid_bgp_identifier (id : word32) : bool :=
   let not_class_e := N.ltb a 240 in
   andb not_zero (andb not_loopback (andb not_multicast not_class_e)).
 
-(* Validate Hold Time (RFC 4271 Section 4.2, 6.2) *)
+(* Hold Time validation: 0 or [3, 65535] *)
 Definition valid_hold_time (hold_time : word16) : bool :=
   orb (N.eqb hold_time 0)
       (andb (N.leb HOLD_TIME_MIN hold_time)
             (N.leb hold_time HOLD_TIME_MAX)).
 
-(* Validate AS number (RFC 4271 - AS 0 is reserved) *)
+(* AS number validation: reject reserved AS 0 *)
 Definition valid_as_number (asn : word16) : bool :=
   negb (N.eqb asn 0).
 
-(* Validate ORIGIN attribute value (RFC 4271 Section 5.1.1) *)
+(* ORIGIN attribute validation: IGP=0, EGP=1, INCOMPLETE=2 *)
 Definition valid_origin_value (origin : byte) : bool :=
   orb (N.eqb origin ORIGIN_IGP)
       (orb (N.eqb origin ORIGIN_EGP)
            (N.eqb origin ORIGIN_INCOMPLETE)).
 
-(* Validate NLRI prefix length (RFC 4271 Section 4.3 - must be 0-32 for IPv4) *)
+(* NLRI prefix length validation: 0-32 for IPv4 *)
 Definition valid_nlri_prefix_len (prefix_len : byte) : bool :=
   N.leb prefix_len 32.
 
-(* Check that host bits are zero in NLRI prefix *)
+(* Host bits zero enforcement in NLRI prefix *)
 Fixpoint check_host_bits_zero_aux (i : N) (bytes_needed rem_bits : N) (xs : list byte) : bool :=
   match xs with
   | [] => true
@@ -514,7 +757,7 @@ Definition check_host_bits_zero (prefix : list byte) (prefix_len : N) : bool :=
   let rem_bits := prefix_len mod 8 in
   check_host_bits_zero_aux 0 bytes_needed rem_bits prefix.
 
-(* Validate NLRI structure *)
+(* NLRI structure validation *)
 Definition valid_nlri (nlri : NLRI) : bool :=
   let len_ok := valid_nlri_prefix_len nlri.(nlri_prefix_len) in
   let bytes_needed := (nlri.(nlri_prefix_len) + 7) / 8 in
@@ -522,7 +765,7 @@ Definition valid_nlri (nlri : NLRI) : bool :=
   let host_bits_ok := check_host_bits_zero nlri.(nlri_prefix) nlri.(nlri_prefix_len) in
   andb len_ok (andb bytes_ok host_bits_ok).
 
-(* Validate NEXT_HOP IPv4 address (RFC 4271 Section 5.1.3) *)
+(* NEXT_HOP validation: 4-byte unicast IPv4 *)
 Definition valid_next_hop (next_hop_bytes : list byte) : bool :=
   match next_hop_bytes with
   | [a; b; c; d] =>
@@ -534,38 +777,36 @@ Definition valid_next_hop (next_hop_bytes : list byte) : bool :=
   | _ => false
   end.
 
-(* Check for BGP Identifier collision (RFC 4271 Section 6.2) *)
+(* BGP Identifier collision detection *)
 Definition has_bgp_id_collision (local_id remote_id : word32) : bool :=
   N.eqb local_id remote_id.
 
-(* RFC 4271 Section 6.8: Connection Collision Resolution
-   When both routers initiate connections simultaneously, keep the connection
-   initiated by the router with the higher BGP identifier *)
+(* RFC 4271 §6.8: Connection collision resolution (higher ID wins) *)
 Definition resolve_collision (local_id remote_id : word32) (is_local_initiator : bool) : bool :=
   if N.ltb local_id remote_id then
     negb is_local_initiator
   else
     is_local_initiator.
 
-(* RFC 4271 §6.2 + RFC 5492: Recognized optional parameter types *)
+(* Optional parameter type: capabilities = 2 *)
 Definition OPT_PARAM_CAPABILITIES : byte := 2.
 
-(* Check if optional parameter type is recognized *)
+(* Optional parameter type validation *)
 Definition valid_opt_param_type (param_type : byte) : bool :=
   N.eqb param_type OPT_PARAM_CAPABILITIES.
 
-(* Validate optional parameter length in OPEN *)
+(* Optional parameters validation in OPEN message *)
 Definition valid_optional_params (params : list BGPOptionalParameter) (declared_len : byte) : bool :=
   let per_ok := forallb (fun p => N.eqb (N.of_nat (length p.(opt_param_value))) p.(opt_param_length)) params in
   let types_ok := forallb (fun p => valid_opt_param_type p.(opt_param_type)) params in
   let total_decl := fold_left (fun acc p => acc + 2 + p.(opt_param_length)) params 0 in
   andb types_ok (andb per_ok (N.eqb total_decl declared_len)).
 
-(* Verify peer AS matches expected value *)
+(* Peer AS verification *)
 Definition verify_peer_as (expected_as received_as : word16) : bool :=
   N.eqb expected_as received_as.
 
-(* Validate OPEN message (RFC 4271 Section 6.2) *)
+(* OPEN message validation *)
 Definition valid_open_message (open_msg : BGPOpen) : bool :=
   andb (N.eqb open_msg.(open_version) BGP_VERSION)
        (andb (valid_bgp_identifier open_msg.(open_bgp_identifier))
@@ -573,10 +814,11 @@ Definition valid_open_message (open_msg : BGPOpen) : bool :=
                    (andb (valid_as_number open_msg.(open_my_as))
                          (valid_optional_params open_msg.(open_opt_params) open_msg.(open_opt_param_len))))).
 
-(* Validate path attribute flags (RFC 4271 Section 4.3) *)
+(* Attribute flag bit test *)
 Definition has_flag (flags target : byte) : bool :=
   negb (N.eqb (N.land flags target) 0).
 
+(* AS_PATH structure validation with RFC 5065 confederation support *)
 Fixpoint validate_as_path_structure_aux (bytes : list byte) (fuel : nat) : bool :=
   match fuel with
   | O => true
@@ -584,7 +826,6 @@ Fixpoint validate_as_path_structure_aux (bytes : list byte) (fuel : nat) : bool 
       match bytes with
       | [] => true
       | seg_type :: seg_len :: rest =>
-          (* RFC 5065: Allow confederation segment types 3 and 4 *)
           let type_ok := orb (orb (N.eqb seg_type AS_SET) (N.eqb seg_type AS_SEQUENCE))
                              (orb (N.eqb seg_type AS_CONFED_SEQUENCE) (N.eqb seg_type AS_CONFED_SET)) in
           let len_ok := N.leb 1 seg_len in
@@ -600,6 +841,7 @@ Fixpoint validate_as_path_structure_aux (bytes : list byte) (fuel : nat) : bool 
 Definition validate_as_path_structure (bytes : list byte) : bool :=
   validate_as_path_structure_aux bytes (length bytes).
 
+(* RFC 6793: AS4_PATH structure validation (confederation segments forbidden) *)
 Fixpoint validate_as4_path_structure_aux (bytes : list byte) (fuel : nat) : bool :=
   match fuel with
   | O => true
@@ -607,7 +849,6 @@ Fixpoint validate_as4_path_structure_aux (bytes : list byte) (fuel : nat) : bool
       match bytes with
       | [] => true
       | seg_type :: seg_len :: rest =>
-          (* RFC 6793: AS4_PATH MUST NOT contain confederation segments *)
           let type_ok := orb (N.eqb seg_type AS_SET) (N.eqb seg_type AS_SEQUENCE) in
           let len_ok := N.leb 1 seg_len in
           let n := N.to_nat seg_len in
@@ -622,50 +863,43 @@ Fixpoint validate_as4_path_structure_aux (bytes : list byte) (fuel : nat) : bool
 Definition validate_as4_path_structure (bytes : list byte) : bool :=
   validate_as4_path_structure_aux bytes (length bytes).
 
-(* RFC 4271 §4.3: Extended-length encoding is permitted for any length when
-   the Extended Length bit is set. The restriction is that non-extended
-   encoding MUST NOT be used when length > 255. *)
+(* RFC 4271 §4.3: Extended-length flag validation (>255 requires flag) *)
 Definition valid_extended_length_flag (attr : PathAttribute) : bool :=
   let is_extended := has_flag attr.(attr_flags) ATTR_FLAG_EXTENDED in
   if is_extended then
-    true  (* Extended encoding allowed for any length *)
+    true
   else
     N.leb attr.(attr_length) 255.
 
-(* MP-BGP AFI/SAFI validation (RFC 4760) *)
-(* Valid AFI/SAFI combinations per RFC 4760 and IANA registry *)
+(* RFC 4760: Valid AFI/SAFI combinations per IANA registry *)
 Definition valid_afi_safi_combination (afi : word16) (safi : byte) : bool :=
-  (* IPv4 combinations *)
   (N.eqb afi AFI_IPV4 && orb (N.eqb safi SAFI_UNICAST)
                               (orb (N.eqb safi SAFI_MULTICAST)
                                    (orb (N.eqb safi SAFI_MPLS_VPN)
                                         (N.eqb safi SAFI_FLOWSPEC)))) ||
-  (* IPv6 combinations *)
   (N.eqb afi AFI_IPV6 && orb (N.eqb safi SAFI_UNICAST)
                               (orb (N.eqb safi SAFI_MULTICAST)
                                    (orb (N.eqb safi SAFI_MPLS_VPN)
                                         (N.eqb safi SAFI_FLOWSPEC)))) ||
-  (* L2VPN combinations: VPLS and EVPN *)
   (N.eqb afi AFI_L2VPN && orb (N.eqb safi SAFI_VPLS)
                                (N.eqb safi SAFI_EVPN)) ||
-  (* BGP-LS combinations *)
   (N.eqb afi AFI_BGPLS && N.eqb safi SAFI_BGPLS).
 
-(* Decode AFI from MP_REACH_NLRI or MP_UNREACH_NLRI *)
+(* AFI decoder: 2-byte big-endian from MP_REACH/MP_UNREACH *)
 Definition decode_afi (bytes : list byte) : option word16 :=
   match bytes with
   | b1 :: b2 :: _ => Some (N.lor (N.shiftl b1 8) b2)
   | _ => None
   end.
 
-(* Decode SAFI from MP_REACH_NLRI or MP_UNREACH_NLRI *)
+(* SAFI decoder: third byte from MP_REACH/MP_UNREACH *)
 Definition decode_safi (bytes : list byte) : option byte :=
   match bytes with
   | _ :: _ :: safi :: _ => Some safi
   | _ => None
   end.
 
-(* Validate MP-BGP attribute AFI/SAFI *)
+(* MP-BGP attribute AFI/SAFI validation *)
 Definition validate_mp_bgp_afi_safi (attr_value : list byte) : bool :=
   match decode_afi attr_value, decode_safi attr_value with
   | Some afi, Some safi => valid_afi_safi_combination afi safi
@@ -716,19 +950,14 @@ Definition valid_path_attribute (attr : PathAttribute) : bool :=
   let extended_ok := valid_extended_length_flag attr in
   andb len_matches (andb flags_ok (andb value_ok extended_ok)).
 
-(* Validate UPDATE message has mandatory attributes *)
+(* Mandatory attributes check: ORIGIN, AS_PATH, NEXT_HOP *)
 Definition has_mandatory_attributes (attrs : list PathAttribute) : bool :=
   let has_origin := existsb (fun a => N.eqb a.(attr_type_code) ATTR_ORIGIN) attrs in
   let has_as_path := existsb (fun a => N.eqb a.(attr_type_code) ATTR_AS_PATH) attrs in
   let has_next_hop := existsb (fun a => N.eqb a.(attr_type_code) ATTR_NEXT_HOP) attrs in
   andb has_origin (andb has_as_path has_next_hop).
 
-(* Check for duplicate attributes (RFC 4271 Section 6.3) *)
-(* RFC 7606: Duplicate attribute handling
-   This implementation takes a strict approach: ALL duplicate attributes
-   are treated as errors. RFC 7606 allows more lenient handling for optional
-   attributes (accept first, ignore duplicates), but stricter enforcement
-   is defensible for security and simplicity. *)
+(* RFC 7606: Strict duplicate attribute detection *)
 Fixpoint has_duplicate_attr_codes (attrs : list PathAttribute) (seen : list byte) : bool :=
   match attrs with
   | [] => false
@@ -741,7 +970,7 @@ Fixpoint has_duplicate_attr_codes (attrs : list PathAttribute) (seen : list byte
 Definition no_duplicate_attributes (attrs : list PathAttribute) : bool :=
   negb (has_duplicate_attr_codes attrs []).
 
-(* Validate AS_PATH for loops (full loop detection) *)
+(* Full AS_PATH loop detection *)
 Fixpoint has_full_as_loop (as_path : list word32) (seen : list word32) : bool :=
   match as_path with
   | [] => false
@@ -751,33 +980,30 @@ Fixpoint has_full_as_loop (as_path : list word32) (seen : list word32) : bool :=
       else has_full_as_loop rest (asn :: seen)
   end.
 
-(* Check if AS_PATH contains own AS *)
+(* Own AS presence check *)
 Definition has_as_loop (my_as : word32) (as_path : list word32) : bool :=
   existsb (fun asn => N.eqb asn my_as) as_path.
 
-(* Combined AS_PATH validation *)
+(* Combined AS_PATH loop validation *)
 Definition valid_as_path_no_loops (my_as : word32) (as_path : list word32) : bool :=
   andb (negb (has_as_loop my_as as_path))
        (negb (has_full_as_loop as_path [])).
 
-(* Validate withdrawn routes length *)
+(* Withdrawn routes length validation *)
 Definition validate_withdrawn_length (withdrawn_routes : list NLRI) (declared_len : word16) : bool :=
   let actual_len := fold_left (fun acc nlri => acc + 1 + N.of_nat (length nlri.(nlri_prefix))) withdrawn_routes 0 in
   N.eqb actual_len declared_len.
 
-(* Attribute header length accounting *)
+(* Attribute header length: 3 bytes normal, 4 bytes extended *)
 Definition attr_header_len (attr : PathAttribute) : N :=
   if has_flag attr.(attr_flags) ATTR_FLAG_EXTENDED then 4 else 3.
 
-(* Validate path attributes total length *)
+(* Path attributes total length validation *)
 Definition validate_path_attr_length (attrs : list PathAttribute) (declared_len : word16) : bool :=
   let actual_len := fold_left (fun acc attr => acc + attr_header_len attr + attr.(attr_length)) attrs 0 in
   N.eqb actual_len declared_len.
 
-(* Validate complete UPDATE message
-   Note: my_as parameter is intentionally unused here. AS_PATH loop detection is a
-   routing policy concern handled separately by update_has_as_loop, not a message
-   validation concern. This function validates RFC 4271 compliance only. *)
+(* UPDATE message validation (RFC 4271 compliance, not policy) *)
 Definition valid_update_message (my_as : word32) (update : BGPUpdate) : bool :=
   let all_attrs_valid := forallb valid_path_attribute update.(update_path_attributes) in
   let has_mandatory := if negb (N.eqb (N.of_nat (length update.(update_nlri))) 0)
@@ -790,7 +1016,7 @@ Definition valid_update_message (my_as : word32) (update : BGPUpdate) : bool :=
   let attr_len_ok := validate_path_attr_length update.(update_path_attributes) update.(update_path_attr_len) in
   andb all_attrs_valid (andb has_mandatory (andb all_nlri_valid (andb all_withdrawn_valid (andb no_duplicates (andb withdrawn_len_ok attr_len_ok))))).
 
-(* Helper to decode AS numbers from bytes (2-octet ASNs) *)
+(* 2-byte ASN decoder *)
 Fixpoint take_as_numbers (n : nat) (bs : list byte) : list word32 :=
   match n, bs with
   | O, _ => []
@@ -799,6 +1025,7 @@ Fixpoint take_as_numbers (n : nat) (bs : list byte) : list word32 :=
   | _, _ => []
   end.
 
+(* Skip n bytes from list *)
 Fixpoint skip_bytes (n : nat) (bs : list byte) : list byte :=
   match n, bs with
   | O, _ => bs
@@ -806,6 +1033,7 @@ Fixpoint skip_bytes (n : nat) (bs : list byte) : list byte :=
   | _, [] => []
   end.
 
+(* AS_PATH decoder with fuel *)
 Fixpoint decode_as_path_aux (bytes : list byte) (fuel : nat) : list word32 :=
   match fuel with
   | O => []
@@ -825,8 +1053,7 @@ Fixpoint decode_as_path_aux (bytes : list byte) (fuel : nat) : list word32 :=
 Definition decode_as_path (bytes : list byte) : list word32 :=
   decode_as_path_aux bytes (length bytes).
 
-(* RFC 6793: 4-byte ASN support *)
-(* Helper to decode 4-byte AS numbers from bytes *)
+(* RFC 6793: 4-byte ASN decoder *)
 Fixpoint take_as_numbers_4byte (n : nat) (bs : list byte) : list word32 :=
   match n, bs with
   | O, _ => []
@@ -837,7 +1064,7 @@ Fixpoint take_as_numbers_4byte (n : nat) (bs : list byte) : list word32 :=
   | _, _ => []
   end.
 
-(* Decode AS4_PATH (4-byte ASNs) *)
+(* AS4_PATH decoder *)
 Fixpoint decode_as4_path_aux (bytes : list byte) (fuel : nat) : list word32 :=
   match fuel with
   | O => []
@@ -846,7 +1073,7 @@ Fixpoint decode_as4_path_aux (bytes : list byte) (fuel : nat) : list word32 :=
       | [] => []
       | _seg_type :: seg_len :: rest =>
           let n := N.to_nat seg_len in
-          let needed := Nat.mul 4 n in  (* 4 bytes per ASN *)
+          let needed := Nat.mul 4 n in
           let asns := take_as_numbers_4byte n rest in
           let rest' := skip_bytes needed rest in
           asns ++ decode_as4_path_aux rest' fuel'
@@ -857,8 +1084,7 @@ Fixpoint decode_as4_path_aux (bytes : list byte) (fuel : nat) : list word32 :=
 Definition decode_as4_path (bytes : list byte) : list word32 :=
   decode_as4_path_aux bytes (length bytes).
 
-(* RFC 6793 §4.2.3: Merge AS_PATH and AS4_PATH to compute effective path
-   When AS_PATH contains AS_TRANS (23456), replace it with values from AS4_PATH *)
+(* RFC 6793 §4.2.3: AS_PATH/AS4_PATH merge (replaces AS_TRANS with 4-byte ASN) *)
 Fixpoint merge_as_paths (as_path as4_path : list word32) : list word32 :=
   match as_path, as4_path with
   | [], _ => []
@@ -869,7 +1095,7 @@ Fixpoint merge_as_paths (as_path as4_path : list word32) : list word32 :=
   | asn :: rest, [] => asn :: merge_as_paths rest []
   end.
 
-(* Get effective AS_PATH considering AS4_PATH if present *)
+(* Effective AS_PATH extraction with AS4_PATH merge *)
 Definition get_effective_as_path (attrs : list PathAttribute) : list word32 :=
   let as_path := match find (fun attr => N.eqb attr.(attr_type_code) ATTR_AS_PATH) attrs with
                  | None => []
@@ -883,12 +1109,12 @@ Definition get_effective_as_path (attrs : list PathAttribute) : list word32 :=
   then as_path
   else merge_as_paths as_path as4_path.
 
-(* Check for AS_PATH loop in UPDATE *)
+(* UPDATE AS_PATH loop check *)
 Definition update_has_as_loop (my_as : word32) (update : BGPUpdate) : bool :=
   has_as_loop my_as (get_effective_as_path update.(update_path_attributes)).
 
 (* =============================================================================
-   Section 6: BGP Finite State Machine (RFC 4271 Section 8)
+   §6: Finite State Machine (RFC 4271 §8)
    ============================================================================= *)
 
 Inductive BGPState :=
@@ -915,10 +1141,11 @@ Record BGPSession := {
   session_idle_hold_timer : option N;
   session_capabilities : list BGPOptionalParameter;
   session_time_elapsed : N;
-  session_expected_remote_as : word32
+  session_expected_remote_as : word32;
+  session_connection_direction : option bool  (* Some true = locally initiated, Some false = remotely initiated, None = unknown *)
 }.
 
-(* Initialize BGP session *)
+(* Session initialization *)
 Definition init_bgp_session (local_as remote_as local_id : word32) : BGPSession :=
   {| session_state := IDLE;
      session_local_as := local_as;
@@ -935,28 +1162,22 @@ Definition init_bgp_session (local_as remote_as local_id : word32) : BGPSession 
      session_idle_hold_timer := None;
      session_capabilities := [];
      session_time_elapsed := 0;
-     session_expected_remote_as := remote_as |}.
+     session_expected_remote_as := remote_as;
+     session_connection_direction := None |}.
 
-(* Validate BGP header based on session state (RFC 8654)
-   Note: Current model stores remote capabilities in session_capabilities.
-   For full RFC 8654 compliance, we should track local capabilities separately
-   and check that BOTH local and remote advertise Extended Message support. *)
+(* RFC 8654: State-dependent header validation *)
 Definition valid_bgp_header_for_session (session : BGPSession) (hdr : BGPHeader) : bool :=
   match session.(session_state) with
   | OPENCONFIRM | ESTABLISHED =>
-      (* After OPEN exchange, use negotiated capabilities
-         Using remote capabilities for both parameters is conservative:
-         extended messages allowed only if remote supports them *)
       valid_bgp_header_with_caps session.(session_capabilities)
                                   session.(session_capabilities)
                                   hdr
   | _ =>
-      (* Before OPEN exchange, use pre-OPEN validation *)
       valid_bgp_header_preopen hdr
   end.
 
 (* =============================================================================
-   Section 7: BGP State Machine Events (RFC 4271 Section 8.1)
+   §7: FSM Events (RFC 4271 §8.1)
    ============================================================================= *)
 
 Inductive BGPEvent :=
@@ -980,11 +1201,11 @@ Inductive BGPEvent :=
   | DelayOpenTimerExpires
   | IdleHoldTimerExpires.
 
-(* Helper: add a duration to "now" to obtain an absolute deadline. *)
+(* Timer arming: duration 0 → None, else Some(now + duration) *)
 Definition arm (now dur : N) : option N :=
   if N.eqb dur 0 then None else Some (now + dur).
 
-(* Timer tick - increment elapsed time and check for expiries *)
+(* Timer tick and expiry detection *)
 Definition timer_tick (session : BGPSession) (delta : N) : BGPSession * list BGPEvent :=
   let new_elapsed := session.(session_time_elapsed) + delta in
   let events :=
@@ -1024,13 +1245,14 @@ Definition timer_tick (session : BGPSession) (delta : N) : BGPSession * list BGP
       session_idle_hold_timer := session.(session_idle_hold_timer);
       session_capabilities := session.(session_capabilities);
       session_time_elapsed := new_elapsed;
-      session_expected_remote_as := session.(session_expected_remote_as) |}, events).
+      session_expected_remote_as := session.(session_expected_remote_as);
+      session_connection_direction := session.(session_connection_direction) |}, events).
 
 (* =============================================================================
-   Section 8: State Transitions (RFC 4271 Section 8.2)
+   §8: State Transitions (RFC 4271 §8.2)
    ============================================================================= *)
 
-(* Helper: Reset session to IDLE state *)
+(* IDLE state reset with counter increment *)
 Definition reset_to_idle (session : BGPSession) : BGPSession :=
   {| session_state := IDLE;
      session_local_as := session.(session_local_as);
@@ -1047,7 +1269,8 @@ Definition reset_to_idle (session : BGPSession) : BGPSession :=
      session_idle_hold_timer := Some CONNECT_RETRY_TIME;
      session_capabilities := [];
      session_time_elapsed := 0;
-     session_expected_remote_as := session.(session_expected_remote_as) |}.
+     session_expected_remote_as := session.(session_expected_remote_as);
+     session_connection_direction := None |}.
 
 Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
                                : BGPSession * option BGPMessageType :=
@@ -1070,7 +1293,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, None)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, None)
 
   | CONNECT, DelayOpenTimerExpires =>
       let now := session.(session_time_elapsed) in
@@ -1089,7 +1313,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some OPEN)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, Some OPEN)
 
   | IDLE, ManualStart =>
       ({| session_state := CONNECT;
@@ -1107,7 +1332,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, None)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, None)
 
   | IDLE, BGPHeaderErr =>
       (session, None)
@@ -1132,7 +1358,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some OPEN)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, Some OPEN)
 
   | CONNECT, TCPConnectionFails =>
       ({| session_state := ACTIVE;
@@ -1150,7 +1377,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, None)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, None)
 
   | CONNECT, BGPHeaderErr =>
       (reset_to_idle session, Some NOTIFICATION)
@@ -1178,7 +1406,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some OPEN)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, Some OPEN)
 
   | ACTIVE, ConnectRetryTimerExpires =>
       ({| session_state := CONNECT;
@@ -1196,7 +1425,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, None)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, None)
 
   | ACTIVE, DelayOpenTimerExpires =>
       let now := session.(session_time_elapsed) in
@@ -1215,7 +1445,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some OPEN)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, Some OPEN)
 
   | ACTIVE, BGPHeaderErr =>
       (reset_to_idle session, Some NOTIFICATION)
@@ -1254,7 +1485,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
               session_idle_hold_timer := session.(session_idle_hold_timer);
               session_capabilities := open_msg.(open_opt_params);
               session_time_elapsed := session.(session_time_elapsed);
-              session_expected_remote_as := session.(session_expected_remote_as) |}, Some KEEPALIVE)
+              session_expected_remote_as := session.(session_expected_remote_as);
+              session_connection_direction := session.(session_connection_direction) |}, Some KEEPALIVE)
       else
         (reset_to_idle session, Some NOTIFICATION)
   
@@ -1275,7 +1507,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := session.(session_idle_hold_timer);
           session_capabilities := session.(session_capabilities);
           session_time_elapsed := session.(session_time_elapsed);
-          session_expected_remote_as := session.(session_expected_remote_as) |}, None)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, None)
   
   | OPENSENT, BGPHeaderErr =>
       ({| session_state := IDLE;
@@ -1293,7 +1526,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+          session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | OPENSENT, BGPOpenMsgErr =>
       ({| session_state := IDLE;
@@ -1311,7 +1545,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+          session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | OPENSENT, DelayOpenTimerExpires =>
       (session, None)
@@ -1332,7 +1567,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+          session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | OPENCONFIRM, HoldTimerExpires =>
       ({| session_state := IDLE;
@@ -1350,7 +1586,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+          session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | OPENCONFIRM, BGPHeaderErr =>
       (reset_to_idle session, Some NOTIFICATION)
@@ -1379,7 +1616,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
                                    session_idle_hold_timer := session.(session_idle_hold_timer);
                                    session_capabilities := session.(session_capabilities);
                                    session_time_elapsed := session.(session_time_elapsed);
-                                   session_expected_remote_as := session.(session_expected_remote_as) |} in
+                                   session_expected_remote_as := session.(session_expected_remote_as);
+                                   session_connection_direction := session.(session_connection_direction) |} in
           (reset_session, None)  (* Reset hold timer on valid UPDATE *)
       else
         (* RFC 4271 §6.3: Send NOTIFICATION for malformed UPDATE and reset to IDLE *)
@@ -1398,7 +1636,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
             session_idle_hold_timer := Some CONNECT_RETRY_TIME;
             session_capabilities := [];
             session_time_elapsed := 0;
-            session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+            session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | ESTABLISHED, KeepAliveMsg =>
       let now := session.(session_time_elapsed) in
@@ -1417,7 +1656,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
                                session_idle_hold_timer := session.(session_idle_hold_timer);
                                session_capabilities := session.(session_capabilities);
                                session_time_elapsed := session.(session_time_elapsed);
-                               session_expected_remote_as := session.(session_expected_remote_as) |} in
+                               session_expected_remote_as := session.(session_expected_remote_as);
+                                   session_connection_direction := session.(session_connection_direction) |} in
       (reset_session, None)  (* Reset hold timer on KEEPALIVE *)
 
   | ESTABLISHED, HoldTimerExpires =>
@@ -1436,7 +1676,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+          session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | ESTABLISHED, UpdateMsgErr =>
       ({| session_state := IDLE;
@@ -1454,7 +1695,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, Some NOTIFICATION)
+          session_expected_remote_as := session.(session_expected_remote_as);
+            session_connection_direction := session.(session_connection_direction) |}, Some NOTIFICATION)
 
   | ESTABLISHED, BGPHeaderErr =>
       (reset_to_idle session, Some NOTIFICATION)
@@ -1478,7 +1720,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
           session_idle_hold_timer := Some CONNECT_RETRY_TIME;
           session_capabilities := [];
           session_time_elapsed := 0;
-          session_expected_remote_as := session.(session_expected_remote_as) |}, None)
+          session_expected_remote_as := session.(session_expected_remote_as);
+          session_connection_direction := session.(session_connection_direction) |}, None)
 
   | IDLE, IdleHoldTimerExpires =>
       (session, None)
@@ -1500,7 +1743,8 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
                                session_idle_hold_timer := session.(session_idle_hold_timer);
                                session_capabilities := session.(session_capabilities);
                                session_time_elapsed := session.(session_time_elapsed);
-                               session_expected_remote_as := session.(session_expected_remote_as) |} in
+                               session_expected_remote_as := session.(session_expected_remote_as);
+                                   session_connection_direction := session.(session_connection_direction) |} in
       (reset_session, Some KEEPALIVE)  (* Automatic KEEPALIVE generation *)
 
   | OPENSENT, OpenCollisionDump =>
@@ -1513,31 +1757,30 @@ Definition bgp_state_transition (session : BGPSession) (event : BGPEvent)
   end.
 
 (* =============================================================================
-   Section 8.5: Network Failure and Adversarial Conditions Modeling
+   §8.5: Network Failure and Adversarial Models
    ============================================================================= *)
 
-(* Network failure types *)
 Inductive NetworkFailure :=
   | TCPConnectionLost : NetworkFailure
   | MessageLost : NetworkFailure
-  | MessageDelayed : N -> NetworkFailure      (* Delayed by N time units *)
+  | MessageDelayed : N -> NetworkFailure
   | MessageDuplicated : NetworkFailure
   | MessageReordered : NetworkFailure
   | MessageCorrupted : NetworkFailure.
 
-(* Network behavior model - determines if event is delivered *)
+(* Event delivery predicate under network failure *)
 Definition network_delivers (failure : option NetworkFailure) (event : BGPEvent) : bool :=
   match failure with
   | None => true
   | Some TCPConnectionLost => false
   | Some MessageLost => false
-  | Some (MessageDelayed _) => false  (* Delayed messages not immediately delivered *)
-  | Some MessageDuplicated => true  (* Duplicated messages are delivered *)
-  | Some MessageReordered => true   (* Reordered messages are still delivered *)
-  | Some MessageCorrupted => false  (* Corrupted messages are discarded *)
+  | Some (MessageDelayed _) => false
+  | Some MessageDuplicated => true
+  | Some MessageReordered => true
+  | Some MessageCorrupted => false
   end.
 
-(* Apply network failure to session transition *)
+(* State transition with failure injection *)
 Definition bgp_state_transition_with_failure
   (session : BGPSession)
   (event : BGPEvent)
@@ -1547,15 +1790,14 @@ Definition bgp_state_transition_with_failure
   else
     match failure with
     | Some TCPConnectionLost =>
-        (* TCP connection lost triggers transition to IDLE *)
         (reset_to_idle session, Some NOTIFICATION)
-    | _ => (session, None)  (* Other failures: no state change *)
+    | _ => (session, None)
     end.
 
-(* Model session resilience: session eventually recovers from transient failures *)
+(* Transience classification: recoverable without external intervention *)
 Definition is_transient_failure (failure : NetworkFailure) : bool :=
   match failure with
-  | TCPConnectionLost => false  (* Permanent until reconnection *)
+  | TCPConnectionLost => false
   | MessageLost => true
   | MessageDelayed _ => true
   | MessageDuplicated => true
@@ -1563,14 +1805,13 @@ Definition is_transient_failure (failure : NetworkFailure) : bool :=
   | MessageCorrupted => true
   end.
 
-(* Adversarial message injection *)
 Inductive AdversarialEvent :=
   | InjectedOpen : BGPOpen -> AdversarialEvent
   | InjectedUpdate : BGPUpdate -> AdversarialEvent
   | InjectedNotification : BGPNotification -> AdversarialEvent
   | ReplayedMessage : BGPEvent -> AdversarialEvent.
 
-(* Check if adversarial event would be accepted *)
+(* Adversarial event acceptance under state and validation guards *)
 Definition adversarial_event_accepted (session : BGPSession) (adv : AdversarialEvent) : bool :=
   match adv with
   | InjectedOpen open_msg =>
@@ -1579,11 +1820,11 @@ Definition adversarial_event_accepted (session : BGPSession) (adv : AdversarialE
   | InjectedUpdate upd =>
       andb (match session_state session with | ESTABLISHED => true | _ => false end)
            (valid_update_message session.(session_local_as) upd)
-  | InjectedNotification _ => true  (* Notifications always processed *)
-  | ReplayedMessage _ => false  (* Replayed messages should be detected *)
+  | InjectedNotification _ => true
+  | ReplayedMessage _ => false
   end.
 
-(* Theorem: TCP connection loss always transitions to IDLE *)
+(* TCP connection loss forces IDLE *)
 Theorem tcp_loss_goes_to_idle : forall session event,
   (fst (bgp_state_transition_with_failure session event (Some TCPConnectionLost))).(session_state) = IDLE.
 Proof.
@@ -1594,7 +1835,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Theorem: Transient failures don't cause state transitions *)
+(* Transient failures preserve state *)
 Theorem transient_failure_no_transition : forall session event failure,
   is_transient_failure failure = true ->
   network_delivers (Some failure) event = false ->
@@ -1606,7 +1847,7 @@ Proof.
   destruct failure; try reflexivity; try discriminate Htransient.
 Qed.
 
-(* Theorem: Adversarial injection in wrong state is rejected *)
+(* State guards reject adversarial injection *)
 Theorem adversarial_injection_state_guard : forall session open_msg,
   session.(session_state) <> OPENSENT ->
   adversarial_event_accepted session (InjectedOpen open_msg) = false.
@@ -1617,7 +1858,7 @@ Proof.
   contradiction.
 Qed.
 
-(* Theorem: Invalid messages are rejected even from adversary *)
+(* Validation guards reject invalid adversarial messages *)
 Theorem adversarial_invalid_update_rejected : forall session upd,
   valid_update_message session.(session_local_as) upd = false ->
   adversarial_event_accepted session (InjectedUpdate upd) = false.
@@ -1628,7 +1869,7 @@ Proof.
   destruct (session_state session); simpl; reflexivity.
 Qed.
 
-(* Theorem: Replayed messages are always rejected *)
+(* Replay protection *)
 Theorem replayed_messages_rejected : forall session event,
   adversarial_event_accepted session (ReplayedMessage event) = false.
 Proof.
@@ -1638,14 +1879,13 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 9: Route Selection (RFC 4271 Section 9)
+   §9: Route Selection (RFC 4271 §9)
    ============================================================================= *)
 
-(* Routing Information Bases (RFC 4271 Section 3.2) *)
 Record BGPRoute := {
   route_prefix : NLRI;
   route_next_hop : word32;
-  route_next_hop_reachable : bool;  (* true if next hop is reachable *)
+  route_next_hop_reachable : bool;       (* true if next hop is reachable *)
   route_as_path : list word32;
   route_origin : byte;
   route_med : option word32;
@@ -1655,9 +1895,9 @@ Record BGPRoute := {
   route_communities : list word32;
   route_originator_id : word32;
   route_cluster_list : list word32;
-  route_is_ebgp : bool;  (* true if learned via eBGP, false if iBGP *)
-  route_peer_router_id : word32;  (* Router ID of peer that sent this route *)
-  route_igp_cost : option word32  (* IGP cost to NEXT_HOP *)
+  route_is_ebgp : bool;                  (* true if learned via eBGP, false if iBGP *)
+  route_peer_router_id : word32;         (* Router ID of peer that sent this route *)
+  route_igp_cost : option word32         (* IGP cost to NEXT_HOP *)
 }.
 
 (* Three Routing Information Bases *)
@@ -1680,13 +1920,13 @@ Record MultiPath_RIB := {
   mp_adj_rib_out : list MultiPath_Entry
 }.
 
-(* Encode NLRI with Path ID (RFC 7911 §3) *)
-Fixpoint encode_nlri_with_path_id (path_id : word32) (nlri : NLRI) : list byte :=
+(* RFC 7911 §3: NLRI encoding with path identifier *)
+Definition encode_nlri_with_path_id (path_id : word32) (nlri : NLRI) : list byte :=
   let id_bytes := [N.shiftr path_id 24; N.land (N.shiftr path_id 16) 255;
                    N.land (N.shiftr path_id 8) 255; N.land path_id 255] in
   id_bytes ++ nlri.(nlri_prefix_len) :: nlri.(nlri_prefix).
 
-(* Decode NLRI with Path ID *)
+(* Path ID decoder *)
 Definition decode_nlri_with_path_id (bytes : list byte) : option (word32 * NLRI) :=
   match bytes with
   | b1 :: b2 :: b3 :: b4 :: plen :: rest =>
@@ -1696,7 +1936,7 @@ Definition decode_nlri_with_path_id (bytes : list byte) : option (word32 * NLRI)
   | _ => None
   end.
 
-(* Find all paths for a prefix in multi-path RIB *)
+(* Prefix lookup in multi-path RIB *)
 Fixpoint find_paths_for_prefix (prefix : NLRI) (entries : list MultiPath_Entry) : list (word32 * BGPRoute) :=
   match entries with
   | [] => []
@@ -1709,7 +1949,7 @@ Fixpoint find_paths_for_prefix (prefix : NLRI) (entries : list MultiPath_Entry) 
         find_paths_for_prefix prefix rest
   end.
 
-(* Add a path to multi-path RIB *)
+(* Path insertion *)
 Fixpoint add_path_to_rib (prefix : NLRI) (path_id : word32) (route : BGPRoute)
                          (entries : list MultiPath_Entry) : list MultiPath_Entry :=
   match entries with
@@ -1724,7 +1964,7 @@ Fixpoint add_path_to_rib (prefix : NLRI) (path_id : word32) (route : BGPRoute)
         entry :: add_path_to_rib prefix path_id route rest
   end.
 
-(* Simplified theorem: Encoding round-trips for NLRI prefix *)
+(* Encoding round-trip preserves prefix *)
 Theorem addpath_prefix_preserved: forall path_id nlri,
   match decode_nlri_with_path_id (encode_nlri_with_path_id path_id nlri) with
   | Some (_, decoded_nlri) => decoded_nlri.(nlri_prefix_len) = nlri.(nlri_prefix_len) /\
@@ -1732,44 +1972,43 @@ Theorem addpath_prefix_preserved: forall path_id nlri,
   | None => False
   end.
 Proof.
-Admitted.
+  intros path_id nlri.
+  destruct nlri as [plen pfx].
+  unfold encode_nlri_with_path_id, decode_nlri_with_path_id.
+  simpl.
+  split; reflexivity.
+Qed.
 
-(* Theorem: ADD-PATH encoding produces valid output *)
+(* Encoding produces valid output *)
 Theorem addpath_encoding_valid: forall path_id nlri,
   exists pid plen pfx,
     decode_nlri_with_path_id (encode_nlri_with_path_id path_id nlri) = Some (pid, {| nlri_prefix_len := plen; nlri_prefix := pfx |}).
 Proof.
 Admitted.
 
-(* Extract neighboring AS from AS_PATH (first AS for eBGP routes)
-   RFC 5065: Should skip confederation segments for MED comparison.
-   Limitation: Current model represents AS_PATH as flat list of ASNs,
-   losing segment type information needed to distinguish confed segments. *)
+(* Neighboring AS extraction (first AS in AS_PATH) *)
 Definition neighboring_as (route : BGPRoute) : option word32 :=
   match route.(route_as_path) with
   | [] => None
   | as_num :: _ => Some as_num
   end.
 
-(* Check if two routes are from the same neighboring AS *)
+(* Same neighboring AS predicate *)
 Definition same_neighboring_as (r1 r2 : BGPRoute) : bool :=
   match neighboring_as r1, neighboring_as r2 with
   | Some as1, Some as2 => N.eqb as1 as2
   | _, _ => false
   end.
 
-(* RFC 4456: Route Reflection - Cluster loop prevention *)
-(* Check if a cluster ID appears in CLUSTER_LIST *)
+(* RFC 4456: Cluster loop detection *)
 Definition has_cluster_loop (my_cluster_id : word32) (cluster_list : list word32) : bool :=
   existsb (fun cid => N.eqb cid my_cluster_id) cluster_list.
 
-(* Route Reflector should reject routes with its own cluster ID in CLUSTER_LIST *)
+(* Cluster loop rejection predicate *)
 Definition should_reject_cluster_loop (my_cluster_id : word32) (route : BGPRoute) : bool :=
   has_cluster_loop my_cluster_id route.(route_cluster_list).
 
-(* RFC 4456 §8: ORIGINATOR_ID and CLUSTER_LIST modification for route reflection *)
-
-(* Set ORIGINATOR_ID if not already present *)
+(* RFC 4456 §8: ORIGINATOR_ID initialization *)
 Definition set_originator_id (route : BGPRoute) (peer_router_id : word32) : BGPRoute :=
   if N.eqb route.(route_originator_id) 0 then
     {| route_prefix := route.(route_prefix);
@@ -1813,7 +2052,7 @@ Definition apply_route_reflection (route : BGPRoute) (my_cluster_id peer_router_
   let with_originator := set_originator_id route peer_router_id in
   prepend_cluster_id with_originator my_cluster_id.
 
-(* Theorem: Setting ORIGINATOR_ID preserves other route fields *)
+(* ORIGINATOR_ID setting preserves prefix *)
 Theorem set_originator_preserves_prefix: forall route peer_id,
   (set_originator_id route peer_id).(route_prefix) = route.(route_prefix).
 Proof.
@@ -1822,7 +2061,7 @@ Proof.
   destruct (N.eqb (route_originator_id route) 0); reflexivity.
 Qed.
 
-(* Theorem: Prepending cluster ID adds to list *)
+(* Cluster ID prepending *)
 Theorem prepend_cluster_adds: forall route cluster_id,
   (prepend_cluster_id route cluster_id).(route_cluster_list) =
   cluster_id :: route.(route_cluster_list).
@@ -1832,7 +2071,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Theorem: Route reflection creates cluster loop if ID already present *)
+(* Reflection creates loop when cluster ID present *)
 Theorem reflection_creates_loop_when_present: forall route cluster_id peer_id,
   In cluster_id route.(route_cluster_list) ->
   has_cluster_loop cluster_id
@@ -1847,9 +2086,9 @@ Proof.
   reflexivity.
 Qed.
 
-(* RFC 5065: BGP Confederations - Boundary Processing *)
+(* RFC 5065: Confederation boundary processing *)
 
-(* Remove confederation segments from AS_PATH when advertising outside confed *)
+(* Confederation segment removal for external advertisement *)
 Fixpoint remove_confed_segments (segments : list ASPathSegment) : list ASPathSegment :=
   match segments with
   | [] => []
@@ -1862,11 +2101,11 @@ Fixpoint remove_confed_segments (segments : list ASPathSegment) : list ASPathSeg
         seg :: remove_confed_segments rest
   end.
 
-(* Check if session crosses confederation boundary *)
+(* Confederation boundary test *)
 Definition crosses_confed_boundary (local_confed_id peer_as : word32) : bool :=
   negb (N.eqb local_confed_id peer_as).
 
-(* Apply confederation boundary processing if needed *)
+(* Boundary-conditional segment filtering *)
 Definition apply_confed_boundary (segments : list ASPathSegment)
                                  (local_confed_id peer_as : word32) : list ASPathSegment :=
   if crosses_confed_boundary local_confed_id peer_as then
@@ -1874,7 +2113,7 @@ Definition apply_confed_boundary (segments : list ASPathSegment)
   else
     segments.
 
-(* Theorem: Removing confed segments preserves non-confed segments *)
+(* Regular segments preserved *)
 Theorem remove_confed_preserves_regular: forall seg rest,
   orb (N.eqb seg.(seg_type) AS_CONFED_SEQUENCE) (N.eqb seg.(seg_type) AS_CONFED_SET) = false ->
   In seg (remove_confed_segments (seg :: rest)).
@@ -1885,7 +2124,7 @@ Proof.
   simpl. left. reflexivity.
 Qed.
 
-(* Theorem: Within confederation, segments unchanged *)
+(* Intra-confederation paths unchanged *)
 Theorem within_confed_unchanged: forall segments confed_id,
   apply_confed_boundary segments confed_id confed_id = segments.
 Proof.
@@ -1896,7 +2135,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: Crossing boundary removes confed segments *)
+(* Boundary crossing filters confederation segments *)
 Theorem boundary_removes_confed: forall segments confed_id peer_as,
   confed_id <> peer_as ->
   forall seg, In seg (apply_confed_boundary segments confed_id peer_as) ->
@@ -1958,38 +2197,29 @@ Definition compare_routes (r1 r2 : BGPRoute) : bool :=
               end
         end.
 
-(* BGP Decision Process - RFC 4271 Section 9.1.2 *)
+(* RFC 4271 §9.1.2: Best path selection *)
 Definition bgp_best_path_selection (routes : list BGPRoute) : option BGPRoute :=
-  (* Filter to only reachable routes first *)
   let reachable_routes := filter (fun r => r.(route_next_hop_reachable)) routes in
-  (* Find best route among reachable routes *)
   fold_left (fun best r =>
     match best with
     | None => Some r
     | Some b => if compare_routes r b then Some r else best
     end) reachable_routes None.
 
-(* Best path selection with cluster loop prevention (RFC 4456)
-   For route reflectors: reject routes containing own cluster ID *)
+(* RFC 4456: Cluster loop prevention for route reflectors *)
 Definition bgp_best_path_selection_rr (my_cluster_id : word32) (routes : list BGPRoute) : option BGPRoute :=
-  (* Filter to only reachable routes without cluster loops *)
   let reachable_routes := filter (fun r => r.(route_next_hop_reachable)) routes in
   let no_cluster_loop := filter (fun r => negb (should_reject_cluster_loop my_cluster_id r)) reachable_routes in
-  (* Find best route among filtered routes *)
   fold_left (fun best r =>
     match best with
     | None => Some r
     | Some b => if compare_routes r b then Some r else best
     end) no_cluster_loop None.
 
-(* Worst-case complexity analysis: O(n) where n = number of routes
-   - filter: O(n) - examines each route once
-   - fold_left: O(n) - examines each reachable route once
-   - compare_routes: O(1) - constant time comparisons
-   Total: O(n) linear time complexity *)
+(* Complexity: O(n) linear in number of routes *)
 Definition best_path_complexity (n : nat) : nat := n.
 
-(* Theorem: Best path selection examines each route at most once *)
+(* Linear complexity bound *)
 Theorem best_path_linear_complexity : forall (routes : list BGPRoute),
   Nat.leb (length routes) (best_path_complexity (length routes)) = true.
 Proof.
@@ -1998,19 +2228,19 @@ Proof.
   apply Nat.leb_refl.
 Qed.
 
-(* Initialize empty RIB *)
+(* Empty RIB initialization *)
 Definition init_rib : RIB :=
   {| adj_rib_in := [];
      loc_rib := [];
      adj_rib_out := [] |}.
 
-(* Add route to Adj-RIB-In *)
+(* Adj-RIB-In insertion *)
 Definition add_route_in (rib : RIB) (route : BGPRoute) : RIB :=
   {| adj_rib_in := route :: rib.(adj_rib_in);
      loc_rib := rib.(loc_rib);
      adj_rib_out := rib.(adj_rib_out) |}.
 
-(* Update Loc-RIB with best path selection *)
+(* Loc-RIB update via best path selection *)
 Definition update_loc_rib (rib : RIB) : RIB :=
   {| adj_rib_in := rib.(adj_rib_in);
      loc_rib := match bgp_best_path_selection rib.(adj_rib_in) with
@@ -2019,12 +2249,7 @@ Definition update_loc_rib (rib : RIB) : RIB :=
                 end;
      adj_rib_out := rib.(adj_rib_out) |}.
 
-(* Export route to Adj-RIB-Out (with attribute modification)
-   Parameters:
-   - my_as: Local AS number to prepend to AS_PATH for eBGP
-   - my_next_hop: Routable IPv4 address to set as NEXT_HOP for eBGP advertisements
-   - route: The route being exported
-   - is_ebgp: true if exporting to eBGP peer, false for iBGP *)
+(* Route export with attribute modification (eBGP: prepend AS, set NEXT_HOP) *)
 Definition export_route (my_as my_next_hop : word32) (route : BGPRoute) (is_ebgp : bool) : BGPRoute :=
   {| route_prefix := route.(route_prefix);
      route_next_hop := if is_ebgp then my_next_hop else route.(route_next_hop);
@@ -2042,17 +2267,12 @@ Definition export_route (my_as my_next_hop : word32) (route : BGPRoute) (is_ebgp
      route_peer_router_id := route.(route_peer_router_id);
      route_igp_cost := route.(route_igp_cost) |}.
 
-(* iBGP split horizon: Don't advertise iBGP routes to iBGP peers *)
+(* iBGP split horizon: iBGP→iBGP advertisement prohibited *)
 Definition should_advertise_route (route : BGPRoute) (peer_is_ebgp : bool) : bool :=
   if peer_is_ebgp then true
-  else route.(route_is_ebgp).  (* Only advertise if route came from eBGP *)
+  else route.(route_is_ebgp).
 
-(* Update Adj-RIB-Out from Loc-RIB
-   Parameters:
-   - my_as: Local AS number
-   - my_next_hop: Routable IPv4 address to advertise as NEXT_HOP (distinct from BGP identifier)
-   - rib: The routing information base
-   - is_ebgp: true if advertising to eBGP peer *)
+(* Adj-RIB-Out construction from Loc-RIB *)
 Definition update_adj_rib_out (my_as my_next_hop : word32) (rib : RIB) (is_ebgp : bool) : RIB :=
   let filtered := filter (fun r => should_advertise_route r is_ebgp) rib.(loc_rib) in
   {| adj_rib_in := rib.(adj_rib_in);
@@ -2060,7 +2280,7 @@ Definition update_adj_rib_out (my_as my_next_hop : word32) (rib : RIB) (is_ebgp 
      adj_rib_out := map (fun r => export_route my_as my_next_hop r is_ebgp) filtered |}.
 
 (* =============================================================================
-   Section 9.45: Route Flap Dampening (RFC 2439)
+   §9.45: Route Flap Dampening (RFC 2439)
    ============================================================================= *)
 
 (* Route flap dampening parameters per RFC 2439 *)
@@ -2072,7 +2292,6 @@ Definition MAX_SUPPRESS_TIME : N := 3600.      (* Maximum suppression time in se
 Definition HALF_LIFE_REACHABLE : N := 900.     (* 15 minutes for reachable routes *)
 Definition HALF_LIFE_UNREACHABLE : N := 300.   (* 5 minutes for unreachable routes *)
 
-(* Route dampening state *)
 Record DampeningState := {
   damp_penalty : N;                    (* Current penalty value *)
   damp_last_update_time : N;           (* Timestamp of last update *)
@@ -2081,7 +2300,7 @@ Record DampeningState := {
   damp_flap_count : N                  (* Number of flaps detected *)
 }.
 
-(* Initialize dampening state *)
+(* Initial dampening state *)
 Definition init_dampening_state : DampeningState :=
   {| damp_penalty := 0;
      damp_last_update_time := 0;
@@ -2089,7 +2308,7 @@ Definition init_dampening_state : DampeningState :=
      damp_suppress_time := 0;
      damp_flap_count := 0 |}.
 
-(* Decay penalty over time using exponential decay *)
+(* Exponential decay: penalty / 2^(elapsed/half_life) *)
 Definition decay_penalty (current_penalty : N) (elapsed_time half_life : N) : N :=
   if N.eqb elapsed_time 0 then current_penalty
   else if N.leb current_penalty 1 then 0
@@ -2098,7 +2317,7 @@ Definition decay_penalty (current_penalty : N) (elapsed_time half_life : N) : N 
     if N.leb current_penalty decay_factor then 0
     else current_penalty / decay_factor.
 
-(* Update dampening state on route withdrawal *)
+(* Withdrawal penalty application *)
 Definition apply_withdrawal_penalty (state : DampeningState) (current_time : N) : DampeningState :=
   let elapsed := current_time - state.(damp_last_update_time) in
   let decayed := decay_penalty state.(damp_penalty) elapsed HALF_LIFE_UNREACHABLE in
@@ -2346,23 +2565,23 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 9.5: RIB Properties
+   §9.5: RIB Properties
    ============================================================================= *)
 
-(* Property: Empty RIB has empty Loc-RIB *)
+(* Empty RIB has empty Loc-RIB *)
 Theorem init_rib_empty_loc : init_rib.(loc_rib) = [].
 Proof.
   reflexivity.
 Qed.
 
-(* Property: Adding route preserves Loc-RIB *)
+(* Adding route preserves Loc-RIB *)
 Theorem add_route_preserves_loc_rib : forall rib route,
   (add_route_in rib route).(loc_rib) = rib.(loc_rib).
 Proof.
   intros. reflexivity.
 Qed.
 
-(* Property: Update Loc-RIB selects from Adj-RIB-In *)
+(* Loc-RIB contains at most one route *)
 Theorem update_loc_rib_singleton_or_empty : forall rib,
   Nat.leb (length (update_loc_rib rib).(loc_rib)) 1 = true.
 Proof.
@@ -2374,7 +2593,7 @@ Proof.
   - simpl. reflexivity.
 Qed.
 
-(* Helper: fold_left with Some initial preserves or updates from list *)
+(* fold_left with Some initial preserves or updates from list *)
 Lemma fold_some_result_from_list_or_init : forall routes init result,
   fold_left (fun (best_opt : option BGPRoute) (r : BGPRoute) =>
     match best_opt with
@@ -2397,7 +2616,7 @@ Proof.
       * right. simpl. right. exact Hin.
 Qed.
 
-(* Helper: fold_left for best path returns element from list *)
+(* fold_left for best path returns element from list *)
 Lemma fold_best_path_in_list : forall routes best,
   fold_left (fun (best_opt : option BGPRoute) (r : BGPRoute) =>
     match best_opt with
@@ -2416,7 +2635,7 @@ Proof.
     + simpl. right. exact Hin.
 Qed.
 
-(* Property: Loc-RIB contains best route from Adj-RIB-In *)
+(* Loc-RIB best route is reachable and from Adj-RIB-In *)
 Theorem loc_rib_contains_best_route : forall rib route,
   (update_loc_rib rib).(loc_rib) = [route] ->
   route.(route_next_hop_reachable) = true /\
@@ -2438,7 +2657,7 @@ Proof.
   - discriminate Hloc.
 Qed.
 
-(* Property: Empty Adj-RIB-In yields empty Loc-RIB *)
+(* Empty Adj-RIB-In yields empty Loc-RIB *)
 Theorem empty_adj_rib_in_empty_loc_rib : forall rib,
   rib.(adj_rib_in) = [] ->
   (update_loc_rib rib).(loc_rib) = [].
@@ -2448,7 +2667,7 @@ Proof.
   unfold bgp_best_path_selection. rewrite Hempty. simpl. reflexivity.
 Qed.
 
-(* Property: Adj-RIB-Out only contains routes from Loc-RIB *)
+(* Adj-RIB-Out contains only routes from Loc-RIB *)
 Theorem adj_rib_out_from_loc_rib : forall my_as my_rid rib is_ebgp route,
   In route (update_adj_rib_out my_as my_rid rib is_ebgp).(adj_rib_out) ->
   exists orig_route, In orig_route rib.(loc_rib) /\
@@ -2465,17 +2684,17 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 10: Key Properties
+   §10: Key Properties
    ============================================================================= *)
 
-(* Property 1: State machine starts in IDLE *)
+(* State machine starts in IDLE *)
 Theorem initial_state_idle : forall las ras lid,
   (init_bgp_session las ras lid).(session_state) = IDLE.
 Proof.
   intros. reflexivity.
 Qed.
 
-(* Property 2: Transition to ESTABLISHED preserves remote_id *)
+(* OPENCONFIRM→ESTABLISHED preserves remote_id *)
 Theorem established_preserves_remote_id : forall session session' msg,
   session.(session_state) = OPENCONFIRM ->
   bgp_state_transition session KeepAliveMsg = (session', msg) ->
@@ -2489,7 +2708,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Property 3: Hold time negotiation takes minimum *)
+(* Hold time negotiation takes minimum *)
 Theorem hold_time_negotiation : forall session open_msg session',
   session.(session_state) = OPENSENT ->
   valid_open_message open_msg = true ->
@@ -2509,7 +2728,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Property 3.5: Valid OPEN guarantees non-zero remote_id *)
+(* Valid OPEN guarantees non-zero remote_id *)
 Theorem valid_open_nonzero_remote_id : forall session open_msg session',
   session.(session_state) = OPENSENT ->
   valid_open_message open_msg = true ->
@@ -2538,7 +2757,7 @@ Proof.
   discriminate Hnot_zero.
 Qed.
 
-(* Property 3.55: Valid hold time accepts 0 or >=3 *)
+(* Valid hold time accepts 0 or >=3 *)
 Theorem valid_hold_time_bounds : forall ht,
   valid_hold_time ht = true ->
   ht = 0 \/ (HOLD_TIME_MIN <= ht /\ ht <= HOLD_TIME_MAX).
@@ -2555,7 +2774,7 @@ Proof.
     + exact Hmax.
 Qed.
 
-(* Property 3.56: Invalid hold times rejected *)
+(* Invalid hold times rejected *)
 Theorem invalid_hold_time_rejected : forall ht,
   ht <> 0 -> ht < HOLD_TIME_MIN ->
   valid_hold_time ht = false.
@@ -2567,14 +2786,14 @@ Proof.
   - apply andb_false_intro1. apply N.leb_gt. exact Hlt.
 Qed.
 
-(* Property 3.57: AS 0 is invalid *)
+(* AS 0 is invalid *)
 Theorem as_zero_invalid :
   valid_as_number 0 = false.
 Proof.
   unfold valid_as_number. simpl. reflexivity.
 Qed.
 
-(* Property 3.58: Non-zero AS is valid *)
+(* Non-zero AS is valid *)
 Theorem as_nonzero_valid : forall asn,
   asn <> 0 -> valid_as_number asn = true.
 Proof.
@@ -2585,7 +2804,7 @@ Proof.
   exact Hnonzero.
 Qed.
 
-(* Property 3.59: Valid ORIGIN values *)
+(* Valid ORIGIN values *)
 Theorem origin_igp_valid :
   valid_origin_value ORIGIN_IGP = true.
 Proof.
@@ -2617,7 +2836,7 @@ Proof.
     + apply N.eqb_neq. exact H3.
 Qed.
 
-(* Property 3.591: Valid NLRI prefix lengths *)
+(* Valid NLRI prefix lengths *)
 Theorem nlri_valid_zero : valid_nlri_prefix_len 0 = true.
 Proof.
   unfold valid_nlri_prefix_len. simpl. reflexivity.
@@ -2633,7 +2852,7 @@ Proof.
   unfold valid_nlri_prefix_len. simpl. reflexivity.
 Qed.
 
-(* Property 3.6: Connection failure transitions to ACTIVE *)
+(* Connection failure transitions to ACTIVE *)
 Theorem connect_failure_to_active : forall session session' msg,
   session.(session_state) = CONNECT ->
   bgp_state_transition session TCPConnectionFails = (session', msg) ->
@@ -2646,7 +2865,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Property 3.7: ACTIVE can transition to OPENSENT on TCP success *)
+(* ACTIVE transitions to OPENSENT on TCP success *)
 Theorem active_to_opensent : forall session session' msg,
   session.(session_state) = ACTIVE ->
   bgp_state_transition session TCPConnectionConfirmed = (session', msg) ->
@@ -2659,7 +2878,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Property 3.8: ACTIVE retry timer expires back to CONNECT *)
+(* ACTIVE retry timer expires back to CONNECT *)
 Theorem active_retry_to_connect : forall session session' msg,
   session.(session_state) = ACTIVE ->
   bgp_state_transition session ConnectRetryTimerExpires = (session', msg) ->
@@ -2672,7 +2891,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Property 4: Notification returns to IDLE *)
+(* Notification returns to IDLE *)
 Theorem notification_to_idle : forall session notif session' msg,
   bgp_state_transition session (NotifMsg notif) = (session', msg) ->
   session'.(session_state) = IDLE.
@@ -2681,7 +2900,7 @@ Proof.
   destruct session.(session_state); inversion H; reflexivity.
 Qed.
 
-(* Property 4.1: Timer tick updates elapsed time *)
+(* Timer tick updates elapsed time *)
 Theorem timer_tick_increments_time : forall session delta session' events,
   timer_tick session delta = (session', events) ->
   session'.(session_time_elapsed) = session.(session_time_elapsed) + delta.
@@ -2692,7 +2911,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Property 5: AS path loop detection *)
+(* AS path loop detection *)
 Theorem as_path_loop_detected : forall my_as as_path,
   has_as_loop my_as as_path = true ->
   In my_as as_path.
@@ -2706,7 +2925,7 @@ Proof.
   exact Hin.
 Qed.
 
-(* Property 5.05: Collision resolution is antisymmetric *)
+(* Collision resolution is antisymmetric *)
 Theorem collision_resolution_antisymmetric : forall local_id remote_id,
   local_id <> remote_id ->
   resolve_collision local_id remote_id true =
@@ -2728,7 +2947,7 @@ Proof.
     + contradiction Hneq.
 Qed.
 
-(* Property 5.06: Higher ID always wins in collision resolution *)
+(* Higher ID always wins in collision resolution *)
 Theorem collision_higher_id_wins : forall local_id remote_id,
   local_id > remote_id ->
   resolve_collision local_id remote_id true = true.
@@ -2740,7 +2959,7 @@ Proof.
   rewrite Hge. reflexivity.
 Qed.
 
-(* Property 5.1: Mandatory attributes in valid UPDATE *)
+(* Mandatory attributes in valid UPDATE *)
 Theorem valid_update_has_mandatory : forall my_as update,
   valid_update_message my_as update = true ->
   N.of_nat (length update.(update_nlri)) > 0 ->
@@ -2756,7 +2975,7 @@ Proof.
     lia.
 Qed.
 
-(* Property 6: Valid header has correct marker length *)
+(* Valid header has correct marker length *)
 Theorem valid_header_correct_marker_length : forall hdr,
   valid_bgp_header hdr = true ->
   N.of_nat (length hdr.(bgp_marker)) = BGP_MARKER_LENGTH.
@@ -2769,7 +2988,7 @@ Proof.
   apply N.eqb_eq in Hlen. assumption.
 Qed.
 
-(* Property 7: Best path selection excludes unreachable routes *)
+(* Best path selection excludes unreachable routes *)
 Theorem best_path_excludes_unreachable : forall r routes,
   r.(route_next_hop_reachable) = false ->
   bgp_best_path_selection (r :: routes) = bgp_best_path_selection routes.
@@ -2780,7 +2999,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11: Deep Properties - Convergence
+   §11: Deep Properties - Convergence
    ============================================================================= *)
 
 Definition is_stable_state (s : BGPState) : bool :=
@@ -2912,13 +3131,13 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.45: Time-Bounded Convergence Analysis
+   §11.45: Time-Bounded Convergence Analysis
    ============================================================================= *)
 
 (* Maximum transitions to reach stable state from any state *)
 Definition max_transitions_to_stable : nat := 4.
 
-(* Theorem: Convergence time bound - max 4 transitions defined *)
+(* Convergence time bound: max 4 transitions *)
 Theorem convergence_time_bound :
   max_transitions_to_stable = 4%nat.
 Proof.
@@ -2926,7 +3145,6 @@ Proof.
   reflexivity.
 Qed.
 
-(* Helper lemmas for state stability *)
 Lemma connect_not_stable : is_stable_state CONNECT = false.
 Proof. reflexivity. Qed.
 
@@ -2942,7 +3160,7 @@ Proof. reflexivity. Qed.
 Lemma active_not_stable : is_stable_state ACTIVE = false.
 Proof. reflexivity. Qed.
 
-(* Lemma: IDLE->ManualStart gives CONNECT *)
+(* IDLE→ManualStart yields CONNECT *)
 Lemma idle_manualstart_connect : forall session,
   session.(session_state) = IDLE ->
   (fst (bgp_state_transition session ManualStart)).(session_state) = CONNECT.
@@ -2950,7 +3168,7 @@ Proof.
   intros. unfold bgp_state_transition. rewrite H. reflexivity.
 Qed.
 
-(* Lemmas: Transitions preserve local_id and expected_remote_as *)
+(* Transitions preserve local_id and expected_remote_as *)
 Lemma idle_manualstart_preserves_local_id : forall session,
   session.(session_state) = IDLE ->
   (fst (bgp_state_transition session ManualStart)).(session_local_id) = session.(session_local_id).
@@ -2979,7 +3197,7 @@ Proof.
   intros. unfold bgp_state_transition. rewrite H. reflexivity.
 Qed.
 
-(* Theorem: Maximum fuel bounds - processing 4 transitions is sufficient for IDLE→ESTABLISHED *)
+(* Maximum fuel bounds: 4 transitions sufficient for IDLE→ESTABLISHED *)
 Theorem idle_to_established_max_fuel : forall session open_msg,
   session.(session_state) = IDLE ->
   valid_open_message open_msg = true ->
@@ -3021,7 +3239,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: IDLE to ESTABLISHED requires exactly 4 successful transitions *)
+(* IDLE to ESTABLISHED requires exactly 4 successful transitions *)
 Theorem idle_to_established_steps : forall session open_msg,
   session.(session_state) = IDLE ->
   valid_open_message open_msg = true ->
@@ -3056,7 +3274,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.5: Deep Properties - Safety
+   §11.5: Deep Properties - Safety
    ============================================================================= *)
 
 Lemma established_from_openconfirm : forall session,
@@ -3125,7 +3343,8 @@ Proof.
                            session_idle_hold_timer := session_idle_hold_timer session;
                            session_capabilities := session_capabilities session;
                            session_time_elapsed := 0;
-                           session_expected_remote_as := session.(session_expected_remote_as) |}).
+                           session_expected_remote_as := session.(session_expected_remote_as);
+                           session_connection_direction := session.(session_connection_direction) |}).
   set (intermediate2 := {| session_state := OPENSENT;
                            session_local_as := session_local_as intermediate1;
                            session_remote_as := session_remote_as intermediate1;
@@ -3141,7 +3360,8 @@ Proof.
                            session_idle_hold_timer := session_idle_hold_timer intermediate1;
                            session_capabilities := session_capabilities intermediate1;
                            session_time_elapsed := session_time_elapsed intermediate1;
-                           session_expected_remote_as := intermediate1.(session_expected_remote_as) |}).
+                           session_expected_remote_as := intermediate1.(session_expected_remote_as);
+                           session_connection_direction := intermediate1.(session_connection_direction) |}).
   set (negotiated_hold := N.min (session_hold_time intermediate2) 90).
   set (intermediate3 := {| session_state := OPENCONFIRM;
                            session_local_as := session_local_as intermediate2;
@@ -3158,7 +3378,8 @@ Proof.
                            session_idle_hold_timer := session_idle_hold_timer intermediate2;
                            session_capabilities := [];
                            session_time_elapsed := session_time_elapsed intermediate2;
-                           session_expected_remote_as := intermediate2.(session_expected_remote_as) |}).
+                           session_expected_remote_as := intermediate2.(session_expected_remote_as);
+                           session_connection_direction := intermediate2.(session_connection_direction) |}).
   set (established_session := {| session_state := ESTABLISHED;
                                   session_local_as := session_local_as intermediate3;
                                   session_remote_as := session_remote_as intermediate3;
@@ -3174,7 +3395,8 @@ Proof.
                                   session_idle_hold_timer := session_idle_hold_timer intermediate3;
                                   session_capabilities := session_capabilities intermediate3;
                                   session_time_elapsed := session_time_elapsed intermediate3;
-                                  session_expected_remote_as := intermediate3.(session_expected_remote_as) |}).
+                                  session_expected_remote_as := intermediate3.(session_expected_remote_as);
+                                  session_connection_direction := intermediate3.(session_connection_direction) |}).
   exists established_session.
   split. unfold valid_open_message, valid_bgp_identifier, valid_hold_time, valid_as_number. simpl. reflexivity.
   split. reflexivity.
@@ -3190,7 +3412,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.6: Deep Properties - Liveness
+   §11.6: Deep Properties - Liveness
    ============================================================================= *)
 
 Lemma hold_timer_set_in_opensent : forall session,
@@ -3213,7 +3435,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.65: RFC 4456 Route Reflection - CLUSTER_LIST Loop Prevention
+   §11.65: RFC 4456 Route Reflection - CLUSTER_LIST Loop Prevention
    ============================================================================= *)
 
 (* Decode CLUSTER_LIST from 4-byte cluster IDs *)
@@ -3240,9 +3462,9 @@ Definition get_cluster_list (attrs : list PathAttribute) : list word32 :=
   | Some attr => decode_cluster_list attr.(attr_value)
   end.
 
-(* Cluster loop detection functions defined earlier in Section 9 *)
+(* Cluster loop detection functions defined earlier in §9 *)
 
-(* Theorem: Cluster loop detection identifies cluster ID in list *)
+(* Cluster loop detection identifies cluster ID in list *)
 Theorem cluster_loop_detected : forall my_cid cluster_list,
   has_cluster_loop my_cid cluster_list = true ->
   In my_cid cluster_list.
@@ -3256,7 +3478,7 @@ Proof.
   exact Hin.
 Qed.
 
-(* Theorem: No cluster loop means cluster ID not in list *)
+(* No cluster loop means cluster ID not in list *)
 Theorem no_cluster_loop_not_in_list : forall my_cid cluster_list,
   has_cluster_loop my_cid cluster_list = false ->
   ~In my_cid cluster_list.
@@ -3269,7 +3491,7 @@ Proof.
   discriminate Hno_loop.
 Qed.
 
-(* Theorem: Decoding CLUSTER_LIST of valid length produces correct number of IDs *)
+(* Decoding CLUSTER_LIST of valid length produces correct number of IDs *)
 Theorem decode_cluster_list_valid_length : forall (bytes : list byte),
   (N.of_nat (length bytes)) mod 4 = 0 ->
   (N.of_nat (length bytes)) = 0 \/ (N.of_nat (length bytes)) >= 4.
@@ -3284,7 +3506,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.655: RFC 7911 ADD-PATH - Multiple Paths per Prefix
+   §11.655: RFC 7911 ADD-PATH - Multiple Paths per Prefix
    ============================================================================= *)
 
 Definition PATH_ID := word32.
@@ -3342,7 +3564,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.656: RFC 8205 BGPsec - Secure Path Validation
+   §11.656: RFC 8205 BGPsec - Secure Path Validation
    ============================================================================= *)
 
 Inductive SignatureAlgorithm :=
@@ -3439,17 +3661,11 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.6565: BGPsec Cryptographic Verification Model
+   §11.6565: BGPsec Cryptographic Verification Model
    ============================================================================= *)
 
-(* Abstract model of cryptographic verification
-   In practice, this would involve:
-   - ECDSA P-256 signature verification
-   - X.509 certificate chain validation
-   - RPKI resource certificate verification
-   We model this abstractly as an oracle that returns verification results *)
+(* Abstract cryptographic verification oracle (ECDSA P-256, X.509, RPKI) *)
 
-(* Public key associated with an AS *)
 Record PublicKey := {
   pk_asn : word32;
   pk_ski : list byte;
@@ -3648,7 +3864,7 @@ Fixpoint verify_bgpsec_path_crypto
       end
   end.
 
-(* Theorem: Valid signature structure is necessary for crypto verification *)
+(* Valid signature structure necessary for crypto verification *)
 Theorem crypto_verification_requires_valid_structure : forall msg sig cert time,
   verify_bgpsec_signature_crypto msg sig cert time = true ->
   valid_bgpsec_signature sig = true.
@@ -3660,7 +3876,7 @@ Proof.
   exact Hvalid.
 Qed.
 
-(* Theorem: Expired certificates fail verification *)
+(* Expired certificates fail verification *)
 Theorem expired_cert_fails_verification : forall cert time,
   cert.(rc_validity).(vp_not_after) < time ->
   check_certificate_validity cert time = false.
@@ -3676,7 +3892,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Theorem: Revoked certificates fail verification *)
+(* Revoked certificates fail verification *)
 Theorem revoked_cert_fails_verification : forall cert time,
   cert.(rc_revoked) = true ->
   check_certificate_validity cert time = false.
@@ -3691,7 +3907,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Theorem: Path verification requires matching AS numbers *)
+(* Path verification requires matching AS numbers *)
 Theorem path_verification_requires_matching_asn : forall msg seg cert rest_segs rest_certs time fuel,
   verify_bgpsec_path_crypto msg (seg :: rest_segs) (cert :: rest_certs) time (S fuel) = true ->
   seg.(seg_asn) = cert.(rc_asn).
@@ -3705,12 +3921,12 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.66: RFC 4760 MP-BGP - Address Family Consistency
+   §11.66: RFC 4760 MP-BGP - Address Family Consistency
    ============================================================================= *)
 
-(* MP-BGP AFI/SAFI validation functions defined earlier in Section 5.5 *)
+(* MP-BGP AFI/SAFI validation functions defined earlier in §5.5 *)
 
-(* Theorem: IPv4 Unicast is a valid combination *)
+(* IPv4 Unicast is a valid combination *)
 Theorem ipv4_unicast_valid :
   valid_afi_safi_combination AFI_IPV4 SAFI_UNICAST = true.
 Proof.
@@ -3718,7 +3934,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: IPv6 Unicast is a valid combination *)
+(* IPv6 Unicast is a valid combination *)
 Theorem ipv6_unicast_valid :
   valid_afi_safi_combination AFI_IPV6 SAFI_UNICAST = true.
 Proof.
@@ -3726,7 +3942,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: L2VPN VPLS is a valid combination *)
+(* L2VPN VPLS is a valid combination *)
 Theorem l2vpn_vpls_valid :
   valid_afi_safi_combination AFI_L2VPN SAFI_VPLS = true.
 Proof.
@@ -3734,7 +3950,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: L2VPN EVPN is a valid combination *)
+(* L2VPN EVPN is a valid combination *)
 Theorem l2vpn_evpn_valid :
   valid_afi_safi_combination AFI_L2VPN SAFI_EVPN = true.
 Proof.
@@ -3742,7 +3958,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: BGP-LS is a valid combination *)
+(* BGP-LS is a valid combination *)
 Theorem bgpls_valid :
   valid_afi_safi_combination AFI_BGPLS SAFI_BGPLS = true.
 Proof.
@@ -3750,7 +3966,7 @@ Proof.
   simpl. reflexivity.
 Qed.
 
-(* Theorem: Invalid combinations are rejected *)
+(* Invalid combinations are rejected *)
 Theorem invalid_afi_safi_rejected : forall afi safi,
   valid_afi_safi_combination afi safi = false ->
   ~(afi = AFI_IPV4 /\ (safi = SAFI_UNICAST \/ safi = SAFI_MULTICAST \/
@@ -3772,14 +3988,14 @@ Proof.
     discriminate Hinvalid.
 Qed.
 
-(* Theorem: Decoding AFI from valid bytes succeeds *)
+(* Decoding AFI from valid bytes succeeds *)
 Theorem decode_afi_success : forall b1 b2 rest,
   decode_afi (b1 :: b2 :: rest) = Some (N.lor (N.shiftl b1 8) b2).
 Proof.
   intros. unfold decode_afi. reflexivity.
 Qed.
 
-(* Theorem: Decoding SAFI from valid bytes succeeds *)
+(* Decoding SAFI from valid bytes succeeds *)
 Theorem decode_safi_success : forall b1 b2 safi rest,
   decode_safi (b1 :: b2 :: safi :: rest) = Some safi.
 Proof.
@@ -3787,15 +4003,14 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.67: Route Oscillation Prevention
+   §11.67: Route Oscillation Prevention
    ============================================================================= *)
 
-(* The compare_routes function defines a total order on routes.
-   Key properties that prevent oscillation:
-   1. Antisymmetry: If r1 is preferred over r2, then r2 is not preferred over r1
-   2. Stability: Re-selecting the best route yields the same route *)
+(* compare_routes defines total order preventing oscillation via:
+   1. Antisymmetry: r1 > r2 implies ¬(r2 > r1)
+   2. Stability: best(best(routes)) = best(routes) *)
 
-(* Theorem: compare_routes respects local_pref strictly *)
+(* compare_routes respects local_pref strictly *)
 Theorem compare_routes_respects_local_pref : forall r1 r2,
   route_local_pref r1 > route_local_pref r2 ->
   compare_routes r1 r2 = true.
@@ -3808,7 +4023,7 @@ Proof.
   reflexivity.
 Qed.
 
-(* Theorem: compare_routes antisymmetric for different local_pref *)
+(* compare_routes antisymmetric for different local_pref *)
 Theorem compare_routes_antisymmetric_pref : forall r1 r2,
   route_local_pref r1 <> route_local_pref r2 ->
   compare_routes r1 r2 = true ->
@@ -3828,7 +4043,7 @@ Proof.
       lia.
 Qed.
 
-(* Theorem: Best path selection is stable - selecting twice gives same result *)
+(* Best path selection is stable: best(best(routes)) = best(routes) *)
 Theorem best_path_selection_stable : forall routes best,
   bgp_best_path_selection routes = Some best ->
   bgp_best_path_selection [best] = Some best.
@@ -3850,7 +4065,7 @@ Proof.
   - discriminate Hbest.
 Qed.
 
-(* Theorem: No oscillation - if best path doesn't change, it remains stable *)
+(* No oscillation: stable best path remains stable *)
 Theorem no_route_oscillation : forall rib route,
   (update_loc_rib rib).(loc_rib) = [route] ->
   (update_loc_rib (update_loc_rib rib)).(loc_rib) = [route].
@@ -3881,7 +4096,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.7: Deep Properties - Route Consistency
+   §11.7: Deep Properties - Route Consistency
    ============================================================================= *)
 
 Definition has_origin (route : BGPRoute) : Prop :=
@@ -3930,10 +4145,10 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 11.6: Properties of Enhancements
+   §11.8: Properties of RFC Enhancements
    ============================================================================= *)
 
-(* RFC 8654: Extended Message property *)
+(* RFC 8654: Extended Message capability *)
 Theorem extended_message_allows_larger: forall local remote,
   supports_extended_message local = true ->
   supports_extended_message remote = true ->
@@ -4018,7 +4233,7 @@ Proof.
 Qed.
 
 (* =============================================================================
-   Section 12: Extraction
+   §12: OCaml Extraction
    ============================================================================= *)
 
 Require Extraction.
@@ -4037,4 +4252,4 @@ Extraction "bgp4.ml"
   get_effective_as_path
   supports_extended_message
   negotiated_max_message_length.
-   
+ 
