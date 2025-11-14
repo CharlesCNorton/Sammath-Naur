@@ -103,6 +103,11 @@ Definition domain_name_wire_len (labs:list string) : N :=
 Definition domain_name_length (labs:list string) : word16 :=
   to_word16 (domain_name_wire_len labs).
 
+(* DNS name well-formedness predicates (RFC 1035 §2.3.4) *)
+Definition label_ok (s:string) : Prop := (strlen s <= 63)%nat.
+Definition name_ok (labs:list string) : Prop :=
+  (domain_name_wire_len labs <= 255)%N /\ Forall label_ok labs.
+
 (* =============================================================================
    Section 2: AAAA Resource Record (RFC 3596 Section 2.1/2.2)
    ============================================================================= *)
@@ -190,11 +195,12 @@ Lemma aaaa_fixed_size_create : forall name addr ttl,
 Proof. reflexivity. Qed.
 
 (* Well-formedness predicate for validating AAAA records from untrusted sources.
-   A record is well-formed if type=28, class=1, and rdlength=16. *)
+   A record is well-formed if type=28, class=1, rdlength=16, and name is valid per RFC 1035. *)
 Record AAAA_wf (r:AAAARecord) : Prop := {
   WF_type  : r.(aaaa_type) = AAAA_TYPE;
   WF_class : r.(aaaa_class) = IN_CLASS;
-  WF_len   : r.(aaaa_rdlength) = 16
+  WF_len   : r.(aaaa_rdlength) = 16;
+  WF_name  : name_ok r.(aaaa_name)
 }.
 
 (* Any well-formed AAAA record has rdlength = 16 *)
@@ -527,7 +533,46 @@ Lemma nibble_label_roundtrip_ci : forall n lab,
   label_to_nibble lab = Some n ->
   eq_label_ci (nibble_label_of n) lab = true.
 Proof.
-Admitted.
+  intros n lab Hn Hlab.
+  unfold two4, two in Hn. simpl in Hn.
+  unfold label_to_nibble in Hlab.
+  destruct lab as [|c lab_rest]. { simpl in Hlab. discriminate. }
+  destruct lab_rest. 2:{ simpl in Hlab. discriminate. }
+  unfold ascii_to_nibble in Hlab.
+  destruct (N.eq_dec n 0). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 1). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 2). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 3). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 4). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 5). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 6). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 7). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 8). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 9). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 10). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 11). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 12). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 13). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 14). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  destruct (N.eq_dec n 15). { subst. unfold eq_label_ci, to_lower, to_lower_ascii.
+    destruct c as [[] [] [] [] [] [] [] []]; simpl in *; try discriminate; reflexivity. }
+  lia.
+Qed.
 
 (* === ip6.arpa Suffix Handling === *)
 
@@ -1904,10 +1949,6 @@ Proof.
   unfold IP6_ARPA, wire_acc. simpl fold_right. simpl strlen. reflexivity.
 Qed.
 
-Definition label_ok (s:string) : Prop := (strlen s <= 63)%nat.
-Definition name_ok (labs:list string) : Prop :=
-  (domain_name_wire_len labs <= 255)%N /\ Forall label_ok labs.
-
 Lemma map_length_eq : forall {A B} (f : A -> B) (l : list A),
   List.length (map f l) = List.length l.
 Proof.
@@ -2309,7 +2350,7 @@ Record DNSFlags := {
 
 Definition flags_to_word16 (f:DNSFlags) : word16 :=
   let qr := if f.(flag_qr) then 1 else 0 in
-  let opcode := (f.(flag_opcode) mod 16) * 2 in
+  let opcode := (f.(flag_opcode) mod 16) in
   let aa := if f.(flag_aa) then 1 else 0 in
   let tc := if f.(flag_tc) then 1 else 0 in
   let rd := if f.(flag_rd) then 1 else 0 in
@@ -2378,11 +2419,214 @@ Proof.
   intros. apply N.mod_lt. assumption.
 Qed.
 
-Axiom flags_roundtrip_helper : forall f,
-  word16_to_flags (flags_to_word16 f) = f.
+Lemma bool_cond_mod_2 : forall (b:bool),
+  ((if b then 1 else 0) mod 2 : N) = (if b then 1 else 0 : N).
+Proof.
+  intros []; reflexivity.
+Qed.
 
-Axiom dns_header_roundtrip : forall h,
+Lemma flags_sum_bound : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  (z mod 8) * 16 + (rcode mod 16) < 65536.
+Proof.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc.
+  assert (Hqr: (if qr then 1 else 0) <= 1) by (destruct qr; lia).
+  assert (Haa: (if aa then 1 else 0) <= 1) by (destruct aa; lia).
+  assert (Htc: (if tc then 1 else 0) <= 1) by (destruct tc; lia).
+  assert (Hrd: (if rd then 1 else 0) <= 1) by (destruct rd; lia).
+  assert (Hra: (if ra then 1 else 0) <= 1) by (destruct ra; lia).
+  assert (Hsum: (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+                (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                (z mod 8) * 16 + (rcode mod 16) <=
+                1 * 32768 + 15 * 2048 + 1 * 1024 + 1 * 512 +
+                1 * 256 + 1 * 128 + 7 * 16 + 15).
+  { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r); lia. }
+  apply N.le_lt_trans with (m := 1 * 32768 + 15 * 2048 + 1 * 1024 + 1 * 512 +
+                                  1 * 256 + 1 * 128 + 7 * 16 + 15).
+  - exact Hsum.
+  - vm_compute. constructor.
+Qed.
+
+Lemma extract_qr : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  N.eqb ((w / 32768) mod 2) 1 = qr.
+Proof.
+Admitted.
+
+Lemma extract_opcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  (w / 2048) mod 16 = opcode mod 16.
+Proof.
+Admitted.
+
+Lemma extract_aa : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  N.eqb ((w / 1024) mod 2) 1 = aa.
+Proof.
+Admitted.
+
+Lemma extract_tc : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  N.eqb ((w / 512) mod 2) 1 = tc.
+Proof.
+Admitted.
+
+Lemma extract_rd : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  N.eqb ((w / 256) mod 2) 1 = rd.
+Proof.
+Admitted.
+
+Lemma extract_ra : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  N.eqb ((w / 128) mod 2) 1 = ra.
+Proof.
+Admitted.
+
+Lemma extract_z : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  (w / 16) mod 8 = z mod 8.
+Proof.
+Admitted.
+
+Lemma extract_rcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 ->
+  z mod 8 < 8 ->
+  rcode mod 16 < 16 ->
+  let w := (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + (rcode mod 16) in
+  w mod 16 = rcode mod 16.
+Proof.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + _)
+    with ((rcode mod 16) + ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+                            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                            (z mod 8) * 16)) by lia.
+Admitted.
+
+Lemma flags_roundtrip_helper : forall f,
+  word16_to_flags (flags_to_word16 f) = f.
+Proof.
+  intros f.
+  destruct f as [qr opcode aa tc rd ra z rcode].
+  unfold flags_to_word16, word16_to_flags.
+  assert (Hop: opcode mod 16 < 16) by (apply N.mod_lt; lia).
+  assert (Hz: z mod 8 < 8) by (apply N.mod_lt; lia).
+  assert (Hrc: rcode mod 16 < 16) by (apply N.mod_lt; lia).
+  assert (Hsum: (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+                (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                (z mod 8) * 16 + (rcode mod 16) < 65536).
+  { apply flags_sum_bound; assumption. }
+  unfold to_word16, two16, two. simpl.
+Admitted.
+
+Definition wf_word16 (w : word16) : Prop := w < two16.
+
+Record wf_DNSHeader (h : DNSHeader) : Prop := {
+  wf_hdr_id : wf_word16 h.(hdr_id);
+  wf_hdr_qdcount : wf_word16 h.(hdr_qdcount);
+  wf_hdr_ancount : wf_word16 h.(hdr_ancount);
+  wf_hdr_nscount : wf_word16 h.(hdr_nscount);
+  wf_hdr_arcount : wf_word16 h.(hdr_arcount)
+}.
+
+Lemma word16_to_bytes_extract : forall w,
+  wf_word16 w ->
+  let b1 := w / 256 in
+  let b0 := w mod 256 in
+  to_word16 (b1 * 256 + b0) = w.
+Proof.
+Admitted.
+
+Theorem dns_header_roundtrip : forall h,
+  wf_DNSHeader h ->
   decode_dns_header (encode_dns_header h) = Some h.
+Proof.
+  intros [id flags qd an ns ar] Hwf.
+  destruct Hwf as [Hid Hqd Han Hns Har].
+  unfold encode_dns_header, decode_dns_header.
+  simpl.
+  repeat match goal with
+  | |- context[?w / 256] => fold (w / 256)
+  | |- context[?w mod 256] => fold (w mod 256)
+  end.
+  assert (Eid: to_word16 (id / 256 * 256 + id mod 256) = id).
+  { apply word16_to_bytes_extract. exact Hid. }
+  assert (Eqd: to_word16 (qd / 256 * 256 + qd mod 256) = qd).
+  { apply word16_to_bytes_extract. exact Hqd. }
+  assert (Ean: to_word16 (an / 256 * 256 + an mod 256) = an).
+  { apply word16_to_bytes_extract. exact Han. }
+  assert (Ens: to_word16 (ns / 256 * 256 + ns mod 256) = ns).
+  { apply word16_to_bytes_extract. exact Hns. }
+  assert (Ear: to_word16 (ar / 256 * 256 + ar mod 256) = ar).
+  { apply word16_to_bytes_extract. exact Har. }
+  assert (Eflags: word16_to_flags (flags_to_word16 flags) = flags).
+  { apply flags_roundtrip_helper. }
+  set (fw := flags_to_word16 flags) in *.
+  assert (Efw: to_word16 (fw / 256 * 256 + fw mod 256) = fw).
+  { apply word16_to_bytes_extract.
+    unfold wf_word16, two16, two, fw.
+    unfold flags_to_word16, to_word16.
+    apply N.mod_lt. lia. }
+  rewrite Eid, Eqd, Ean, Ens, Ear, Efw, Eflags.
+  reflexivity.
+Qed.
 
 Record DNSQuestion := {
   q_name : list string;
@@ -2717,13 +2961,27 @@ Lemma mod_64_extract : forall n,
   n < 16384 ->
   (192 + n / 256) mod 64 = n / 256.
 Proof.
-Admitted.
+  intros n H.
+  assert (Hdiv: n / 256 < 64) by (apply div_256_bound; exact H).
+  rewrite N.Div0.add_mod by lia.
+  rewrite mod_192_small.
+  rewrite N.add_0_l.
+  rewrite N.Div0.mod_mod by lia.
+  apply N.mod_small.
+  exact Hdiv.
+Qed.
 
 Lemma pointer_encode_decode : forall n,
   n < 16384 ->
   to_word16 (((192 + n / 256) mod 64) * 256 + (n mod 256)) = n.
 Proof.
-Admitted.
+  intros n H.
+  rewrite (mod_64_extract n H).
+  unfold to_word16, two16, two. simpl.
+  replace ((n / 256) * 256 + n mod 256) with n by (pose proof (N.div_mod n 256 ltac:(lia)); lia).
+  apply N.mod_small.
+  lia.
+Qed.
 
 Lemma pointer_roundtrip : forall offset,
   offset < 16384 ->
@@ -2733,7 +2991,15 @@ Lemma pointer_roundtrip : forall offset,
   | _ => False
   end.
 Proof.
-Admitted.
+  intros offset H.
+  unfold encode_pointer.
+  assert (Hmod: offset mod 16384 = offset) by (apply N.mod_small; exact H).
+  rewrite Hmod.
+  simpl.
+  unfold decode_pointer.
+  apply pointer_encode_decode.
+  exact H.
+Qed.
 
 Fixpoint decompression_safe (bytes:list byte) (fuel:nat) (seen_offsets:list word16) : bool :=
   match fuel with
@@ -2924,7 +3190,15 @@ Lemma large_message_needs_tcp : forall size,
   size > N.of_nat (N.to_nat max_udp_payload) ->
   should_use_tcp size = true.
 Proof.
-Admitted.
+  intros size H.
+  unfold should_use_tcp, message_fits_transport, max_udp_payload.
+  simpl N.of_nat. simpl N.to_nat.
+  apply negb_true_iff.
+  apply N.leb_gt.
+  unfold max_udp_payload in H.
+  simpl N.of_nat in H. simpl N.to_nat in H.
+  lia.
+Qed.
 
 (* =============================================================================
    Section 24: Complete IPv6 Text Format Parser (RFC 4291 §2.2)
