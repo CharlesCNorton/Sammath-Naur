@@ -2453,6 +2453,45 @@ Proof.
   - vm_compute. constructor.
 Qed.
 
+Lemma extract_bool_bit : forall (b : bool) (divisor offset : N),
+  divisor <> 0 ->
+  offset < divisor ->
+  ((if b then 1 else 0) * divisor + offset) / divisor mod 2 = (if b then 1 else 0).
+Proof.
+  intros b divisor offset Hdiv Hoff.
+  destruct b.
+  - simpl (if true then 1 else 0).
+    assert (E: (1 * divisor + offset) / divisor = 1 + offset / divisor).
+    { apply div_add_cancel. exact Hdiv. }
+    rewrite E.
+    rewrite N.div_small by exact Hoff.
+    rewrite N.add_0_r.
+    simpl (if true then 1 else 0).
+    reflexivity.
+  - simpl (if false then 1 else 0).
+    rewrite N.mul_0_l, N.add_0_l.
+    rewrite N.div_small by exact Hoff.
+    simpl (if false then 1 else 0).
+    reflexivity.
+Qed.
+
+Lemma mul16_mod16_zero : forall n, n < 16 -> n * 16 mod 16 = 0.
+Proof.
+  intros n H.
+  replace (n * 16) with (n * 16) by reflexivity.
+  rewrite N.Div0.mod_mul by lia.
+  reflexivity.
+Qed.
+
+Lemma mul2048_mod16_zero : forall n, n * 2048 mod 16 = 0.
+Proof.
+  intros n.
+  replace 2048 with (128 * 16) by reflexivity.
+  rewrite N.mul_assoc.
+  rewrite N.Div0.mod_mul by lia.
+  reflexivity.
+Qed.
+
 Lemma extract_qr : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
   z mod 8 < 8 ->
@@ -2463,7 +2502,54 @@ Lemma extract_qr : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   N.eqb ((w / 32768) mod 2) 1 = qr.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  assert (Hsum: (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+                (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                (z mod 8) * 16 + (rcode mod 16) < 65536).
+  { apply flags_sum_bound; assumption. }
+  destruct qr; simpl (if true then 1 else 0); simpl (if false then 1 else 0).
+  - replace (1 * 32768 + (opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+             (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+             (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16)
+       with (((opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+              (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+              (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16) + 1 * 32768) by lia.
+    rewrite N.div_add by lia.
+    assert (Hlow: (opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+                  (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+                  (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 < 32768).
+    { assert (Hmax: (opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+                    (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+                    (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 <=
+                    15 * 2048 + 1 * 1024 + 1 * 512 + 1 * 256 + 1 * 128 + 7 * 16 + 15).
+      { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r);
+        try (destruct aa; lia); try (destruct tc; lia); try (destruct rd; lia);
+        try (destruct ra; lia); lia. }
+      lia. }
+    rewrite N.div_small by exact Hlow.
+    simpl. reflexivity.
+  - replace (0 * 32768 + (opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+             (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+             (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16)
+       with ((opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+             (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+             (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16) by lia.
+    assert (Hlow: (opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+                  (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+                  (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 < 32768).
+    { assert (Hmax: (opcode mod 16) * 2048 + (if aa then 1 else 0) * 1024 +
+                    (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+                    (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 <=
+                    15 * 2048 + 1 * 1024 + 1 * 512 + 1 * 256 + 1 * 128 + 7 * 16 + 15).
+      { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r);
+        try (destruct aa; lia); try (destruct tc; lia); try (destruct rd; lia);
+        try (destruct ra; lia); lia. }
+      lia. }
+    rewrite N.div_small by exact Hlow.
+    simpl. reflexivity.
+Qed.
 
 Lemma extract_opcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2475,7 +2561,34 @@ Lemma extract_opcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   (w / 2048) mod 16 = opcode mod 16.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + rcode mod 16)
+     with (((if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            (z mod 8) * 16 + rcode mod 16) +
+           ((if qr then 1 else 0) * 16 + opcode mod 16) * 2048) by lia.
+  rewrite N.div_add by lia.
+  assert (Hlow: (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                (z mod 8) * 16 + rcode mod 16 < 2048).
+  { assert (Hmax: (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                  (z mod 8) * 16 + rcode mod 16 <=
+                  1 * 1024 + 1 * 512 + 1 * 256 + 1 * 128 + 7 * 16 + 15).
+    { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r);
+      try (destruct aa; lia); try (destruct tc; lia); try (destruct rd; lia);
+      try (destruct ra; lia); lia. }
+    lia. }
+  rewrite N.div_small by exact Hlow.
+  simpl.
+  replace ((if qr then 1 else 0) * 16 + opcode mod 16) with (opcode mod 16 + (if qr then 1 else 0) * 16) by lia.
+  rewrite N.Div0.mod_add by lia.
+  apply N.mod_small. exact Hop.
+Qed.
 
 Lemma extract_aa : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2487,7 +2600,38 @@ Lemma extract_aa : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   N.eqb ((w / 1024) mod 2) 1 = aa.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + rcode mod 16)
+     with (((if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+            (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16) +
+           ((if qr then 1 else 0) * 32 + (opcode mod 16) * 2 + (if aa then 1 else 0)) * 1024) by lia.
+  rewrite N.div_add by lia.
+  assert (Hlow: (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+                (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 < 1024).
+  { assert (Hmax: (if tc then 1 else 0) * 512 + (if rd then 1 else 0) * 256 +
+                  (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 <=
+                  1 * 512 + 1 * 256 + 1 * 128 + 7 * 16 + 15).
+    { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r);
+      try (destruct tc; lia); try (destruct rd; lia); try (destruct ra; lia); lia. }
+    lia. }
+  rewrite N.div_small by exact Hlow.
+  assert (Heven: ((if qr then 1 else 0) * 32 + (opcode mod 16) * 2) mod 2 = 0).
+  { assert (E: (if qr then 1 else 0) * 32 + opcode mod 16 * 2 =
+                ((if qr then 1 else 0) * 16 + opcode mod 16) * 2) by lia.
+    rewrite E. rewrite N.Div0.mod_mul by lia. reflexivity. }
+  destruct aa; simpl.
+  - replace ((if qr then 1 else 0) * 32 + opcode mod 16 * 2 + 1)
+       with (((if qr then 1 else 0) * 32 + opcode mod 16 * 2) + 1) by lia.
+    rewrite N.Div0.add_mod by lia.
+    rewrite Heven. simpl. reflexivity.
+  - replace ((if qr then 1 else 0) * 32 + opcode mod 16 * 2 + 0)
+       with ((if qr then 1 else 0) * 32 + opcode mod 16 * 2) by lia.
+    rewrite Heven. reflexivity.
+Qed.
 
 Lemma extract_tc : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2499,7 +2643,38 @@ Lemma extract_tc : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   N.eqb ((w / 512) mod 2) 1 = tc.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + rcode mod 16)
+     with (((if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            (z mod 8) * 16 + rcode mod 16) +
+           ((if qr then 1 else 0) * 64 + (opcode mod 16) * 4 + (if aa then 1 else 0) * 2 + (if tc then 1 else 0)) * 512) by lia.
+  rewrite N.div_add by lia.
+  assert (Hlow: (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                (z mod 8) * 16 + rcode mod 16 < 512).
+  { assert (Hmax: (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                  (z mod 8) * 16 + rcode mod 16 <=
+                  1 * 256 + 1 * 128 + 7 * 16 + 15).
+    { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r);
+      try (destruct rd; lia); try (destruct ra; lia); lia. }
+    lia. }
+  rewrite N.div_small by exact Hlow.
+  assert (Heven: ((if qr then 1 else 0) * 64 + (opcode mod 16) * 4 + (if aa then 1 else 0) * 2) mod 2 = 0).
+  { assert (E: (if qr then 1 else 0) * 64 + opcode mod 16 * 4 + (if aa then 1 else 0) * 2 =
+                ((if qr then 1 else 0) * 32 + opcode mod 16 * 2 + (if aa then 1 else 0)) * 2) by lia.
+    rewrite E. rewrite N.Div0.mod_mul by lia. reflexivity. }
+  destruct tc; simpl.
+  - replace ((if qr then 1 else 0) * 64 + opcode mod 16 * 4 + (if aa then 1 else 0) * 2 + 1)
+       with (((if qr then 1 else 0) * 64 + opcode mod 16 * 4 + (if aa then 1 else 0) * 2) + 1) by lia.
+    rewrite N.Div0.add_mod by lia.
+    rewrite Heven. simpl. reflexivity.
+  - replace ((if qr then 1 else 0) * 64 + opcode mod 16 * 4 + (if aa then 1 else 0) * 2 + 0)
+       with ((if qr then 1 else 0) * 64 + opcode mod 16 * 4 + (if aa then 1 else 0) * 2) by lia.
+    rewrite Heven. reflexivity.
+Qed.
 
 Lemma extract_rd : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2511,7 +2686,35 @@ Lemma extract_rd : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   N.eqb ((w / 256) mod 2) 1 = rd.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + rcode mod 16)
+     with (((if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16) +
+           ((if qr then 1 else 0) * 128 + (opcode mod 16) * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2 + (if rd then 1 else 0)) * 256) by lia.
+  rewrite N.div_add by lia.
+  assert (Hlow: (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 < 256).
+  { assert (Hmax: (if ra then 1 else 0) * 128 + (z mod 8) * 16 + rcode mod 16 <=
+                  1 * 128 + 7 * 16 + 15).
+    { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r);
+      try (destruct ra; lia); lia. }
+    lia. }
+  rewrite N.div_small by exact Hlow.
+  assert (Heven: ((if qr then 1 else 0) * 128 + (opcode mod 16) * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2) mod 2 = 0).
+  { assert (E: (if qr then 1 else 0) * 128 + opcode mod 16 * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2 =
+                ((if qr then 1 else 0) * 64 + opcode mod 16 * 4 + (if aa then 1 else 0) * 2 + (if tc then 1 else 0)) * 2) by lia.
+    rewrite E. rewrite N.Div0.mod_mul by lia. reflexivity. }
+  destruct rd; simpl.
+  - replace ((if qr then 1 else 0) * 128 + opcode mod 16 * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2 + 1)
+       with (((if qr then 1 else 0) * 128 + opcode mod 16 * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2) + 1) by lia.
+    rewrite N.Div0.add_mod by lia.
+    rewrite Heven. simpl. reflexivity.
+  - replace ((if qr then 1 else 0) * 128 + opcode mod 16 * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2 + 0)
+       with ((if qr then 1 else 0) * 128 + opcode mod 16 * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2) by lia.
+    rewrite Heven. reflexivity.
+Qed.
 
 Lemma extract_ra : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2523,7 +2726,33 @@ Lemma extract_ra : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   N.eqb ((w / 128) mod 2) 1 = ra.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + rcode mod 16)
+     with (((z mod 8) * 16 + rcode mod 16) +
+           ((if qr then 1 else 0) * 256 + (opcode mod 16) * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2 + (if ra then 1 else 0)) * 128) by lia.
+  rewrite N.div_add by lia.
+  assert (Hlow: (z mod 8) * 16 + rcode mod 16 < 128).
+  { assert (Hmax: (z mod 8) * 16 + rcode mod 16 <= 7 * 16 + 15).
+    { repeat (apply N.add_le_mono || apply N.mul_le_mono_nonneg_r); lia. }
+    lia. }
+  rewrite N.div_small by exact Hlow.
+  assert (Heven: ((if qr then 1 else 0) * 256 + (opcode mod 16) * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2) mod 2 = 0).
+  { assert (E: (if qr then 1 else 0) * 256 + opcode mod 16 * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2 =
+                ((if qr then 1 else 0) * 128 + opcode mod 16 * 8 + (if aa then 1 else 0) * 4 + (if tc then 1 else 0) * 2 + (if rd then 1 else 0)) * 2) by lia.
+    rewrite E. rewrite N.Div0.mod_mul by lia. reflexivity. }
+  destruct ra; simpl.
+  - replace ((if qr then 1 else 0) * 256 + opcode mod 16 * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2 + 1)
+       with (((if qr then 1 else 0) * 256 + opcode mod 16 * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2) + 1) by lia.
+    rewrite N.Div0.add_mod by lia.
+    rewrite Heven. simpl. reflexivity.
+  - replace ((if qr then 1 else 0) * 256 + opcode mod 16 * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2 + 0)
+       with ((if qr then 1 else 0) * 256 + opcode mod 16 * 16 + (if aa then 1 else 0) * 8 + (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2) by lia.
+    rewrite Heven. reflexivity.
+Qed.
 
 Lemma extract_z : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2535,7 +2764,33 @@ Lemma extract_z : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   (w / 16) mod 8 = z mod 8.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+           (z mod 8) * 16 + rcode mod 16)
+     with ((rcode mod 16) +
+           ((if qr then 1 else 0) * 2048 + (opcode mod 16) * 128 + (if aa then 1 else 0) * 64 +
+            (if tc then 1 else 0) * 32 + (if rd then 1 else 0) * 16 + (if ra then 1 else 0) * 8 + (z mod 8)) * 16) by lia.
+  rewrite N.div_add by lia.
+  assert (Hlow: rcode mod 16 < 16) by exact Hrc.
+  rewrite N.div_small by exact Hlow.
+  simpl.
+  assert (Hmult8: ((if qr then 1 else 0) * 2048 + (opcode mod 16) * 128 + (if aa then 1 else 0) * 64 +
+                    (if tc then 1 else 0) * 32 + (if rd then 1 else 0) * 16 + (if ra then 1 else 0) * 8) mod 8 = 0).
+  { assert (E: (if qr then 1 else 0) * 2048 + opcode mod 16 * 128 + (if aa then 1 else 0) * 64 +
+                (if tc then 1 else 0) * 32 + (if rd then 1 else 0) * 16 + (if ra then 1 else 0) * 8 =
+                ((if qr then 1 else 0) * 256 + opcode mod 16 * 16 + (if aa then 1 else 0) * 8 +
+                 (if tc then 1 else 0) * 4 + (if rd then 1 else 0) * 2 + (if ra then 1 else 0)) * 8) by lia.
+    rewrite E. rewrite N.Div0.mod_mul by lia. reflexivity. }
+  replace ((if qr then 1 else 0) * 2048 + opcode mod 16 * 128 + (if aa then 1 else 0) * 64 +
+           (if tc then 1 else 0) * 32 + (if rd then 1 else 0) * 16 + (if ra then 1 else 0) * 8 + z mod 8)
+     with (((if qr then 1 else 0) * 2048 + opcode mod 16 * 128 + (if aa then 1 else 0) * 64 +
+            (if tc then 1 else 0) * 32 + (if rd then 1 else 0) * 16 + (if ra then 1 else 0) * 8) + z mod 8) by lia.
+  rewrite N.Div0.add_mod by lia.
+  rewrite Hmult8. simpl. rewrite N.Div0.mod_mod by lia. apply N.mod_small. exact Hz.
+Qed.
 
 Lemma extract_rcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 ->
@@ -2547,16 +2802,6 @@ Lemma extract_rcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   w mod 16 = rcode mod 16.
 Proof.
-  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
-  unfold w.
-  replace ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
-           (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
-           (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
-           (z mod 8) * 16 + _)
-    with ((rcode mod 16) + ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
-                            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
-                            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
-                            (z mod 8) * 16)) by lia.
 Admitted.
 
 Lemma flags_roundtrip_helper : forall f,
@@ -2574,6 +2819,17 @@ Proof.
                 (z mod 8) * 16 + (rcode mod 16) < 65536).
   { apply flags_sum_bound; assumption. }
   unfold to_word16, two16, two. simpl.
+  set (w := ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+             (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+             (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+             (z mod 8) * 16 + rcode mod 16) mod 65536).
+  assert (Hw: w = (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+                  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                  (z mod 8) * 16 + rcode mod 16).
+  { unfold w. apply N.mod_small. exact Hsum. }
+  rewrite <- Hw.
+  f_equal.
 Admitted.
 
 Definition wf_word16 (w : word16) : Prop := w < two16.
@@ -2907,7 +3163,7 @@ Proof. reflexivity. Qed.
 Example loopback_check : is_loopback ipv6_loopback = true.
 Proof. reflexivity. Qed.
 
-Example ptr_aaaa_bidirectional : forall (ip:word128) (name:list string) (ttl:word32),
+Example ptr_aaaa_bidirectional : forall (ip:word128),
   wf_ipv6 ip ->
   reverse_to_ipv6 (ipv6_to_reverse ip) = Some ip.
 Proof. intros. apply reverse_bijective. assumption. Qed.
