@@ -2802,6 +2802,147 @@ Lemma extract_rcode : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
            (z mod 8) * 16 + (rcode mod 16) in
   w mod 16 = rcode mod 16.
 Proof.
+  intros qr aa tc rd ra opcode z rcode Hop Hz Hrc w.
+  unfold w.
+  assert (Hmult16: ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
+                     (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                     (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                     (z mod 8) * 16) mod 16 = 0).
+  { assert (E: (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+                (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                z mod 8 * 16 =
+                ((if qr then 1 else 0) * 2048 + opcode mod 16 * 128 +
+                 (if aa then 1 else 0) * 64 + (if tc then 1 else 0) * 32 +
+                 (if rd then 1 else 0) * 16 + (if ra then 1 else 0) * 8 +
+                 z mod 8) * 16) by lia.
+    rewrite E. rewrite N.Div0.mod_mul by lia. reflexivity. }
+  rewrite N.Div0.add_mod by lia.
+  rewrite Hmult16. simpl.
+  rewrite N.Div0.mod_mod by lia.
+  apply N.mod_small. exact Hrc.
+Qed.
+
+Lemma extract_qr_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 32768 mod 2 =? 1)%N = qr.
+Proof.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_qr; assumption.
+Qed.
+
+Lemma extract_opcode_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 2048 mod 16) = opcode mod 16.
+Proof.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_opcode; assumption.
+Qed.
+
+Lemma extract_aa_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 1024 mod 2 =? 1)%N = aa.
+Proof.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_aa; assumption.
+Qed.
+
+
+Lemma extract_rd_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 256 mod 2 =? 1)%N = rd.
+Proof.
+Admitted.
+
+Lemma extract_ra_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 128 mod 2 =? 1)%N = ra.
+Proof.
+Admitted.
+
+Lemma extract_z_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 16 mod 8) = z mod 8.
+Proof.
+Admitted.
+
+Lemma extract_rcode_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+   (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+   (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+   z mod 8 * 16 + rcode mod 16) mod 65536 mod 16 = rcode mod 16.
+Proof.
 Admitted.
 
 Lemma flags_roundtrip_helper : forall f,
@@ -2819,16 +2960,6 @@ Proof.
                 (z mod 8) * 16 + (rcode mod 16) < 65536).
   { apply flags_sum_bound; assumption. }
   unfold to_word16, two16, two. simpl.
-  set (w := ((if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
-             (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
-             (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
-             (z mod 8) * 16 + rcode mod 16) mod 65536).
-  assert (Hw: w = (if qr then 1 else 0) * 32768 + (opcode mod 16) * 2048 +
-                  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
-                  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
-                  (z mod 8) * 16 + rcode mod 16).
-  { unfold w. apply N.mod_small. exact Hsum. }
-  rewrite <- Hw.
   f_equal.
 Admitted.
 
@@ -2848,7 +2979,14 @@ Lemma word16_to_bytes_extract : forall w,
   let b0 := w mod 256 in
   to_word16 (b1 * 256 + b0) = w.
 Proof.
-Admitted.
+  intros w Hw.
+  unfold wf_word16, to_word16, two16, two in *.
+  simpl in *.
+  rewrite N.mul_comm.
+  rewrite <- N.div_mod by lia.
+  apply N.mod_small.
+  exact Hw.
+Qed.
 
 Theorem dns_header_roundtrip : forall h,
   wf_DNSHeader h ->
