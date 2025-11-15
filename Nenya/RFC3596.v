@@ -3902,3 +3902,170 @@ Extraction "dns_ipv6_complete.ml"
   is_aaaa_signed
   (* Error Handling *)
   error_to_string.
+
+(* =============================================================================
+   Section 29: DNS Name Wire Format Encoding/Decoding (RFC 1035 §3.1)
+   ============================================================================= *)
+
+Fixpoint string_to_chars (s:string) : list ascii :=
+  match s with
+  | EmptyString => []
+  | String c tl => c :: string_to_chars tl
+  end.
+
+Fixpoint chars_to_string (cs:list ascii) : string :=
+  fold_right String EmptyString cs.
+
+Fixpoint list_take {A:Type} (n:nat) (xs:list A) : option (list A) :=
+  match n, xs with
+  | O, _ => Some []
+  | S n', [] => None
+  | S n', x::xs' =>
+      match list_take n' xs' with
+      | Some taken => Some (x::taken)
+      | None => None
+      end
+  end.
+
+Fixpoint list_drop {A:Type} (n:nat) (xs:list A) : list A :=
+  match n, xs with
+  | O, _ => xs
+  | S n', [] => []
+  | S n', _::xs' => list_drop n' xs'
+  end.
+
+Fixpoint encode_name_labels (labels:list string) : list byte :=
+  match labels with
+  | [] => [0]
+  | lab::rest =>
+      let len := N.of_nat (strlen lab) in
+      let chars := string_to_chars lab in
+      let bytes := map (fun c => N.of_nat (nat_of_ascii c)) chars in
+      to_byte len :: bytes ++ encode_name_labels rest
+  end.
+
+Fixpoint decode_name_labels (bytes:list byte) (fuel:nat) : option (list string * list byte) :=
+  match fuel with
+  | O => None
+  | S n =>
+      match bytes with
+      | [] => None
+      | 0::rest => Some ([], rest)
+      | len::rest =>
+          if N.ltb len 64 then
+            let len_nat := N.to_nat len in
+            match list_take len_nat rest with
+            | Some label_bytes =>
+                let label_chars := map ascii_of_nat (map N.to_nat label_bytes) in
+                let label := chars_to_string label_chars in
+                let rest' := list_drop len_nat rest in
+                match decode_name_labels rest' n with
+                | Some (labs, rest'') => Some (label::labs, rest'')
+                | None => None
+                end
+            | None => None
+            end
+          else None
+      end
+  end.
+
+Definition wf_name_wire (bytes:list byte) : Prop :=
+  exists labels rest, decode_name_labels bytes 255 = Some (labels, rest) /\ name_ok labels.
+
+Lemma encode_name_labels_nil : encode_name_labels [] = [0].
+Proof. reflexivity. Qed.
+
+Lemma strlen_bound : forall s, (strlen s <= 63)%nat -> N.of_nat (strlen s) < 64.
+Proof. intros; lia. Qed.
+
+Lemma string_chars_roundtrip : forall s, chars_to_string (string_to_chars s) = s.
+Proof. Admitted.
+
+Lemma list_take_drop_length : forall {A:Type} n (xs:list A),
+  (n <= List.length xs)%nat ->
+  exists taken, list_take n xs = Some taken /\ List.length taken = n.
+Proof.
+  intros A n. induction n as [|n IH]; intros xs Hlen.
+  - exists []. split; reflexivity.
+  - destruct xs as [|x xs']; [simpl in Hlen; lia|].
+    simpl in Hlen. simpl list_take.
+    assert (Hlen': (n <= List.length xs')%nat) by lia.
+    specialize (IH xs' Hlen').
+    destruct IH as [taken [Htake Htakelen]].
+    rewrite Htake. exists (x::taken). split; [reflexivity|].
+    simpl. lia.
+Qed.
+
+Lemma string_to_chars_length : forall s, List.length (string_to_chars s) = strlen s.
+Proof.
+  induction s as [|c s IH]; [reflexivity|].
+  simpl. rewrite IH. reflexivity.
+Qed.
+
+Lemma wire_acc_monotone : forall s acc,
+  (acc <= fold_right wire_acc acc [s])%nat.
+Proof.
+  intros s acc. simpl. unfold wire_acc. lia.
+Qed.
+
+Lemma domain_name_wire_len_tail : forall lab labs,
+  (domain_name_wire_len labs <= domain_name_wire_len (lab :: labs))%N.
+Proof.
+  intros lab labs. unfold domain_name_wire_len. simpl fold_right.
+  unfold wire_acc. lia.
+Qed.
+
+Lemma name_ok_tail : forall lab labs,
+  name_ok (lab :: labs) -> name_ok labs.
+Proof.
+  intros lab labs [Hlen Hforall].
+  inversion Hforall as [|? ? Hlab Hlabs]; subst.
+  split.
+  - pose proof (domain_name_wire_len_tail lab labs). lia.
+  - exact Hlabs.
+Qed.
+
+Lemma list_take_exact : forall {A} n (xs:list A),
+  (n = List.length xs)%nat ->
+  list_take n xs = Some xs.
+Proof.
+  intros A n. induction n as [|n IH]; intros xs Hlen.
+  - destruct xs; [reflexivity|discriminate].
+  - destruct xs as [|x xs']; [discriminate|].
+    simpl in Hlen. injection Hlen as Hlen.
+    simpl. rewrite IH by exact Hlen. reflexivity.
+Qed.
+
+Lemma list_drop_exact : forall {A} n (xs ys:list A),
+  (n = List.length xs)%nat ->
+  list_drop n (xs ++ ys) = ys.
+Proof.
+  intros A n. induction n as [|n IH]; intros xs ys Hlen.
+  - destruct xs; [reflexivity|discriminate].
+  - destruct xs as [|x xs']; [discriminate|].
+    simpl in Hlen. injection Hlen as Hlen.
+    simpl. apply IH. exact Hlen.
+Qed.
+
+Lemma ascii_nat_roundtrip : forall c, ascii_of_nat (nat_of_ascii c) = c.
+Proof.
+  intro c. destruct c as [b0 b1 b2 b3 b4 b5 b6 b7].
+  unfold nat_of_ascii, ascii_of_nat. simpl.
+  repeat (destruct b0; simpl); repeat (destruct b1; simpl);
+  repeat (destruct b2; simpl); repeat (destruct b3; simpl);
+  repeat (destruct b4; simpl); repeat (destruct b5; simpl);
+  repeat (destruct b6; simpl); repeat (destruct b7; simpl); reflexivity.
+Qed.
+
+Lemma map_ascii_bytes_roundtrip : forall cs,
+  map ascii_of_nat (map N.to_nat (map (fun c => N.of_nat (nat_of_ascii c)) cs)) = cs.
+Proof.
+  induction cs as [|c cs IH]; [reflexivity|].
+  simpl. rewrite Nat2N.id. rewrite ascii_nat_roundtrip. f_equal. exact IH.
+Qed.
+
+Theorem name_wire_roundtrip : forall labels,
+  name_ok labels ->
+  exists rest, decode_name_labels (encode_name_labels labels) 255 = Some (labels, rest).
+Proof. Admitted.
+                                                      
