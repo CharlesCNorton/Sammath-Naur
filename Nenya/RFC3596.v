@@ -2892,6 +2892,28 @@ Proof.
   apply extract_aa; assumption.
 Qed.
 
+Lemma extract_tc_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
+  opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
+  (if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+  (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+  (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+  z mod 8 * 16 + rcode mod 16 < 65536 ->
+  (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+    (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+    z mod 8 * 16 + rcode mod 16) mod 65536 / 512 mod 2 =? 1)%N = tc.
+Proof.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_tc; assumption.
+Qed.
 
 Lemma extract_rd_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
@@ -2985,12 +3007,22 @@ Proof.
   apply extract_rcode; assumption.
 Qed.
 
+Definition normalize_flags (f : DNSFlags) : DNSFlags :=
+  {| flag_qr := f.(flag_qr);
+     flag_opcode := f.(flag_opcode) mod 16;
+     flag_aa := f.(flag_aa);
+     flag_tc := f.(flag_tc);
+     flag_rd := f.(flag_rd);
+     flag_ra := f.(flag_ra);
+     flag_z := f.(flag_z) mod 8;
+     flag_rcode := f.(flag_rcode) mod 16 |}.
+
 Lemma flags_roundtrip_helper : forall f,
-  word16_to_flags (flags_to_word16 f) = f.
+  word16_to_flags (flags_to_word16 f) = normalize_flags f.
 Proof.
   intros f.
   destruct f as [qr opcode aa tc rd ra z rcode].
-  unfold flags_to_word16, word16_to_flags.
+  unfold flags_to_word16, word16_to_flags, normalize_flags.
   assert (Hop: opcode mod 16 < 16) by (apply N.mod_lt; lia).
   assert (Hz: z mod 8 < 8) by (apply N.mod_lt; lia).
   assert (Hrc: rcode mod 16 < 16) by (apply N.mod_lt; lia).
@@ -2999,9 +3031,28 @@ Proof.
                 (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
                 (z mod 8) * 16 + (rcode mod 16) < 65536).
   { apply flags_sum_bound; assumption. }
-  unfold to_word16, two16, two. simpl.
-  f_equal.
-Admitted.
+  set (w := to_word16 ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+                       (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+                       (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+                       z mod 8 * 16 + rcode mod 16)).
+  assert (Eq_qr: N.eqb ((w / 32768) mod 2) 1 = qr).
+  { subst w. apply extract_qr_mod; assumption. }
+  assert (Eq_opcode: (w / 2048) mod 16 = opcode mod 16).
+  { subst w. apply extract_opcode_mod; assumption. }
+  assert (Eq_aa: N.eqb ((w / 1024) mod 2) 1 = aa).
+  { subst w. apply extract_aa_mod; assumption. }
+  assert (Eq_tc: N.eqb ((w / 512) mod 2) 1 = tc).
+  { subst w. apply extract_tc_mod; assumption. }
+  assert (Eq_rd: N.eqb ((w / 256) mod 2) 1 = rd).
+  { subst w. apply extract_rd_mod; assumption. }
+  assert (Eq_ra: N.eqb ((w / 128) mod 2) 1 = ra).
+  { subst w. apply extract_ra_mod; assumption. }
+  assert (Eq_z: (w / 16) mod 8 = z mod 8).
+  { subst w. apply extract_z_mod; assumption. }
+  assert (Eq_rcode: w mod 16 = rcode mod 16).
+  { subst w. apply extract_rcode_mod; assumption. }
+  f_equal; assumption.
+Qed.
 
 Definition wf_word16 (w : word16) : Prop := w < two16.
 
@@ -3010,7 +3061,8 @@ Record wf_DNSHeader (h : DNSHeader) : Prop := {
   wf_hdr_qdcount : wf_word16 h.(hdr_qdcount);
   wf_hdr_ancount : wf_word16 h.(hdr_ancount);
   wf_hdr_nscount : wf_word16 h.(hdr_nscount);
-  wf_hdr_arcount : wf_word16 h.(hdr_arcount)
+  wf_hdr_arcount : wf_word16 h.(hdr_arcount);
+  wf_hdr_flags_normalized : normalize_flags h.(hdr_flags) = h.(hdr_flags)
 }.
 
 Lemma word16_to_bytes_extract : forall w,
@@ -3033,7 +3085,7 @@ Theorem dns_header_roundtrip : forall h,
   decode_dns_header (encode_dns_header h) = Some h.
 Proof.
   intros [id flags qd an ns ar] Hwf.
-  destruct Hwf as [Hid Hqd Han Hns Har].
+  destruct Hwf as [Hid Hqd Han Hns Har Hflags_norm].
   unfold encode_dns_header, decode_dns_header.
   simpl.
   repeat match goal with
@@ -3051,7 +3103,7 @@ Proof.
   assert (Ear: to_word16 (ar / 256 * 256 + ar mod 256) = ar).
   { apply word16_to_bytes_extract. exact Har. }
   assert (Eflags: word16_to_flags (flags_to_word16 flags) = flags).
-  { apply flags_roundtrip_helper. }
+  { rewrite flags_roundtrip_helper. exact Hflags_norm. }
   set (fw := flags_to_word16 flags) in *.
   assert (Efw: to_word16 (fw / 256 * 256 + fw mod 256) = fw).
   { apply word16_to_bytes_extract.
