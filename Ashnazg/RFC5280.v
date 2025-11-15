@@ -244,6 +244,15 @@ Fixpoint string_to_bytes (s : string) : list byte :=
   | String c rest => N.of_nat (Ascii.nat_of_ascii c) :: string_to_bytes rest
   end.
 
+(* Bytes to string conversion *)
+Fixpoint bytes_to_string (bs : list byte) : string :=
+  match bs with
+  | [] => EmptyString
+  | b :: rest =>
+      let c := Ascii.ascii_of_nat (N.to_nat b) in
+      String c (bytes_to_string rest)
+  end.
+
 (* Encode length in DER format *)
 Fixpoint encode_bytes_helper (n : N) (fuel : nat) : list byte :=
   match fuel with
@@ -414,6 +423,49 @@ Definition decode_octet_string (bytes : list byte) : option (list byte) :=
   match decode_tlv bytes with
   | Some (tag, value, _) =>
       if byte_eq tag ASN1_OCTET_STRING then Some value
+      else None
+  | None => None
+  end.
+
+(* Decode OID subidentifiers (base-128 encoding) *)
+Fixpoint decode_oid_subidentifiers (bytes : list byte) (fuel : nat) : list N :=
+  match fuel with
+  | O => []
+  | S fuel' =>
+      match bytes with
+      | [] => []
+      | b :: rest =>
+          if N.ltb b 128 then
+            b :: decode_oid_subidentifiers rest fuel'
+          else
+            let fix decode_multibyte (acc : N) (bs : list byte) (f : nat) : list N :=
+              match f with
+              | O => []
+              | S f' =>
+                  match bs with
+                  | [] => [acc]
+                  | b' :: bs' =>
+                      if N.ltb b' 128 then
+                        (acc * 128 + b') :: decode_oid_subidentifiers bs' f'
+                      else
+                        decode_multibyte (acc * 128 + (b' - 128)) bs' f'
+                  end
+              end in
+            decode_multibyte (b - 128) rest fuel'
+      end
+  end.
+
+Definition decode_oid (bytes : list byte) : option OID :=
+  match decode_tlv bytes with
+  | Some (tag, value, _) =>
+      if byte_eq tag ASN1_OID then
+        match value with
+        | [] => Some []
+        | first :: rest =>
+            let x := N.div first 40 in
+            let y := N.modulo first 40 in
+            Some (x :: y :: decode_oid_subidentifiers rest 50)
+        end
       else None
   | None => None
   end.
@@ -592,8 +644,47 @@ Definition decode_basic_constraints (bytes : list byte) : option BasicConstraint
       end
   end.
 
+(* Helper: decode a single GeneralName from context-specific tag *)
+Definition decode_general_name (tag : byte) (value : list byte) : option GeneralName :=
+  if byte_eq tag 129 then  (* [1] RFC822Name *)
+    Some (GN_RFC822Name (bytes_to_string value))
+  else if byte_eq tag 130 then  (* [2] DNSName *)
+    Some (GN_DNSName (bytes_to_string value))
+  else if byte_eq tag 134 then  (* [6] URI *)
+    Some (GN_URI (bytes_to_string value))
+  else if byte_eq tag 135 then  (* [7] IPAddress *)
+    Some (GN_IPAddress value)
+  else
+    None.  (* Other types not yet implemented *)
+
+(* Helper: decode multiple GeneralNames from a sequence *)
+Fixpoint decode_general_names (bytes : list byte) (fuel : nat) : list GeneralName :=
+  match fuel with
+  | O => []
+  | S fuel' =>
+      match bytes with
+      | [] => []
+      | _ =>
+          match decode_tlv bytes with
+          | None => []
+          | Some (tag, value, remaining) =>
+              match decode_general_name tag value with
+              | None => decode_general_names remaining fuel'
+              | Some gn => gn :: decode_general_names remaining fuel'
+              end
+          end
+      end
+  end.
+
 Definition decode_subject_alt_names (bytes : list byte) : list GeneralName :=
-  [].
+  match decode_octet_string bytes with
+  | None => []
+  | Some inner =>
+      match decode_sequence inner with
+      | None => []
+      | Some seq_contents => decode_general_names seq_contents 20
+      end
+  end.
 
 Definition is_ca_cert (cert : Certificate) : bool :=
   match get_extension OID_BASIC_CONSTRAINTS cert.(tbsCertificate).(extensions) with
@@ -624,8 +715,35 @@ Definition decode_authority_key_identifier (bytes : list byte) : option Authorit
 (* Extended Key Usage *)
 Definition ExtendedKeyUsage := list OID.
 
+(* Helper: decode multiple OIDs from a byte sequence *)
+Fixpoint decode_oid_sequence (bytes : list byte) (fuel : nat) : list OID :=
+  match fuel with
+  | O => []
+  | S fuel' =>
+      match bytes with
+      | [] => []
+      | _ =>
+          match decode_oid bytes with
+          | None => []
+          | Some oid =>
+              match decode_tlv bytes with
+              | None => [oid]
+              | Some (_, value, remaining) =>
+                  oid :: decode_oid_sequence remaining fuel'
+              end
+          end
+      end
+  end.
+
 Definition decode_extended_key_usage (bytes : list byte) : option ExtendedKeyUsage :=
-  None.
+  match decode_octet_string bytes with
+  | None => None
+  | Some inner =>
+      match decode_sequence inner with
+      | None => None
+      | Some seq_contents => Some (decode_oid_sequence seq_contents 20)
+      end
+  end.
 
 Definition encode_extended_key_usage (eku : ExtendedKeyUsage) : list byte :=
   encode_octet_string (encode_sequence (flat_map encode_oid eku)).
@@ -688,7 +806,10 @@ Definition decode_policy_mappings (bytes : list byte) : option PolicyMappings :=
 Definition InhibitAnyPolicy := N.
 
 Definition decode_inhibit_any_policy (bytes : list byte) : option InhibitAnyPolicy :=
-  None.
+  match decode_octet_string bytes with
+  | None => None
+  | Some inner => decode_integer inner
+  end.
 
 (* Name Constraints *)
 Record NameConstraints : Type := mkNameConstraints {
