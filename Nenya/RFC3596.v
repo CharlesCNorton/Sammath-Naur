@@ -2904,7 +2904,17 @@ Lemma extract_rd_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
     (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
     z mod 8 * 16 + rcode mod 16) mod 65536 / 256 mod 2 =? 1)%N = rd.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_rd; assumption.
+Qed.
 
 Lemma extract_ra_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
@@ -2917,7 +2927,17 @@ Lemma extract_ra_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
     (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
     z mod 8 * 16 + rcode mod 16) mod 65536 / 128 mod 2 =? 1)%N = ra.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_ra; assumption.
+Qed.
 
 Lemma extract_z_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
@@ -2930,7 +2950,17 @@ Lemma extract_z_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
     (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
     z mod 8 * 16 + rcode mod 16) mod 65536 / 16 mod 8) = z mod 8.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_z; assumption.
+Qed.
 
 Lemma extract_rcode_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
   opcode mod 16 < 16 -> z mod 8 < 8 -> rcode mod 16 < 16 ->
@@ -2943,7 +2973,17 @@ Lemma extract_rcode_mod : forall (qr aa tc rd ra : bool) (opcode z rcode : N),
    (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
    z mod 8 * 16 + rcode mod 16) mod 65536 mod 16 = rcode mod 16.
 Proof.
-Admitted.
+  intros qr aa tc rd ra opcode z rcode H1 H2 H3 H4.
+  replace (((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+            (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+            (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+            z mod 8 * 16 + rcode mod 16) mod 65536)
+    with ((if qr then 1 else 0) * 32768 + opcode mod 16 * 2048 +
+          (if aa then 1 else 0) * 1024 + (if tc then 1 else 0) * 512 +
+          (if rd then 1 else 0) * 256 + (if ra then 1 else 0) * 128 +
+          z mod 8 * 16 + rcode mod 16) by (symmetry; apply N.mod_small; exact H4).
+  apply extract_rcode; assumption.
+Qed.
 
 Lemma flags_roundtrip_helper : forall f,
   word16_to_flags (flags_to_word16 f) = f.
