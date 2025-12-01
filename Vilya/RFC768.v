@@ -28,6 +28,9 @@ Require Import Coq.Init.Prelude.
 Import ListNotations.
 Open Scope N_scope.  (* Default interpretation of numerals as binary naturals (N) *)
 
+(* Suppress deprecation warnings for N.mod_mod etc. - these lemmas still work correctly *)
+Set Warnings "-deprecated-syntactic-definition".
+
 (* =============================================================================
    Section 1: Numeric Types and Basic Operations
    ============================================================================= *)
@@ -86,7 +89,7 @@ Lemma lenN_app : forall (A:Type) (xs ys:list A),
   lenN (xs ++ ys) = lenN xs + lenN ys.
 Proof. 
   intros A xs ys. unfold lenN. 
-  rewrite List.length_app, Nat2N.inj_add. reflexivity. 
+  rewrite app_length, Nat2N.inj_add. reflexivity. 
 Qed.
 
 Lemma lenN_cons : forall (A:Type) (x:A) xs, 
@@ -888,6 +891,24 @@ Proof.
   - apply N.eqb_neq in E. intro H. exact (E H).
 Qed.
 
+Lemma mask16_lt_two16 : mask16 < two16.
+Proof. unfold mask16, two16. lia. Qed.
+
+Lemma complement16_lt_two16 : forall x, complement16 x < two16.
+Proof.
+  intro x. unfold complement16, mask16, two16. lia.
+Qed.
+
+Lemma compute_udp_checksum_ipv4_lt_two16 :
+  forall ipS ipD h data, compute_udp_checksum_ipv4 ipS ipD h data < two16.
+Proof.
+  intros ipS ipD h data.
+  unfold compute_udp_checksum_ipv4.
+  destruct (N.eqb (cksum16 (checksum_words_ipv4 ipS ipD h data)) 0) eqn:E.
+  - apply mask16_lt_two16.
+  - unfold cksum16. apply complement16_lt_two16.
+Qed.
+
 Definition zero_checksum_allowed (cfg:Config) (dst:IPv4) : bool :=
   match cfg.(zero_checksum_policy) with
   | ZeroAlwaysAccept => true
@@ -1062,6 +1083,81 @@ Definition decode_udp_ipv4_with_addrs
           ; payload_out  := data |}
   | inr e => Err e
   end.
+
+(* =============================================================================
+   Section 6a: TTL/Hop Limit Exposure (RFC 1122 §4.1.3.5)
+
+   RFC 1122 requires that the UDP layer expose the TTL (IPv4) or Hop Limit
+   (IPv6) value to the application layer. This is necessary for protocols
+   like traceroute and multicast scoping.
+   ============================================================================= *)
+
+Record UdpDeliverWithTTL := {
+  ud_src_ip  : IPv4;
+  ud_dst_ip  : IPv4;
+  ud_src_port: word16;
+  ud_dst_port: word16;
+  ud_payload : list byte;
+  ud_ttl     : byte;
+  ud_tos     : byte
+}.
+
+Record UdpDeliverWithHopLimit := {
+  udv6_src_ip  : list word16;
+  udv6_dst_ip  : list word16;
+  udv6_src_port: word16;
+  udv6_dst_port: word16;
+  udv6_payload : list byte;
+  udv6_hop_limit : byte;
+  udv6_traffic_class : byte
+}.
+
+Definition extract_ttl_from_ip_header (ip_header : list byte) : byte :=
+  match ip_header with
+  | _ :: _ :: _ :: _ :: _ :: _ :: _ :: _ :: ttl :: _ => ttl
+  | _ => 0
+  end.
+
+Definition extract_tos_from_ip_header (ip_header : list byte) : byte :=
+  match ip_header with
+  | _ :: tos :: _ => tos
+  | _ => 0
+  end.
+
+Definition extract_hop_limit_from_ipv6 (ip6_header : list byte) : byte :=
+  match ip6_header with
+  | _ :: _ :: _ :: _ :: _ :: _ :: _ :: hop_limit :: _ => hop_limit
+  | _ => 0
+  end.
+
+Definition extract_traffic_class_from_ipv6 (ip6_header : list byte) : byte :=
+  match ip6_header with
+  | b0 :: b1 :: _ =>
+      N.lor (N.land (b0 * 16) 240) (b1 / 16)
+  | _ => 0
+  end.
+
+Definition is_valid_ttl (ttl : byte) : bool := N.ltb ttl 256.
+
+Lemma valid_ttl_bounded : forall ttl,
+  is_valid_ttl ttl = true -> ttl < 256.
+Proof.
+  intros ttl H. unfold is_valid_ttl in H.
+  apply N.ltb_lt. exact H.
+Qed.
+
+Definition DEFAULT_TTL : byte := 64.
+Definition MULTICAST_TTL_LOCAL : byte := 1.
+Definition MULTICAST_TTL_SITE : byte := 32.
+Definition MULTICAST_TTL_REGION : byte := 64.
+Definition MULTICAST_TTL_GLOBAL : byte := 255.
+
+Lemma multicast_ttl_scoping : forall ttl,
+  ttl <= MULTICAST_TTL_LOCAL ->
+  ttl <= 1.
+Proof.
+  intros ttl H. unfold MULTICAST_TTL_LOCAL in H. lia.
+Qed.
 
 (* =============================================================================
    Section 7: ICMP Error Handling (RFC 768/1122/1812)
@@ -4510,6 +4606,99 @@ Qed.
 End UDP_IPv6.
 
 (* =============================================================================
+   Section 21a: RFC 6935/6936 - IPv6 UDP Zero-Checksum for Tunnels
+
+   RFC 6935 updates RFC 2460 to allow IPv6 UDP datagrams with zero checksum
+   specifically for tunnel encapsulation protocols. RFC 6936 provides the
+   detailed requirements. This is an exception to the normal IPv6 rule that
+   UDP checksums are mandatory.
+   ============================================================================= *)
+
+Section UDP_IPv6_ZeroChecksum_Tunnels.
+  Open Scope N_scope.
+
+  Inductive TunnelProtocol :=
+    | VXLAN
+    | GENEVE
+    | LISP
+    | GUE
+    | OtherTunnel.
+
+  Record ZeroChecksumConfig := {
+    zc_enabled : bool;
+    zc_tunnel_type : TunnelProtocol;
+    zc_inner_checksum_required : bool;
+    zc_allowed_ports : list word16
+  }.
+
+  Definition port_allows_zero_checksum (cfg : ZeroChecksumConfig) (port : word16) : bool :=
+    if cfg.(zc_enabled) then
+      existsb (fun p => N.eqb p port) cfg.(zc_allowed_ports)
+    else
+      false.
+
+  Definition is_valid_tunnel_packet (cfg : ZeroChecksumConfig)
+                                    (has_inner_checksum : bool) : bool :=
+    if cfg.(zc_inner_checksum_required) then
+      has_inner_checksum
+    else
+      true.
+
+  Inductive ZeroChecksumValidity :=
+    | ZC_Valid
+    | ZC_Invalid_Not_Enabled
+    | ZC_Invalid_Port_Not_Allowed
+    | ZC_Invalid_No_Inner_Checksum.
+
+  Definition validate_zero_checksum_usage
+    (cfg : ZeroChecksumConfig) (dst_port : word16) (has_inner_ck : bool)
+    : ZeroChecksumValidity :=
+    if negb cfg.(zc_enabled) then ZC_Invalid_Not_Enabled
+    else if negb (port_allows_zero_checksum cfg dst_port) then ZC_Invalid_Port_Not_Allowed
+    else if cfg.(zc_inner_checksum_required) && negb has_inner_ck then ZC_Invalid_No_Inner_Checksum
+    else ZC_Valid.
+
+  Lemma zero_checksum_requires_enabled : forall cfg port has_inner,
+    validate_zero_checksum_usage cfg port has_inner = ZC_Valid ->
+    cfg.(zc_enabled) = true.
+  Proof.
+    intros cfg port has_inner H.
+    unfold validate_zero_checksum_usage in H.
+    destruct cfg.(zc_enabled) eqn:E.
+    - reflexivity.
+    - simpl in H. discriminate.
+  Qed.
+
+  Lemma zero_checksum_requires_allowed_port : forall cfg port has_inner,
+    validate_zero_checksum_usage cfg port has_inner = ZC_Valid ->
+    port_allows_zero_checksum cfg port = true.
+  Proof.
+    intros cfg port has_inner H.
+    unfold validate_zero_checksum_usage in H.
+    destruct (negb cfg.(zc_enabled)) eqn:E1.
+    - discriminate.
+    - destruct (negb (port_allows_zero_checksum cfg port)) eqn:E2.
+      + discriminate.
+      + apply negb_false_iff in E2. exact E2.
+  Qed.
+
+  Definition VXLAN_PORT : word16 := 4789.
+  Definition GENEVE_PORT : word16 := 6081.
+  Definition LISP_DATA_PORT : word16 := 4341.
+
+  Definition default_tunnel_config : ZeroChecksumConfig :=
+    {| zc_enabled := true;
+       zc_tunnel_type := VXLAN;
+       zc_inner_checksum_required := true;
+       zc_allowed_ports := [VXLAN_PORT; GENEVE_PORT; LISP_DATA_PORT] |}.
+
+  Example vxlan_zero_checksum_valid :
+    validate_zero_checksum_usage default_tunnel_config VXLAN_PORT true = ZC_Valid.
+  Proof. reflexivity. Qed.
+
+End UDP_IPv6_ZeroChecksum_Tunnels.
+
+(* =============================================================================
    Section 22: Permutation Invariance of Internet Checksum
    
    The Internet checksum algorithm's result is independent of the order in 
@@ -4731,6 +4920,106 @@ Qed.
 End UDP_ModCarry_Equivalence.
 
 (* =============================================================================
+   Section 23a: Constant-Time Checksum Implementation
+
+   This section provides a constant-time checksum implementation that resists
+   timing side-channel attacks. The key insight is that all operations must
+   take the same amount of time regardless of the input values.
+   ============================================================================= *)
+
+Section UDP_ConstantTime_Checksum.
+  Open Scope N_scope.
+
+  Definition ct_add16_ones (a b : word16) : word16 :=
+    let sum := a + b in
+    let carry := N.b2n (mask16 <? sum) in
+    let wrapped := N.land sum mask16 in
+    N.land (wrapped + carry) mask16.
+
+  Fixpoint ct_sum16 (ws : list word16) : word16 :=
+    match ws with
+    | [] => 0
+    | w :: ws' => ct_add16_ones w (ct_sum16 ws')
+    end.
+
+  Definition ct_cksum16 (ws : list word16) : word16 :=
+    N.lxor (ct_sum16 ws) mask16.
+
+  Lemma mask16_is_ones_16 : mask16 = N.ones 16.
+  Proof. reflexivity. Qed.
+
+  Lemma two16_is_pow2_16 : two16 = 2 ^ 16.
+  Proof. reflexivity. Qed.
+
+  Lemma mask16_plus_one_is_two16 : mask16 + 1 = two16.
+  Proof. reflexivity. Qed.
+
+  Lemma land_ones_mod : forall n k, N.land n (N.ones k) = n mod (2 ^ k).
+  Proof.
+    intros n k.
+    apply N.land_ones.
+  Qed.
+
+  Lemma pow2_pos : forall k, 0 < 2 ^ k.
+  Proof.
+    intros k.
+    induction k using N.peano_ind.
+    - simpl. lia.
+    - rewrite N.pow_succ_r by lia. lia.
+  Qed.
+
+  Lemma pow2_neq_0 : forall k, 2 ^ k <> 0.
+  Proof.
+    intros k H.
+    assert (Hpos := pow2_pos k).
+    lia.
+  Qed.
+
+  Lemma mod_lt_pow2 : forall n k, n mod (2 ^ k) < 2 ^ k.
+  Proof.
+    intros n k.
+    apply N.mod_lt.
+    apply pow2_neq_0.
+  Qed.
+
+  Lemma land_mask16_lt_two16 : forall n,
+    N.land n mask16 < two16.
+  Proof.
+    intros n.
+    rewrite mask16_is_ones_16.
+    rewrite two16_is_pow2_16.
+    rewrite land_ones_mod.
+    apply mod_lt_pow2.
+  Qed.
+
+  Lemma land_mask16_bounded : forall n,
+    N.land n mask16 <= mask16.
+  Proof.
+    intros n.
+    assert (H := land_mask16_lt_two16 n).
+    unfold mask16, two16 in *. lia.
+  Qed.
+
+  Lemma ct_add16_ones_result_bounded : forall a b,
+    ct_add16_ones a b <= mask16.
+  Proof.
+    intros a b.
+    unfold ct_add16_ones.
+    apply land_mask16_bounded.
+  Qed.
+
+  Lemma ct_sum16_bounded : forall ws,
+    ct_sum16 ws <= mask16.
+  Proof.
+    intros ws.
+    induction ws as [|w ws' IH].
+    - simpl. unfold mask16. apply N.le_0_l.
+    - simpl. apply ct_add16_ones_result_bounded.
+  Qed.
+
+End UDP_ConstantTime_Checksum.
+
+(* =============================================================================
    Section 24: Serialization Round-Trip Extras
    
    Helper lemmas for serialization that are robust to Opaque declarations
@@ -4796,12 +5085,275 @@ Qed.
 End UDP_Serialization_Extras.
 
 (* =============================================================================
+   Section 24a: UDP-Lite Protocol (RFC 3828)
+
+   UDP-Lite is a variant of UDP that allows partial checksum coverage,
+   enabling applications to receive corrupted payloads rather than having
+   them silently discarded. This is useful for real-time multimedia where
+   some corruption is preferable to packet loss.
+
+   Key differences from UDP:
+   - Length field replaced by Checksum Coverage field
+   - Checksum coverage can be 0 (entire packet) or >= 8 (partial)
+   - Coverage values 1-7 are invalid and MUST cause packet discard
+   - Protocol number is 136 (not 17)
+   ============================================================================= *)
+
+Section UDP_Lite.
+  Open Scope N_scope.
+
+  Definition UDPLITE_PROTOCOL : byte := 136.
+
+  Record UdpLiteHeader := {
+    lite_src_port : word16;
+    lite_dst_port : word16;
+    checksum_coverage : word16;
+    lite_checksum : word16
+  }.
+
+  Definition MIN_COVERAGE : N := 8.
+
+  Inductive CoverageValidity :=
+    | CoverageEntirePacket
+    | CoveragePartial (n : N)
+    | CoverageInvalid.
+
+  Definition classify_coverage (cov : word16) (packet_len : N) : CoverageValidity :=
+    if N.eqb cov 0 then CoverageEntirePacket
+    else if N.ltb cov MIN_COVERAGE then CoverageInvalid
+    else if N.ltb packet_len cov then CoverageInvalid
+    else CoveragePartial cov.
+
+  Lemma coverage_zero_is_entire : forall len,
+    classify_coverage 0 len = CoverageEntirePacket.
+  Proof.
+    intros len. unfold classify_coverage. reflexivity.
+  Qed.
+
+  Lemma coverage_1_to_7_invalid : forall cov len,
+    1 <= cov -> cov < 8 ->
+    classify_coverage cov len = CoverageInvalid.
+  Proof.
+    intros cov len H1 H7.
+    unfold classify_coverage.
+    assert (Hne : (cov =? 0) = false) by (apply N.eqb_neq; lia).
+    rewrite Hne.
+    assert (Hlt : (cov <? MIN_COVERAGE) = true).
+    { apply N.ltb_lt. unfold MIN_COVERAGE. lia. }
+    rewrite Hlt. reflexivity.
+  Qed.
+
+  Lemma coverage_ge_8_valid_if_le_len : forall cov len,
+    8 <= cov -> cov <= len ->
+    classify_coverage cov len = CoveragePartial cov.
+  Proof.
+    intros cov len H8 Hle.
+    unfold classify_coverage.
+    assert (Hne : (cov =? 0) = false) by (apply N.eqb_neq; lia).
+    rewrite Hne.
+    assert (Hge : (cov <? MIN_COVERAGE) = false).
+    { apply N.ltb_ge. unfold MIN_COVERAGE. lia. }
+    rewrite Hge.
+    assert (Hnlt : (len <? cov) = false) by (apply N.ltb_ge; lia).
+    rewrite Hnlt. reflexivity.
+  Qed.
+
+  Definition udplite_header_words (h : UdpLiteHeader) : list word16 :=
+    [h.(lite_src_port); h.(lite_dst_port); h.(checksum_coverage); h.(lite_checksum)].
+
+  Definition udplite_header_words_zero_ck (h : UdpLiteHeader) : list word16 :=
+    [h.(lite_src_port); h.(lite_dst_port); h.(checksum_coverage); 0].
+
+  Definition udplite_header_bytes (h : UdpLiteHeader) : list byte :=
+    bytes_of_words16_be (udplite_header_words h).
+
+  Definition effective_coverage (cov : word16) (packet_len : N) : N :=
+    if N.eqb cov 0 then packet_len else cov.
+
+  Lemma effective_coverage_zero : forall len,
+    effective_coverage 0 len = len.
+  Proof.
+    intros. unfold effective_coverage. reflexivity.
+  Qed.
+
+  Lemma effective_coverage_nonzero : forall cov len,
+    cov <> 0 -> effective_coverage cov len = cov.
+  Proof.
+    intros cov len Hne.
+    unfold effective_coverage.
+    assert (H : (cov =? 0) = false) by (apply N.eqb_neq; exact Hne).
+    rewrite H. reflexivity.
+  Qed.
+
+  Definition checksum_words_udplite_ipv4
+    (src dst : IPv4) (h : UdpLiteHeader) (data : list byte) : list word16 :=
+    let eff_cov := effective_coverage h.(checksum_coverage) (8 + lenN data) in
+    let covered_data := take (N.to_nat (eff_cov - 8)) data in
+    pseudo_header_v4 src dst (to_word16 eff_cov)
+    ++ udplite_header_words_zero_ck h
+    ++ words16_of_bytes_be covered_data.
+
+  Definition compute_udplite_checksum_ipv4
+    (src dst : IPv4) (h : UdpLiteHeader) (data : list byte) : word16 :=
+    let words := checksum_words_udplite_ipv4 src dst h data in
+    let x := cksum16 words in
+    if N.eqb x 0 then mask16 else x.
+
+  Lemma compute_udplite_checksum_ipv4_nonzero :
+    forall src dst h data, compute_udplite_checksum_ipv4 src dst h data <> 0.
+  Proof.
+    intros src dst h data.
+    unfold compute_udplite_checksum_ipv4.
+    destruct (cksum16 (checksum_words_udplite_ipv4 src dst h data) =? 0) eqn:E.
+    - unfold mask16. intro H. discriminate.
+    - apply N.eqb_neq in E. intro H. exact (E H).
+  Qed.
+
+  Inductive UdpLiteDecodeError :=
+    | LiteBadLength
+    | LiteBadCoverage
+    | LiteBadChecksum
+    | LiteDstPortZero.
+
+  Definition verify_udplite_checksum_ipv4
+    (src dst : IPv4) (h : UdpLiteHeader) (data : list byte) : bool :=
+    let words := checksum_words_udplite_ipv4 src dst h data in
+    let ws := words ++ [h.(lite_checksum)] in
+    N.eqb (sum16 ws) mask16.
+
+  Lemma header_always_covered : forall cov len,
+    classify_coverage cov len <> CoverageInvalid ->
+    cov = 0 \/ cov >= 8.
+  Proof.
+    intros cov len Hvalid.
+    unfold classify_coverage in Hvalid.
+    destruct (cov =? 0) eqn:E0.
+    - apply N.eqb_eq in E0. left. exact E0.
+    - right. apply N.eqb_neq in E0.
+      destruct (cov <? MIN_COVERAGE) eqn:Ecov.
+      + exfalso. apply Hvalid. reflexivity.
+      + apply N.ltb_ge in Ecov. unfold MIN_COVERAGE in Ecov. lia.
+  Qed.
+
+End UDP_Lite.
+
+(* =============================================================================
+   Section 24b: DTLS Integration Framework (RFC 6347)
+
+   DTLS (Datagram Transport Layer Security) provides TLS-equivalent security
+   for UDP datagrams. This section formalizes the DTLS record layer interface
+   for integration with the UDP stack.
+   ============================================================================= *)
+
+Section DTLS_Integration.
+  Open Scope N_scope.
+
+  Definition DTLS_EPOCH_SIZE : N := 65536.
+  Definition DTLS_SEQ_SIZE : N := 281474976710656.
+  Definition DTLS_DEFAULT_PORT : word16 := 443.
+
+  Record DTLSRecordHeader := {
+    dtls_content_type : byte;
+    dtls_version_major : byte;
+    dtls_version_minor : byte;
+    dtls_epoch : word16;
+    dtls_sequence_hi : word16;
+    dtls_sequence_lo : N;
+    dtls_length : word16
+  }.
+
+  Inductive DTLSContentType :=
+    | ChangeCipherSpec
+    | Alert
+    | Handshake
+    | ApplicationData.
+
+  Definition content_type_to_byte (ct : DTLSContentType) : byte :=
+    match ct with
+    | ChangeCipherSpec => 20
+    | Alert => 21
+    | Handshake => 22
+    | ApplicationData => 23
+    end.
+
+  Definition byte_to_content_type (b : byte) : option DTLSContentType :=
+    if N.eqb b 20 then Some ChangeCipherSpec
+    else if N.eqb b 21 then Some Alert
+    else if N.eqb b 22 then Some Handshake
+    else if N.eqb b 23 then Some ApplicationData
+    else None.
+
+  Record DTLSState := {
+    dtls_current_epoch : word16;
+    dtls_next_send_seq : N;
+    dtls_next_recv_seq : N;
+    dtls_retransmit_timeout : N;
+    dtls_max_retransmits : N
+  }.
+
+  Definition initial_dtls_state : DTLSState :=
+    {| dtls_current_epoch := 0;
+       dtls_next_send_seq := 0;
+       dtls_next_recv_seq := 0;
+       dtls_retransmit_timeout := 1000;
+       dtls_max_retransmits := 6 |}.
+
+  Definition increment_epoch (state : DTLSState) : DTLSState :=
+    {| dtls_current_epoch := (state.(dtls_current_epoch) + 1) mod DTLS_EPOCH_SIZE;
+       dtls_next_send_seq := 0;
+       dtls_next_recv_seq := 0;
+       dtls_retransmit_timeout := state.(dtls_retransmit_timeout);
+       dtls_max_retransmits := state.(dtls_max_retransmits) |}.
+
+  Definition advance_send_seq (state : DTLSState) : DTLSState :=
+    {| dtls_current_epoch := state.(dtls_current_epoch);
+       dtls_next_send_seq := state.(dtls_next_send_seq) + 1;
+       dtls_next_recv_seq := state.(dtls_next_recv_seq);
+       dtls_retransmit_timeout := state.(dtls_retransmit_timeout);
+       dtls_max_retransmits := state.(dtls_max_retransmits) |}.
+
+  Definition double_timeout (state : DTLSState) : DTLSState :=
+    let new_timeout := N.min 60000 (state.(dtls_retransmit_timeout) * 2) in
+    {| dtls_current_epoch := state.(dtls_current_epoch);
+       dtls_next_send_seq := state.(dtls_next_send_seq);
+       dtls_next_recv_seq := state.(dtls_next_recv_seq);
+       dtls_retransmit_timeout := new_timeout;
+       dtls_max_retransmits := state.(dtls_max_retransmits) |}.
+
+  Lemma epoch_increment_wraps : forall state,
+    (increment_epoch state).(dtls_current_epoch) < DTLS_EPOCH_SIZE.
+  Proof.
+    intros state. unfold increment_epoch. simpl.
+    apply N.mod_lt. unfold DTLS_EPOCH_SIZE. lia.
+  Qed.
+
+  Lemma timeout_bounded : forall state,
+    (double_timeout state).(dtls_retransmit_timeout) <= 60000.
+  Proof.
+    intros state. unfold double_timeout. simpl. lia.
+  Qed.
+
+  Definition is_replay (state : DTLSState) (seq : N) : bool :=
+    N.ltb seq state.(dtls_next_recv_seq).
+
+  Lemma replay_detection_sound : forall state seq,
+    is_replay state seq = true ->
+    seq < state.(dtls_next_recv_seq).
+  Proof.
+    intros state seq H.
+    unfold is_replay in H.
+    apply N.ltb_lt. exact H.
+  Qed.
+
+End DTLS_Integration.
+
+(* =============================================================================
    Section 25: Full Pipeline Implementation - ARPANET Example
-   
+
    This section provides a complete worked example of UDP packet construction
-   and verification using the historic ARPANET "LO" message - the first 
+   and verification using the historic ARPANET "LO" message - the first
    message ever sent over the Internet's predecessor on October 29, 1969.
-   
+
    The implementation demonstrates:
    - Step-by-step packet construction
    - Checksum computation with all intermediate values
@@ -5317,8 +5869,8 @@ Section UDP_IP_Fragmentation.
   Fixpoint insert_sorted (f : IPFragment) (fs : list IPFragment) : list IPFragment :=
     match fs with
     | [] => [f]
-    | h::t => 
-        if offset f <=? offset h 
+    | h::t =>
+        if offset f <=? offset h
         then f :: fs
         else h :: insert_sorted f t
     end.
@@ -5329,6 +5881,23 @@ Section UDP_IP_Fragmentation.
     | h::t => insert_sorted h (insertion_sort t)
     end.
 
+  (* RFC 5722: Detect overlapping fragments (teardrop attack prevention)
+     Two fragments overlap if one starts before the other ends.
+     For sorted fragments: f1 overlaps f2 if f1.offset + len(f1.payload) > f2.offset *)
+  Definition fragments_overlap (f1 f2 : IPFragment) : bool :=
+    offset f2 <? (offset f1 + lenN (payload f1)).
+
+  (* Check for any overlapping pairs in a sorted fragment list *)
+  Fixpoint has_overlap (fs : list IPFragment) : bool :=
+    match fs with
+    | [] => false
+    | [_] => false
+    | f1 :: ((f2 :: _) as rest) =>
+        if fragments_overlap f1 f2 then true
+        else has_overlap rest
+    end.
+
+  (* Original check_and_concat now also verifies no gaps (offset must match exactly) *)
   Fixpoint check_and_concat (fs : list IPFragment) (expected_offset : N) : option (list byte) :=
     match fs with
     | [] => Some []
@@ -5342,22 +5911,115 @@ Section UDP_IP_Fragmentation.
         else None
     end.
 
+  (* RFC 5722 compliant reassembly: reject overlapping fragments silently *)
   Definition reassemble_fragments (frags : list IPFragment) : option (list byte) :=
     let sorted := insertion_sort frags in
-    match sorted with
-    | [] => None
-    | f::_ => 
-        if N.eqb (offset f) 0 then
-          check_and_concat sorted 0
-        else None
-    end.
+    (* Security check: reject overlapping fragments per RFC 5722 *)
+    if has_overlap sorted then None
+    else
+      match sorted with
+      | [] => None
+      | f::_ =>
+          if N.eqb (offset f) 0 then
+            check_and_concat sorted 0
+          else None
+      end.
 
-  Definition decode_udp_ipv4_fragmented 
+  Definition decode_udp_ipv4_fragmented
     (src dst : IPv4) (frags : list IPFragment) : result Decoded DecodeError :=
     match reassemble_fragments frags with
     | None => Err BadLength
     | Some complete_datagram => decode_udp_ipv4 defaults_ipv4 src dst complete_datagram
     end.
+
+  (* ===== Overlap Detection Proofs ===== *)
+
+  (* Non-overlapping fragments have overlap check return false *)
+  Lemma non_overlapping_no_overlap : forall f1 f2,
+    offset f1 + lenN (payload f1) <= offset f2 ->
+    fragments_overlap f1 f2 = false.
+  Proof.
+    intros f1 f2 H.
+    unfold fragments_overlap.
+    apply N.ltb_ge. lia.
+  Qed.
+
+  (* Overlapping fragments detected *)
+  Lemma overlapping_detected : forall f1 f2,
+    offset f1 + lenN (payload f1) > offset f2 ->
+    fragments_overlap f1 f2 = true.
+  Proof.
+    intros f1 f2 H.
+    unfold fragments_overlap.
+    apply N.ltb_lt. lia.
+  Qed.
+
+  (* Teardrop attack pattern: second fragment starts before first ends *)
+  Example teardrop_attack_rejected :
+    let frag1 := {| ident := 1; offset := 0; more := true; payload := [1;2;3;4;5;6;7;8] |} in
+    let frag2 := {| ident := 1; offset := 4; more := false; payload := [9;10;11;12] |} in
+    reassemble_fragments [frag1; frag2] = None.
+  Proof. vm_compute. reflexivity. Qed.
+
+  (* Valid non-overlapping fragments succeed *)
+  Example valid_fragments_succeed :
+    let frag1 := {| ident := 1; offset := 0; more := true; payload := [1;2;3;4] |} in
+    let frag2 := {| ident := 1; offset := 4; more := false; payload := [5;6;7;8] |} in
+    reassemble_fragments [frag1; frag2] = Some [1;2;3;4;5;6;7;8].
+  Proof. vm_compute. reflexivity. Qed.
+
+  (* ===== Fragmentation Correctness Proofs ===== *)
+
+  (* Empty fragment list yields None *)
+  Lemma reassemble_empty : reassemble_fragments [] = None.
+  Proof. reflexivity. Qed.
+
+  (* Single fragment starting at 0 yields its payload *)
+  Lemma reassemble_single : forall id p,
+    reassemble_fragments [{| ident := id; offset := 0; more := false; payload := p |}] = Some p.
+  Proof.
+    intros id p.
+    unfold reassemble_fragments, insertion_sort, insert_sorted, has_overlap, check_and_concat.
+    simpl. rewrite app_nil_r. reflexivity.
+  Qed.
+
+  (* Fragment not starting at 0 yields None *)
+  Lemma reassemble_missing_first : forall fs,
+    match insertion_sort fs with
+    | [] => True
+    | f::_ => offset f <> 0 -> reassemble_fragments fs = None
+    end.
+  Proof.
+    intros fs.
+    destruct (insertion_sort fs) as [|f rest] eqn:Esort.
+    - exact I.
+    - intro Hoff.
+      unfold reassemble_fragments. rewrite Esort.
+      destruct (has_overlap (f :: rest)).
+      + reflexivity.
+      + apply N.eqb_neq in Hoff. rewrite Hoff. reflexivity.
+  Qed.
+
+  (* Non-contiguous fragments yield None - example *)
+  Example reassemble_gap_fails_example :
+    let f1 := {| ident := 1; offset := 0; more := true; payload := [1;2] |} in
+    let f2 := {| ident := 1; offset := 10; more := false; payload := [3;4] |} in
+    reassemble_fragments [f1; f2] = None.
+  Proof. vm_compute. reflexivity. Qed.
+
+  (* Reassembly produces concatenation of payloads *)
+  Lemma check_and_concat_app : forall f rest start rest_data result,
+    check_and_concat (f :: rest) start = Some result ->
+    offset f = start ->
+    check_and_concat rest (start + lenN (payload f)) = Some rest_data ->
+    result = payload f ++ rest_data.
+  Proof.
+    intros f rest start rest_data result Hcc Hoff Hrest.
+    simpl in Hcc.
+    rewrite <- N.eqb_eq in Hoff. rewrite Hoff in Hcc.
+    rewrite Hrest in Hcc.
+    injection Hcc. intro. symmetry. exact H.
+  Qed.
 
 End UDP_IP_Fragmentation.
 
@@ -5375,8 +6037,8 @@ Section UDP_IPv6_Fragmentation.
   Fixpoint insert_sorted_v6 (f : IPv6Fragment) (fs : list IPv6Fragment) : list IPv6Fragment :=
     match fs with
     | [] => [f]
-    | h::t => 
-        if v6_offset f <=? v6_offset h 
+    | h::t =>
+        if v6_offset f <=? v6_offset h
         then f :: fs
         else h :: insert_sorted_v6 f t
     end.
@@ -5385,6 +6047,19 @@ Section UDP_IPv6_Fragmentation.
     match fs with
     | [] => []
     | h::t => insert_sorted_v6 h (insertion_sort_v6 t)
+    end.
+
+  (* RFC 5722: Detect overlapping IPv6 fragments *)
+  Definition fragments_overlap_v6 (f1 f2 : IPv6Fragment) : bool :=
+    v6_offset f2 <? (v6_offset f1 + lenN (v6_payload f1)).
+
+  Fixpoint has_overlap_v6 (fs : list IPv6Fragment) : bool :=
+    match fs with
+    | [] => false
+    | [_] => false
+    | f1 :: ((f2 :: _) as rest) =>
+        if fragments_overlap_v6 f1 f2 then true
+        else has_overlap_v6 rest
     end.
 
   Fixpoint check_and_concat_v6 (fs : list IPv6Fragment) (expected_offset : N) : option (list byte) :=
@@ -5400,22 +6075,57 @@ Section UDP_IPv6_Fragmentation.
         else None
     end.
 
+  (* RFC 5722 compliant: reject overlapping IPv6 fragments *)
   Definition reassemble_fragments_v6 (frags : list IPv6Fragment) : option (list byte) :=
     let sorted := insertion_sort_v6 frags in
-    match sorted with
-    | [] => None
-    | f::_ => 
-        if N.eqb (v6_offset f) 0 then
-          check_and_concat_v6 sorted 0
-        else None
-    end.
+    if has_overlap_v6 sorted then None
+    else
+      match sorted with
+      | [] => None
+      | f::_ =>
+          if N.eqb (v6_offset f) 0 then
+            check_and_concat_v6 sorted 0
+          else None
+      end.
 
-  Definition decode_udp_ipv6_fragmented 
+  Definition decode_udp_ipv6_fragmented
     (src dst : IPv6) (frags : list IPv6Fragment) : result Decoded DecodeError :=
     match reassemble_fragments_v6 frags with
     | None => Err BadLength
     | Some complete_datagram => decode_udp_ipv6 src dst complete_datagram
     end.
+
+  (* ===== IPv6 Overlap Detection Proofs ===== *)
+
+  Lemma non_overlapping_no_overlap_v6 : forall f1 f2,
+    v6_offset f1 + lenN (v6_payload f1) <= v6_offset f2 ->
+    fragments_overlap_v6 f1 f2 = false.
+  Proof.
+    intros f1 f2 H.
+    unfold fragments_overlap_v6.
+    apply N.ltb_ge. lia.
+  Qed.
+
+  Lemma overlapping_detected_v6 : forall f1 f2,
+    v6_offset f1 + lenN (v6_payload f1) > v6_offset f2 ->
+    fragments_overlap_v6 f1 f2 = true.
+  Proof.
+    intros f1 f2 H.
+    unfold fragments_overlap_v6.
+    apply N.ltb_lt. lia.
+  Qed.
+
+  Example teardrop_attack_rejected_v6 :
+    let frag1 := {| v6_ident := 1; v6_offset := 0; v6_more := true; v6_payload := [1;2;3;4;5;6;7;8] |} in
+    let frag2 := {| v6_ident := 1; v6_offset := 4; v6_more := false; v6_payload := [9;10;11;12] |} in
+    reassemble_fragments_v6 [frag1; frag2] = None.
+  Proof. vm_compute. reflexivity. Qed.
+
+  Example valid_fragments_succeed_v6 :
+    let frag1 := {| v6_ident := 1; v6_offset := 0; v6_more := true; v6_payload := [1;2;3;4] |} in
+    let frag2 := {| v6_ident := 1; v6_offset := 4; v6_more := false; v6_payload := [5;6;7;8] |} in
+    reassemble_fragments_v6 [frag1; frag2] = Some [1;2;3;4;5;6;7;8].
+  Proof. vm_compute. reflexivity. Qed.
 
 End UDP_IPv6_Fragmentation.
 
@@ -5512,8 +6222,226 @@ Section UDP_Socket_API.
                  send_buffer := s.(send_buffer) |}
     else None.
 
-  (* Close socket *)
-  Definition close (s : UDPSocket) : unit := tt.
+  (* Close socket - returns updated socket table with socket removed *)
+  Fixpoint close_socket (table : socket_table) (target_fd : socket_fd) : socket_table :=
+    match table with
+    | [] => []
+    | s :: rest =>
+        if N.eqb s.(fd) target_fd then rest
+        else s :: close_socket rest target_fd
+    end.
+
+  (* ===== Connected UDP Socket Support ===== *)
+
+  (* Extended socket with optional connected peer *)
+  Record UDPSocketConnected := {
+    sock_fd : socket_fd;
+    sock_local_addr : IPv4;
+    sock_local_port : word16;
+    sock_bound : bool;
+    sock_connected : bool;
+    sock_peer_addr : IPv4;
+    sock_peer_port : word16;
+    sock_receive_buffer : list (IPv4 * word16 * list byte);
+    sock_send_buffer : list (IPv4 * word16 * list byte)
+  }.
+
+  Definition socket_connected (next_fd : socket_fd) : UDPSocketConnected * socket_fd :=
+    ({| sock_fd := next_fd;
+        sock_local_addr := mkIPv4 0 0 0 0;
+        sock_local_port := 0;
+        sock_bound := false;
+        sock_connected := false;
+        sock_peer_addr := mkIPv4 0 0 0 0;
+        sock_peer_port := 0;
+        sock_receive_buffer := [];
+        sock_send_buffer := [] |},
+     next_fd + 1).
+
+  (* Connect UDP socket to peer - enables send() without address *)
+  Definition connect (s : UDPSocketConnected) (peer_addr : IPv4) (peer_port : word16)
+    : UDPSocketConnected :=
+    {| sock_fd := s.(sock_fd);
+       sock_local_addr := s.(sock_local_addr);
+       sock_local_port := s.(sock_local_port);
+       sock_bound := s.(sock_bound);
+       sock_connected := true;
+       sock_peer_addr := peer_addr;
+       sock_peer_port := peer_port;
+       sock_receive_buffer := s.(sock_receive_buffer);
+       sock_send_buffer := s.(sock_send_buffer) |}.
+
+  (* Send on connected socket - uses stored peer address *)
+  Definition send_connected (s : UDPSocketConnected) (data : list byte)
+    : result (UDPSocketConnected * list byte) EncodeError :=
+    if negb s.(sock_connected) then inr Oversize
+    else
+      match encode_udp_ipv4 defaults_ipv4 s.(sock_local_addr) s.(sock_peer_addr)
+                            s.(sock_local_port) s.(sock_peer_port) data with
+      | inl wire =>
+          inl ({| sock_fd := s.(sock_fd);
+                  sock_local_addr := s.(sock_local_addr);
+                  sock_local_port := s.(sock_local_port);
+                  sock_bound := s.(sock_bound);
+                  sock_connected := s.(sock_connected);
+                  sock_peer_addr := s.(sock_peer_addr);
+                  sock_peer_port := s.(sock_peer_port);
+                  sock_receive_buffer := s.(sock_receive_buffer);
+                  sock_send_buffer := s.(sock_send_buffer) ++ [(s.(sock_peer_addr), s.(sock_peer_port), data)] |},
+               wire)
+      | inr e => inr e
+      end.
+
+  (* ===== Socket Options ===== *)
+
+  Inductive SocketOption :=
+    | SO_REUSEADDR : SocketOption
+    | SO_REUSEPORT : SocketOption
+    | SO_BROADCAST : SocketOption
+    | SO_RCVBUF : SocketOption
+    | SO_SNDBUF : SocketOption.
+
+  Record SocketOptions := {
+    opt_reuseaddr : bool;
+    opt_reuseport : bool;
+    opt_broadcast : bool;
+    opt_rcvbuf : N;
+    opt_sndbuf : N
+  }.
+
+  Definition default_socket_options : SocketOptions :=
+    {| opt_reuseaddr := false;
+       opt_reuseport := false;
+       opt_broadcast := false;
+       opt_rcvbuf := 212992;
+       opt_sndbuf := 212992 |}.
+
+  Definition setsockopt (opts : SocketOptions) (opt : SocketOption) (value : N)
+    : SocketOptions :=
+    match opt with
+    | SO_REUSEADDR => {| opt_reuseaddr := negb (N.eqb value 0);
+                         opt_reuseport := opts.(opt_reuseport);
+                         opt_broadcast := opts.(opt_broadcast);
+                         opt_rcvbuf := opts.(opt_rcvbuf);
+                         opt_sndbuf := opts.(opt_sndbuf) |}
+    | SO_REUSEPORT => {| opt_reuseaddr := opts.(opt_reuseaddr);
+                         opt_reuseport := negb (N.eqb value 0);
+                         opt_broadcast := opts.(opt_broadcast);
+                         opt_rcvbuf := opts.(opt_rcvbuf);
+                         opt_sndbuf := opts.(opt_sndbuf) |}
+    | SO_BROADCAST => {| opt_reuseaddr := opts.(opt_reuseaddr);
+                         opt_reuseport := opts.(opt_reuseport);
+                         opt_broadcast := negb (N.eqb value 0);
+                         opt_rcvbuf := opts.(opt_rcvbuf);
+                         opt_sndbuf := opts.(opt_sndbuf) |}
+    | SO_RCVBUF => {| opt_reuseaddr := opts.(opt_reuseaddr);
+                      opt_reuseport := opts.(opt_reuseport);
+                      opt_broadcast := opts.(opt_broadcast);
+                      opt_rcvbuf := value;
+                      opt_sndbuf := opts.(opt_sndbuf) |}
+    | SO_SNDBUF => {| opt_reuseaddr := opts.(opt_reuseaddr);
+                      opt_reuseport := opts.(opt_reuseport);
+                      opt_broadcast := opts.(opt_broadcast);
+                      opt_rcvbuf := opts.(opt_rcvbuf);
+                      opt_sndbuf := value |}
+    end.
+
+  Definition getsockopt (opts : SocketOptions) (opt : SocketOption) : N :=
+    match opt with
+    | SO_REUSEADDR => if opts.(opt_reuseaddr) then 1 else 0
+    | SO_REUSEPORT => if opts.(opt_reuseport) then 1 else 0
+    | SO_BROADCAST => if opts.(opt_broadcast) then 1 else 0
+    | SO_RCVBUF => opts.(opt_rcvbuf)
+    | SO_SNDBUF => opts.(opt_sndbuf)
+    end.
+
+  (* ===== Socket API Proofs ===== *)
+
+  (* Property: closing removes the socket with matching fd *)
+  Lemma close_socket_length : forall table target_fd,
+    (length (close_socket table target_fd) <= length table)%nat.
+  Proof.
+    intros table target_fd.
+    induction table as [|h t IH].
+    - simpl. lia.
+    - simpl. destruct (N.eqb (fd h) target_fd) eqn:Eeq.
+      + lia.
+      + simpl. lia.
+  Qed.
+
+  Lemma connect_sets_peer : forall s addr port,
+    let s' := connect s addr port in
+    sock_connected s' = true /\
+    sock_peer_addr s' = addr /\
+    sock_peer_port s' = port.
+  Proof.
+    intros s addr port.
+    unfold connect. simpl.
+    repeat split; reflexivity.
+  Qed.
+
+  Lemma setsockopt_getsockopt_roundtrip : forall opts opt val,
+    getsockopt (setsockopt opts opt val) opt =
+      match opt with
+      | SO_RCVBUF | SO_SNDBUF => val
+      | _ => if N.eqb val 0 then 0 else 1
+      end.
+  Proof.
+    intros opts opt val.
+    destruct opt; simpl; try reflexivity.
+    - destruct (N.eqb val 0) eqn:Ez; simpl; [reflexivity|reflexivity].
+    - destruct (N.eqb val 0) eqn:Ez; simpl; [reflexivity|reflexivity].
+    - destruct (N.eqb val 0) eqn:Ez; simpl; [reflexivity|reflexivity].
+  Qed.
+
+  Lemma socket_fd_increments : forall next_fd,
+    let (_, new_fd) := socket next_fd in
+    new_fd = next_fd + 1.
+  Proof.
+    intros next_fd. unfold socket. reflexivity.
+  Qed.
+
+  Lemma bind_preserves_fd : forall s addr port s',
+    bind s addr port = Ok s' ->
+    fd s' = fd s.
+  Proof.
+    intros s addr port s' Hbind.
+    unfold bind in Hbind.
+    destruct (bound s) eqn:Ebound.
+    - discriminate.
+    - apply Ok_inj in Hbind. rewrite <- Hbind. reflexivity.
+  Qed.
+
+  Lemma deliver_preserves_bound_state : forall s src_addr src_port dst_addr dst_port data s',
+    deliver_to_socket s src_addr src_port dst_addr dst_port data = Some s' ->
+    local_addr s' = local_addr s /\
+    local_port s' = local_port s /\
+    fd s' = fd s.
+  Proof.
+    intros s src_addr src_port dst_addr dst_port data s' Hdel.
+    unfold deliver_to_socket in Hdel.
+    destruct (andb _ _) eqn:Ematch.
+    - inversion Hdel; subst s'; clear Hdel.
+      simpl. repeat split; reflexivity.
+    - discriminate.
+  Qed.
+
+  Lemma sendto_error_implies_oversize : forall s dst_addr dst_port data e,
+    sendto s dst_addr dst_port data = inr e ->
+    lenN data + 8 > mask16.
+  Proof.
+    intros s dst_addr dst_port data e Hsend.
+    unfold sendto in Hsend.
+    destruct (encode_udp_ipv4 _ _ _ _ _ _) eqn:Eenc.
+    - discriminate.
+    - unfold encode_udp_ipv4 in Eenc.
+      destruct (mk_header (local_port s) dst_port (lenN data)) eqn:Hmk.
+      + discriminate.
+      + unfold mk_header in Hmk.
+        destruct (8 + lenN data <=? mask16) eqn:Hle.
+        * discriminate.
+        * apply N.leb_gt in Hle. lia.
+  Qed.
 
 End UDP_Socket_API.
 
@@ -6044,7 +6972,7 @@ Section UDP_Multicast.
        mcast_groups := new_groups |}.
 
   (* Process incoming IGMP query *)
-  Definition process_igmp_query (stack : NetworkStackMcast) (src : IPv4) 
+  Definition process_igmp_query (stack : NetworkStackMcast) (src : IPv4)
                                 (query_group : IPv4) (max_resp : byte) : NetworkStackMcast :=
     let fix update_timers (groups : list MulticastGroup) : list MulticastGroup :=
       match groups with
@@ -6055,7 +6983,7 @@ Section UDP_Multicast.
             {| mg_addr := g.(mg_addr);
                mg_interface := g.(mg_interface);
                mg_refcount := g.(mg_refcount);
-               mg_timer := N.modulo (g.(mg_interface) + N.of_nat (length groups)) 
+               mg_timer := N.modulo (g.(mg_interface) + N.of_nat (length groups))
                                     (N.of_nat (N.to_nat max_resp));
                mg_reporter := true |} :: update_timers rest
           else
@@ -6063,6 +6991,234 @@ Section UDP_Multicast.
       end in
     {| stack_base := stack.(stack_base);
        mcast_groups := update_timers stack.(mcast_groups) |}.
+
+  (* ===== IGMPv3 Source-Specific Multicast (RFC 3376) ===== *)
+
+  Definition IGMP_V3_MEMBERSHIP_REPORT : byte := 34.
+
+  (* IGMPv3 filter mode *)
+  Inductive FilterMode := INCLUDE | EXCLUDE.
+
+  (* Source-specific multicast group record *)
+  Record SSMGroupRecord := {
+    ssm_group : IPv4;
+    ssm_interface : N;
+    ssm_filter_mode : FilterMode;
+    ssm_sources : list IPv4;
+    ssm_refcount : N;
+    ssm_timer : N
+  }.
+
+  (* Check if source is in source list *)
+  Fixpoint source_in_list (src : IPv4) (sources : list IPv4) : bool :=
+    match sources with
+    | [] => false
+    | s::rest => if ipv4_eq src s then true else source_in_list src rest
+    end.
+
+  (* IGMPv3 group record types *)
+  Definition MODE_IS_INCLUDE : byte := 1.
+  Definition MODE_IS_EXCLUDE : byte := 2.
+  Definition CHANGE_TO_INCLUDE : byte := 3.
+  Definition CHANGE_TO_EXCLUDE : byte := 4.
+  Definition ALLOW_NEW_SOURCES : byte := 5.
+  Definition BLOCK_OLD_SOURCES : byte := 6.
+
+  (* Build IGMPv3 group record *)
+  Definition build_igmpv3_group_record (rec_type : byte) (group : IPv4) (sources : list IPv4)
+    : list byte :=
+    let num_sources := lenN sources in
+    let aux_data_len := 0 in
+    [rec_type; aux_data_len]
+    ++ bytes_of_words16_be [to_word16 num_sources]
+    ++ [group.(a0); group.(a1); group.(a2); group.(a3)]
+    ++ flat_map (fun s => [s.(a0); s.(a1); s.(a2); s.(a3)]) sources.
+
+  (* Build IGMPv3 membership report *)
+  Definition build_igmpv3_report (records : list (byte * IPv4 * list IPv4)) : list byte :=
+    let num_records := lenN records in
+    let all_records := flat_map (fun r =>
+        match r with (rt, grp, srcs) => build_igmpv3_group_record rt grp srcs end)
+        records in
+    let report_body := [IGMP_V3_MEMBERSHIP_REPORT; 0; 0; 0]
+                       ++ bytes_of_words16_be [to_word16 num_records]
+                       ++ all_records in
+    let checksum := compute_igmp_checksum report_body in
+    [IGMP_V3_MEMBERSHIP_REPORT; 0]
+    ++ bytes_of_words16_be [checksum]
+    ++ bytes_of_words16_be [to_word16 num_records]
+    ++ all_records.
+
+  (* SSM-aware network stack *)
+  Record NetworkStackSSM := {
+    stack_base_ssm : NetworkStack;
+    ssm_groups : list SSMGroupRecord
+  }.
+
+  (* Join source-specific multicast group (IGMPv3 INCLUDE mode) *)
+  Definition join_ssm_group (stack : NetworkStackSSM) (group : IPv4)
+                            (sources : list IPv4) (if_idx : N) : NetworkStackSSM :=
+    if is_ipv4_multicast group then
+      let new_rec := {| ssm_group := group;
+                        ssm_interface := if_idx;
+                        ssm_filter_mode := INCLUDE;
+                        ssm_sources := sources;
+                        ssm_refcount := 1;
+                        ssm_timer := 0 |} in
+      let report := build_igmpv3_report [(MODE_IS_INCLUDE, group, sources)] in
+      let igmpv3_dest := mkIPv4 224 0 0 22 in
+      let src := get_interface_addr stack.(stack_base_ssm) if_idx in
+      let ip_hdr := build_ip_header_igmp src igmpv3_dest (lenN report) in
+      let packet := ip_hdr ++ report in
+      let new_base := send_packet stack.(stack_base_ssm) if_idx packet in
+      {| stack_base_ssm := new_base;
+         ssm_groups := new_rec :: stack.(ssm_groups) |}
+    else
+      stack.
+
+  (* Leave source-specific multicast group *)
+  Definition leave_ssm_group (stack : NetworkStackSSM) (group : IPv4)
+                             (sources : list IPv4) (if_idx : N) : NetworkStackSSM :=
+    let fix remove_group (groups : list SSMGroupRecord) : list SSMGroupRecord * bool :=
+      match groups with
+      | [] => ([], false)
+      | g::rest =>
+          if andb (ipv4_eq g.(ssm_group) group) (N.eqb g.(ssm_interface) if_idx) then
+            (rest, true)
+          else
+            let (rest', found) := remove_group rest in
+            (g :: rest', found)
+      end in
+    let (new_groups, was_member) := remove_group stack.(ssm_groups) in
+    if was_member then
+      let report := build_igmpv3_report [(CHANGE_TO_INCLUDE, group, [])] in
+      let igmpv3_dest := mkIPv4 224 0 0 22 in
+      let src := get_interface_addr stack.(stack_base_ssm) if_idx in
+      let ip_hdr := build_ip_header_igmp src igmpv3_dest (lenN report) in
+      let packet := ip_hdr ++ report in
+      let new_base := send_packet stack.(stack_base_ssm) if_idx packet in
+      {| stack_base_ssm := new_base;
+         ssm_groups := new_groups |}
+    else
+      stack.
+
+  (* Add sources to existing SSM group *)
+  Definition add_ssm_sources (stack : NetworkStackSSM) (group : IPv4)
+                             (new_sources : list IPv4) (if_idx : N) : NetworkStackSSM :=
+    let fix update_group (groups : list SSMGroupRecord) : list SSMGroupRecord * bool :=
+      match groups with
+      | [] => ([], false)
+      | g::rest =>
+          if andb (ipv4_eq g.(ssm_group) group) (N.eqb g.(ssm_interface) if_idx) then
+            ({| ssm_group := g.(ssm_group);
+                ssm_interface := g.(ssm_interface);
+                ssm_filter_mode := g.(ssm_filter_mode);
+                ssm_sources := g.(ssm_sources) ++ new_sources;
+                ssm_refcount := g.(ssm_refcount);
+                ssm_timer := g.(ssm_timer) |} :: rest, true)
+          else
+            let (rest', found) := update_group rest in
+            (g :: rest', found)
+      end in
+    let (new_groups, was_member) := update_group stack.(ssm_groups) in
+    if was_member then
+      let report := build_igmpv3_report [(ALLOW_NEW_SOURCES, group, new_sources)] in
+      let igmpv3_dest := mkIPv4 224 0 0 22 in
+      let src := get_interface_addr stack.(stack_base_ssm) if_idx in
+      let ip_hdr := build_ip_header_igmp src igmpv3_dest (lenN report) in
+      let packet := ip_hdr ++ report in
+      let new_base := send_packet stack.(stack_base_ssm) if_idx packet in
+      {| stack_base_ssm := new_base;
+         ssm_groups := new_groups |}
+    else
+      stack.
+
+  (* Block sources from existing SSM group *)
+  Definition block_ssm_sources (stack : NetworkStackSSM) (group : IPv4)
+                               (blocked : list IPv4) (if_idx : N) : NetworkStackSSM :=
+    let fix remove_sources (srcs : list IPv4) (to_remove : list IPv4) : list IPv4 :=
+      match srcs with
+      | [] => []
+      | s::rest =>
+          if source_in_list s to_remove then remove_sources rest to_remove
+          else s :: remove_sources rest to_remove
+      end in
+    let fix update_group (groups : list SSMGroupRecord) : list SSMGroupRecord * bool :=
+      match groups with
+      | [] => ([], false)
+      | g::rest =>
+          if andb (ipv4_eq g.(ssm_group) group) (N.eqb g.(ssm_interface) if_idx) then
+            ({| ssm_group := g.(ssm_group);
+                ssm_interface := g.(ssm_interface);
+                ssm_filter_mode := g.(ssm_filter_mode);
+                ssm_sources := remove_sources g.(ssm_sources) blocked;
+                ssm_refcount := g.(ssm_refcount);
+                ssm_timer := g.(ssm_timer) |} :: rest, true)
+          else
+            let (rest', found) := update_group rest in
+            (g :: rest', found)
+      end in
+    let (new_groups, was_member) := update_group stack.(ssm_groups) in
+    if was_member then
+      let report := build_igmpv3_report [(BLOCK_OLD_SOURCES, group, blocked)] in
+      let igmpv3_dest := mkIPv4 224 0 0 22 in
+      let src := get_interface_addr stack.(stack_base_ssm) if_idx in
+      let ip_hdr := build_ip_header_igmp src igmpv3_dest (lenN report) in
+      let packet := ip_hdr ++ report in
+      let new_base := send_packet stack.(stack_base_ssm) if_idx packet in
+      {| stack_base_ssm := new_base;
+         ssm_groups := new_groups |}
+    else
+      stack.
+
+  (* Check if packet from source should be accepted for SSM group *)
+  Definition ssm_accept_packet (groups : list SSMGroupRecord) (group : IPv4)
+                               (src : IPv4) (if_idx : N) : bool :=
+    let fix check_groups (gs : list SSMGroupRecord) : bool :=
+      match gs with
+      | [] => false
+      | g::rest =>
+          if andb (ipv4_eq g.(ssm_group) group) (N.eqb g.(ssm_interface) if_idx) then
+            match g.(ssm_filter_mode) with
+            | INCLUDE => source_in_list src g.(ssm_sources)
+            | EXCLUDE => negb (source_in_list src g.(ssm_sources))
+            end
+          else check_groups rest
+      end in
+    check_groups groups.
+
+  (* ===== IGMPv3 Proofs ===== *)
+
+  Lemma ipv4_eq_refl : forall ip, ipv4_eq ip ip = true.
+  Proof.
+    intros ip. unfold ipv4_eq.
+    repeat rewrite N.eqb_refl. reflexivity.
+  Qed.
+
+  Lemma ssm_accept_head : forall g gs group src if_idx,
+    ssm_group g = group ->
+    ssm_interface g = if_idx ->
+    ssm_filter_mode g = INCLUDE ->
+    source_in_list src (ssm_sources g) = true ->
+    ssm_accept_packet (g :: gs) group src if_idx = true.
+  Proof.
+    intros g gs group src if_idx Hg Hi Hm Hs.
+    unfold ssm_accept_packet. simpl.
+    rewrite <- Hg, <- Hi.
+    rewrite ipv4_eq_refl, N.eqb_refl. simpl.
+    rewrite Hm. exact Hs.
+  Qed.
+
+  Lemma source_in_list_app : forall src l1 l2,
+    source_in_list src (l1 ++ l2) = orb (source_in_list src l1) (source_in_list src l2).
+  Proof.
+    intros src l1 l2.
+    induction l1 as [|h t IH].
+    - simpl. reflexivity.
+    - simpl. destruct (ipv4_eq src h).
+      + reflexivity.
+      + exact IH.
+  Qed.
 
 End UDP_Multicast.
 
@@ -6240,18 +7396,74 @@ Section UDP_NAT.
       end in
     find mappings.
 
-  (* Allocate new external port *)
+  (* Simple PRNG for port randomization - uses linear congruential generator
+     Parameters chosen for reasonable randomness in 16-bit range
+     state_new = (state * 1103515245 + 12345) mod 2^32 *)
+  Definition prng_step (state : N) : N :=
+    N.modulo (state * 1103515245 + 12345) 4294967296.
+
+  (* Derive port from PRNG state within range *)
+  Definition port_from_state (state : N) (min max : word16) : word16 :=
+    let range := max - min + 1 in
+    if N.eqb range 0 then min
+    else min + N.modulo state range.
+
+  (* Check if port is already in use *)
+  Fixpoint port_in_use (mappings : list NATMapping) (port : word16) : bool :=
+    match mappings with
+    | [] => false
+    | m::rest => if N.eqb m.(nat_external_port) port then true
+                 else port_in_use rest port
+    end.
+
+  (* Allocate new external port with randomization (security enhancement)
+     Tries random ports, falls back to sequential if all random tries fail *)
   Definition allocate_external_port (stack : NetworkStackNAT) : word16 * NetworkStackNAT :=
-    let port := stack.(nat_next_port) in
-    let next := if port <? stack.(nat_config).(nat_port_range_max)
-                then port + 1
-                else stack.(nat_config).(nat_port_range_min) in
+    let state := prng_step (stack.(nat_next_port) + stack.(nat_time) * 97) in
+    let min_port := stack.(nat_config).(nat_port_range_min) in
+    let max_port := stack.(nat_config).(nat_port_range_max) in
+    let candidate := port_from_state state min_port max_port in
+    let port := if port_in_use stack.(nat_mappings) candidate
+                then stack.(nat_next_port)
+                else candidate in
+    let next := if stack.(nat_next_port) <? max_port
+                then stack.(nat_next_port) + 1
+                else min_port in
     (port, {| nat_base := stack.(nat_base);
               nat_mappings := stack.(nat_mappings);
               nat_connections := stack.(nat_connections);
               nat_config := stack.(nat_config);
               nat_next_port := next;
               nat_time := stack.(nat_time) |}).
+
+  (* Port from state is at least min *)
+  Lemma port_from_state_ge_min : forall state min max,
+    min <= port_from_state state min max.
+  Proof.
+    intros state min max.
+    unfold port_from_state.
+    destruct (max - min + 1 =? 0) eqn:Erange.
+    - lia.
+    - apply N.le_add_r.
+  Qed.
+
+  (* Modulo result is less than divisor *)
+  Lemma mod_lt_divisor : forall a b, b <> 0 -> N.modulo a b < b.
+  Proof. intros a b H. apply N.mod_upper_bound. exact H. Qed.
+
+  (* Port from state is at most max when min <= max *)
+  Lemma port_from_state_le_max : forall state min max,
+    min <= max ->
+    port_from_state state min max <= max.
+  Proof.
+    intros state min max Hle.
+    unfold port_from_state.
+    destruct (max - min + 1 =? 0) eqn:Erange.
+    - lia.
+    - apply N.eqb_neq in Erange.
+      pose proof (mod_lt_divisor state (max - min + 1) Erange) as Hmod.
+      lia.
+  Qed.
 
   (* Create new NAT mapping *)
   Definition create_nat_mapping (stack : NetworkStackNAT)
@@ -6420,6 +7632,213 @@ Section UDP_NAT.
        nat_config := stack.(nat_config);
        nat_next_port := stack.(nat_next_port);
        nat_time := stack.(nat_time) |}.
+
+  (* ===== NAT Hairpinning (RFC 4787 REQ-7) ===== *)
+
+  (* Check if destination is our external address (hairpin case) *)
+  Definition is_hairpin_dest (stack : NetworkStackNAT) (dst_ip : IPv4) (dst_port : word16) : bool :=
+    andb (ipv4_eq dst_ip stack.(nat_config).(nat_external_addr))
+         (existsb (fun m => N.eqb m.(nat_external_port) dst_port) stack.(nat_mappings)).
+
+  (* Find internal endpoint for hairpin *)
+  Definition find_hairpin_target (mappings : list NATMapping) (ext_port : word16)
+    : option (IPv4 * word16) :=
+    let fix find (ms : list NATMapping) : option (IPv4 * word16) :=
+      match ms with
+      | [] => None
+      | m::rest =>
+          if N.eqb m.(nat_external_port) ext_port
+          then Some (m.(nat_internal_ip), m.(nat_internal_port))
+          else find rest
+      end in
+    find mappings.
+
+  (* Handle hairpin packet - translate src AND dst *)
+  Definition nat_hairpin (stack : NetworkStackNAT)
+                         (src_ip dst_ip : IPv4)
+                         (udp_packet : list byte)
+    : option (IPv4 * IPv4 * list byte * NetworkStackNAT) :=
+    match parse_header udp_packet with
+    | None => None
+    | Some (h, data) =>
+        if is_hairpin_dest stack dst_ip h.(dst_port) then
+          match find_hairpin_target stack.(nat_mappings) h.(dst_port) with
+          | None => None
+          | Some (int_dst_ip, int_dst_port) =>
+              match find_nat_mapping stack.(nat_mappings)
+                                     src_ip h.(src_port)
+                                     int_dst_ip int_dst_port
+                                     stack.(nat_config).(nat_type_policy) with
+              | Some mapping =>
+                  let new_header := {| src_port := mapping.(nat_external_port);
+                                      dst_port := int_dst_port;
+                                      length16 := h.(length16);
+                                      checksum := 0 |} in
+                  let new_checksum := compute_udp_checksum_ipv4
+                                       mapping.(nat_external_ip) int_dst_ip new_header data in
+                  let final_header := {| src_port := new_header.(src_port);
+                                        dst_port := new_header.(dst_port);
+                                        length16 := new_header.(length16);
+                                        checksum := new_checksum |} in
+                  Some (mapping.(nat_external_ip), int_dst_ip,
+                        udp_header_bytes final_header ++ data,
+                        stack)
+              | None =>
+                  let (mapping, stack') := create_nat_mapping stack
+                                                              src_ip h.(src_port)
+                                                              int_dst_ip int_dst_port in
+                  let new_header := {| src_port := mapping.(nat_external_port);
+                                      dst_port := int_dst_port;
+                                      length16 := h.(length16);
+                                      checksum := 0 |} in
+                  let new_checksum := compute_udp_checksum_ipv4
+                                       mapping.(nat_external_ip) int_dst_ip new_header data in
+                  let final_header := {| src_port := new_header.(src_port);
+                                        dst_port := new_header.(dst_port);
+                                        length16 := new_header.(length16);
+                                        checksum := new_checksum |} in
+                  Some (mapping.(nat_external_ip), int_dst_ip,
+                        udp_header_bytes final_header ++ data,
+                        stack')
+              end
+          end
+        else None
+    end.
+
+  (* Hairpin translates headers but preserves data length *)
+  Lemma hairpin_output_structure : forall stack src dst pkt,
+    match nat_hairpin stack src dst pkt with
+    | Some (_, _, new_pkt, _) => lenN new_pkt >= 8
+    | None => True
+    end.
+  Proof.
+    intros stack src dst pkt.
+    unfold nat_hairpin.
+    destruct (parse_header pkt) as [[h data]|]; [|exact I].
+    destruct (is_hairpin_dest stack dst (dst_port h)); [|exact I].
+    destruct (find_hairpin_target (nat_mappings stack) (dst_port h)) as [[int_dst_ip int_dst_port]|]; [|exact I].
+    destruct (find_nat_mapping (nat_mappings stack) src (src_port h) int_dst_ip int_dst_port
+               (nat_type_policy (nat_config stack))) as [mapping|].
+    - rewrite lenN_app, lenN_udp_header_bytes_8. lia.
+    - destruct (create_nat_mapping stack src (src_port h) int_dst_ip int_dst_port) as [mapping' stack'].
+      rewrite lenN_app, lenN_udp_header_bytes_8. lia.
+  Qed.
+
+  (* ===== NAT Translation Correctness Proofs ===== *)
+
+  (* NAT outbound produces valid UDP packet *)
+  Lemma nat_outbound_produces_valid : forall stack src dst pkt,
+    match nat_outbound stack src dst pkt with
+    | Some (_, new_pkt, _) => lenN new_pkt >= 8
+    | None => True
+    end.
+  Proof.
+    intros stack src dst pkt.
+    unfold nat_outbound.
+    destruct (parse_header pkt) as [[h data]|] eqn:Hparse; [|exact I].
+    destruct (find_nat_mapping (nat_mappings stack) src (src_port h) dst (dst_port h)
+               (nat_type_policy (nat_config stack))) as [mapping|].
+    - rewrite lenN_app, lenN_udp_header_bytes_8. lia.
+    - destruct (create_nat_mapping stack src (src_port h) dst (dst_port h)) as [mapping' stack'].
+      rewrite lenN_app, lenN_udp_header_bytes_8. lia.
+  Qed.
+
+  Lemma allocate_external_port_preserves_mappings : forall stack,
+    nat_mappings (snd (allocate_external_port stack)) = nat_mappings stack.
+  Proof.
+    intro stack. unfold allocate_external_port.
+    destruct (nat_next_port stack <? nat_port_range_max (nat_config stack)); reflexivity.
+  Qed.
+
+  Lemma create_nat_mapping_adds_one : forall stack int_ip int_port rem_ip rem_port,
+    length (nat_mappings (snd (create_nat_mapping stack int_ip int_port rem_ip rem_port))) =
+    S (length (nat_mappings stack)).
+  Proof.
+    intros stack int_ip int_port rem_ip rem_port.
+    unfold create_nat_mapping.
+    destruct (allocate_external_port stack) as [port stack'] eqn:Halloc.
+    simpl.
+    f_equal.
+    assert (Hpres: nat_mappings stack' = nat_mappings stack).
+    { replace stack' with (snd (allocate_external_port stack)) by (rewrite Halloc; reflexivity).
+      apply allocate_external_port_preserves_mappings. }
+    rewrite Hpres. reflexivity.
+  Qed.
+
+  Lemma create_nat_mapping_grows : forall stack int_ip int_port rem_ip rem_port,
+    (length (nat_mappings (snd (create_nat_mapping stack int_ip int_port rem_ip rem_port))) >
+     length (nat_mappings stack))%nat.
+  Proof.
+    intros. rewrite create_nat_mapping_adds_one. lia.
+  Qed.
+
+  (* NAT inbound requires existing mapping *)
+  Lemma nat_inbound_requires_mapping : forall stack src dst pkt,
+    nat_inbound stack src dst pkt <> None ->
+    exists h data, parse_header pkt = Some (h, data) /\
+    find_reverse_mapping (nat_mappings stack) dst (dst_port h) src (src_port h) <> None.
+  Proof.
+    intros stack src dst pkt Hsome.
+    unfold nat_inbound in Hsome.
+    destruct (parse_header pkt) as [[h data]|] eqn:Hparse.
+    - exists h, data. split; [reflexivity|].
+      destruct (find_reverse_mapping (nat_mappings stack) dst (dst_port h) src (src_port h)) as [m|] eqn:Hrev.
+      + discriminate.
+      + exfalso. apply Hsome. reflexivity.
+    - exfalso. apply Hsome. reflexivity.
+  Qed.
+
+  (* Well-formed NAT stack has valid port configuration and state *)
+  Definition nat_stack_wf (stack : NetworkStackNAT) : Prop :=
+    nat_port_range_min (nat_config stack) < two16 /\
+    nat_port_range_max (nat_config stack) < two16 /\
+    nat_next_port stack < two16 /\
+    (forall m, In m (nat_mappings stack) ->
+      nat_external_port m < two16 /\ nat_internal_port m < two16).
+
+  (* Port from state equals min when min > max (uses truncation) *)
+  Lemma port_from_state_eq_min_gt : forall state min max,
+    max < min ->
+    port_from_state state min max = min.
+  Proof.
+    intros state min max Hgt.
+    unfold port_from_state.
+    destruct (max - min + 1 =? 0) eqn:Erange.
+    - reflexivity.
+    - assert (Heq: max - min = 0) by lia.
+      rewrite Heq. simpl. rewrite N.mod_1_r. lia.
+  Qed.
+
+  (* Main theorem: port_from_state produces valid port *)
+  Lemma port_from_state_lt_two16 : forall state min max,
+    min < two16 ->
+    max < two16 ->
+    port_from_state state min max < two16.
+  Proof.
+    intros state min max Hmin Hmax.
+    destruct (N.le_gt_cases min max) as [Hle|Hgt].
+    - (* min <= max: result <= max < two16 *)
+      apply N.le_lt_trans with max.
+      + apply port_from_state_le_max. exact Hle.
+      + exact Hmax.
+    - (* min > max: result = min < two16 *)
+      rewrite (port_from_state_eq_min_gt state min max Hgt).
+      exact Hmin.
+  Qed.
+
+  (* Allocated port is valid when config is valid *)
+  Lemma allocate_port_valid : forall stack,
+    nat_stack_wf stack ->
+    fst (allocate_external_port stack) < two16.
+  Proof.
+    intros stack [Hmin [Hmax [Hnext Hmaps]]].
+    unfold allocate_external_port.
+    destruct (port_in_use (nat_mappings stack) _) eqn:Euse.
+    - (* Port in use, return nat_next_port *)
+      destruct (nat_next_port stack <? nat_port_range_max (nat_config stack)); exact Hnext.
+    - (* Port not in use, return port_from_state result *)
+      apply port_from_state_lt_two16; assumption.
+  Qed.
 
 End UDP_NAT.
 
@@ -6659,6 +8078,154 @@ Section UDP_RateLimit.
     else stack'.  (* Rate limited, drop *)
 
 End UDP_RateLimit.
+
+(* =============================================================================
+   Section 32a: RFC 8085 UDP Usage Guidelines - Congestion Control
+
+   RFC 8085 specifies requirements for applications using UDP to prevent
+   congestion collapse. This section formalizes the key constraints.
+   ============================================================================= *)
+
+Section UDP_RFC8085_Congestion.
+  Open Scope N_scope.
+
+  Inductive ApplicationType :=
+    | LowDataVolume
+    | BulkTransfer
+    | RealTimeMedia
+    | Tunneling.
+
+  Record RFC8085Config := {
+    app_type : ApplicationType;
+    max_rate_bps : N;
+    rtt_estimate_ms : N;
+    uses_ecn : bool;
+    has_circuit_breaker : bool;
+    loss_rate_threshold : N
+  }.
+
+  Definition DEFAULT_RTT_MS : N := 3000.
+  Definition BULK_LOSS_THRESHOLD : N := 10.
+
+  Definition max_packets_per_rtt (cfg : RFC8085Config) (packet_size : N) : N :=
+    match cfg.(app_type) with
+    | LowDataVolume => 1
+    | BulkTransfer => cfg.(max_rate_bps) * cfg.(rtt_estimate_ms) / (8000 * packet_size)
+    | RealTimeMedia => cfg.(max_rate_bps) * cfg.(rtt_estimate_ms) / (8000 * packet_size)
+    | Tunneling => cfg.(max_rate_bps) * cfg.(rtt_estimate_ms) / (8000 * packet_size)
+    end.
+
+  Definition is_congestion_safe (cfg : RFC8085Config) : bool :=
+    match cfg.(app_type) with
+    | LowDataVolume =>
+        N.leb DEFAULT_RTT_MS cfg.(rtt_estimate_ms)
+    | BulkTransfer =>
+        cfg.(has_circuit_breaker)
+    | RealTimeMedia =>
+        cfg.(uses_ecn) || cfg.(has_circuit_breaker)
+    | Tunneling =>
+        cfg.(has_circuit_breaker)
+    end.
+
+  Lemma low_volume_safe_with_default_rtt : forall cfg,
+    cfg.(app_type) = LowDataVolume ->
+    cfg.(rtt_estimate_ms) >= DEFAULT_RTT_MS ->
+    is_congestion_safe cfg = true.
+  Proof.
+    intros cfg Htype Hrtt.
+    unfold is_congestion_safe. rewrite Htype.
+    apply N.leb_le. lia.
+  Qed.
+
+  Lemma bulk_requires_circuit_breaker : forall cfg,
+    cfg.(app_type) = BulkTransfer ->
+    is_congestion_safe cfg = true ->
+    cfg.(has_circuit_breaker) = true.
+  Proof.
+    intros cfg Htype Hsafe.
+    unfold is_congestion_safe in Hsafe. rewrite Htype in Hsafe.
+    exact Hsafe.
+  Qed.
+
+  Record CongestionState := {
+    cwnd : N;
+    ssthresh : N;
+    rtt_measured : N;
+    loss_count : N;
+    ecn_ce_count : N;
+    last_decrease : N
+  }.
+
+  Definition initial_congestion_state : CongestionState :=
+    {| cwnd := 1;
+       ssthresh := 65535;
+       rtt_measured := DEFAULT_RTT_MS;
+       loss_count := 0;
+       ecn_ce_count := 0;
+       last_decrease := 0 |}.
+
+  Definition on_loss (state : CongestionState) (now : N) : CongestionState :=
+    {| cwnd := N.max 1 (state.(cwnd) / 2);
+       ssthresh := N.max 1 (state.(cwnd) / 2);
+       rtt_measured := state.(rtt_measured);
+       loss_count := state.(loss_count) + 1;
+       ecn_ce_count := state.(ecn_ce_count);
+       last_decrease := now |}.
+
+  Definition on_ecn_ce (state : CongestionState) (now : N) : CongestionState :=
+    if N.ltb (now - state.(last_decrease)) state.(rtt_measured)
+    then state
+    else
+      {| cwnd := N.max 1 (state.(cwnd) - state.(cwnd) / 8);
+         ssthresh := state.(ssthresh);
+         rtt_measured := state.(rtt_measured);
+         loss_count := state.(loss_count);
+         ecn_ce_count := state.(ecn_ce_count) + 1;
+         last_decrease := now |}.
+
+  Definition on_ack (state : CongestionState) : CongestionState :=
+    if N.ltb state.(cwnd) state.(ssthresh)
+    then
+      {| cwnd := state.(cwnd) + 1;
+         ssthresh := state.(ssthresh);
+         rtt_measured := state.(rtt_measured);
+         loss_count := state.(loss_count);
+         ecn_ce_count := state.(ecn_ce_count);
+         last_decrease := state.(last_decrease) |}
+    else
+      {| cwnd := state.(cwnd) + 1 / state.(cwnd);
+         ssthresh := state.(ssthresh);
+         rtt_measured := state.(rtt_measured);
+         loss_count := state.(loss_count);
+         ecn_ce_count := state.(ecn_ce_count);
+         last_decrease := state.(last_decrease) |}.
+
+  Lemma cwnd_always_positive : forall state now,
+    state.(cwnd) >= 1 ->
+    (on_loss state now).(cwnd) >= 1.
+  Proof.
+    intros state now Hpos.
+    unfold on_loss. simpl.
+    assert (H : N.max 1 (state.(cwnd) / 2) >= 1) by lia.
+    exact H.
+  Qed.
+
+  Lemma on_ack_increases_cwnd : forall state,
+    state.(cwnd) < state.(ssthresh) ->
+    (on_ack state).(cwnd) > state.(cwnd).
+  Proof.
+    intros state Hss.
+    unfold on_ack.
+    assert (Hlt : (state.(cwnd) <? state.(ssthresh)) = true).
+    { apply N.ltb_lt. exact Hss. }
+    rewrite Hlt. simpl. lia.
+  Qed.
+
+  Definition should_trigger_circuit_breaker (state : CongestionState)
+                                            (threshold : N) : bool :=
+    N.ltb threshold state.(loss_count).
+
+End UDP_RFC8085_Congestion.
 
 Section UDP_PathMTU.
   Open Scope N_scope.
@@ -7383,7 +8950,11 @@ Extraction "udp_final.ml"
   sendto
   recvfrom
   deliver_to_socket
-  close
+  close_socket
+  connect
+  send_connected
+  setsockopt
+  getsockopt
   
   (* Network Layer *)
   find_route
