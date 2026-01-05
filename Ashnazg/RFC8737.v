@@ -8,7 +8,7 @@
    Author: Charles C Norton
    Date: September 1, 2025
    
-   "Every hidden path of proving he laid bare before them."
+   "And much of the strength and will of Sauron passed into that One Ring."
    
    ============================================================================= *)
 
@@ -30,6 +30,7 @@ Open Scope N_scope.
 Definition byte := N.
 Definition word16 := N.
 Definition word32 := N.
+Definition OID := list N.
 
 (* ALPN Protocol ID *)
 Definition ACME_TLS_ALPN_PROTOCOL : list byte := 

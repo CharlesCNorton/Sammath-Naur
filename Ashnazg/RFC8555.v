@@ -8,7 +8,7 @@
    Author: Charles C Norton
    Date: September 1, 2025
    
-   "'See how trust might be renewed, as the moon renews her face.'"
+   "Into that Ring he poured his cruelty, his malice, and his will to dominate all life."
    
    ============================================================================= *)
 

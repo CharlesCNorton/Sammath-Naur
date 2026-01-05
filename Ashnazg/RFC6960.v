@@ -8,7 +8,7 @@
    Author: Charles C Norton
    Date: September 1, 2025
    
-   "And he showed unto them the making of chains of trust unbreakable."
+   "And Celebrimbor wrought on alone, for he trusted in what he had learned."
    
    ============================================================================= *)
 
